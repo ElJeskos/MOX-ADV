@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional, Tuple
@@ -368,6 +369,12 @@ class ApprovalExecutionService:
             return ExecutionOutcome(
                 ExecutionStatus.BLOCKED,
                 error.reason_code,
+                None,
+            )
+        except sqlite3.Error:
+            return ExecutionOutcome(
+                ExecutionStatus.BLOCKED,
+                "CONTROL_STATE_UNAVAILABLE",
                 None,
             )
 
