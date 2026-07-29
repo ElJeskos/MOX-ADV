@@ -125,12 +125,10 @@ class Gate0AnomalyPolicy:
         pacing_limit = Decimal(100) + Decimal(self.thresholds["pacing_ahead_percent"])
         if pacing is not None and pacing >= pacing_limit:
             found.append(Anomaly("PACING_AHEAD", str(pacing), str(pacing_limit), True))
-        self._at_or_above(
-            found,
-            "HIGH_CPA",
-            metrics.get("cpa_rub"),
-            self.thresholds["high_cpa_rub"],
-        )
+        high_cpa = _decimal(metrics.get("cpa_rub"))
+        high_cpa_limit = Decimal(self.thresholds["high_cpa_rub"])
+        if high_cpa is not None and high_cpa > high_cpa_limit:
+            found.append(Anomaly("HIGH_CPA", str(high_cpa), str(high_cpa_limit), True))
         self._absolute_at_or_above(
             found,
             "CPC_DEVIATION_FROM_BASELINE",

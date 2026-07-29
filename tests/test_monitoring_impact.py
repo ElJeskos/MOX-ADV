@@ -142,7 +142,6 @@ class MonitoringSchedulerTests(unittest.TestCase):
                 replace_metric(base, "budget_utilization_percent", "90"),
             ),
             ("PACING_AHEAD", replace_metric(base, "pacing_percent", "120")),
-            ("HIGH_CPA", replace_metric(base, "cpa_rub", "1000")),
             (
                 "CPC_DEVIATION_FROM_BASELINE",
                 replace_deviation(base, "cpc_rub", "30"),
@@ -164,6 +163,22 @@ class MonitoringSchedulerTests(unittest.TestCase):
                     reason_code,
                     {anomaly.reason_code for anomaly in outcome.anomalies},
                 )
+
+    def test_high_cpa_is_strictly_above_the_gate0_target(self) -> None:
+        policy, fixture = linked_input()
+        base = build_snapshot(fixture, policy)
+        at = datetime(2026, 7, 28, 0, 15, tzinfo=timezone.utc)
+        exact_target = replace_metric(base, "cpa_rub", "1000")
+        above_target = replace_metric(base, "cpa_rub", "1000.001")
+
+        self.assertNotIn(
+            "HIGH_CPA",
+            self._reason_codes(self._poll_once(exact_target, at)),
+        )
+        self.assertIn(
+            "HIGH_CPA",
+            self._reason_codes(self._poll_once(above_target, at)),
+        )
 
     def test_strict_and_relative_thresholds_do_not_fire_below_boundary(self) -> None:
         policy, fixture = linked_input()
@@ -258,6 +273,13 @@ class MonitoringSchedulerTests(unittest.TestCase):
             cutoff,
             previous_snapshot=previous,
         )
+        under_no_conversion = replace_metric(
+            no_conversion,
+            "cost_micros",
+            1_999_999_999,
+        )
+        one_conversion = replace_metric(no_conversion, "goal_visits", 1)
+        under_growth = replace_metric(growth, "cost_micros", 5_499_999_999)
 
         self.assertNotIn(
             "NO_CONVERSION_SPEND",
@@ -275,6 +297,24 @@ class MonitoringSchedulerTests(unittest.TestCase):
             "SPEND_GROWTH_WITHOUT_CONVERSION",
             self._reason_codes(at_growth),
         )
+        self.assertNotIn(
+            "NO_CONVERSION_SPEND",
+            self._reason_codes(self._poll_once(under_no_conversion, cutoff)),
+        )
+        self.assertNotIn(
+            "NO_CONVERSION_SPEND",
+            self._reason_codes(self._poll_once(one_conversion, cutoff)),
+        )
+        self.assertNotIn(
+            "SPEND_GROWTH_WITHOUT_CONVERSION",
+            self._reason_codes(
+                self._poll_once(
+                    under_growth,
+                    cutoff,
+                    previous_snapshot=previous,
+                )
+            ),
+        )
 
     def test_goal_cessation_and_source_mismatch_use_exact_gate0_boundaries(
         self,
@@ -285,6 +325,24 @@ class MonitoringSchedulerTests(unittest.TestCase):
         records = list(freshen(base, at).records)
         records[-1] = replace(records[-1], visits=50, goal_visits=0)
         cessation = reseal(freshen(base, at), records=tuple(records))
+        insufficient_visits_records = list(cessation.records)
+        insufficient_visits_records[-1] = replace(
+            insufficient_visits_records[-1],
+            visits=49,
+        )
+        insufficient_visits = reseal(
+            cessation,
+            records=tuple(insufficient_visits_records),
+        )
+        still_converting_records = list(cessation.records)
+        still_converting_records[-1] = replace(
+            still_converting_records[-1],
+            goal_visits=1,
+        )
+        still_converting = reseal(
+            cessation,
+            records=tuple(still_converting_records),
+        )
         just_before = self._poll_once(
             cessation,
             at - timedelta(microseconds=1),
@@ -300,6 +358,14 @@ class MonitoringSchedulerTests(unittest.TestCase):
 
         self.assertNotIn("GOAL_CESSATION", self._reason_codes(just_before))
         self.assertIn("GOAL_CESSATION", self._reason_codes(at_boundary))
+        self.assertNotIn(
+            "GOAL_CESSATION",
+            self._reason_codes(self._poll_once(insufficient_visits, at)),
+        )
+        self.assertNotIn(
+            "GOAL_CESSATION",
+            self._reason_codes(self._poll_once(still_converting, at)),
+        )
         self.assertIn(
             "SOURCE_MISMATCH", self._reason_codes(self._poll_once(mismatch, at))
         )
@@ -398,7 +464,11 @@ class MonitoringSchedulerTests(unittest.TestCase):
 
     def test_same_snapshot_and_reason_reuses_one_active_proposal(self) -> None:
         policy, fixture = linked_input()
-        snapshot = build_snapshot(fixture, policy)
+        snapshot = replace_metric(
+            build_snapshot(fixture, policy),
+            "cpa_rub",
+            "1000.001",
+        )
         clock = VirtualClock(datetime(2026, 7, 28, 0, 15, tzinfo=timezone.utc))
         source = FixtureReadSource(MonitoringRead(snapshot=snapshot))
 
@@ -476,7 +546,11 @@ class MonitoringSchedulerTests(unittest.TestCase):
             last_applied_write_at=last_write,
         )
         boundary = last_write + timedelta(hours=72)
-        boundary_snapshot = freshen(build_snapshot(fixture, policy), boundary)
+        boundary_snapshot = replace_metric(
+            freshen(build_snapshot(fixture, policy), boundary),
+            "cpa_rub",
+            "1000.001",
+        )
         at_boundary = self._poll_once(
             boundary_snapshot,
             boundary,
