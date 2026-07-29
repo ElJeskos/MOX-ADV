@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple
 
 from mox_adv.commands import OptimizationAction
+from mox_adv.interrupt_state import (
+    DurableInterruptState,
+    InterruptStateUnavailable,
+    kill_switch_scopes,
+)
 
 
 class ControlRejected(RuntimeError):
@@ -366,6 +371,13 @@ class DurableControlState:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.interrupts = DurableInterruptState(path)
+        except InterruptStateUnavailable as error:
+            raise ControlRejected(
+                "KILL_SWITCH_UNAVAILABLE",
+                "durable interrupt state is unavailable.",
+            ) from error
         self._initialize()
         with suppress(OSError):
             os.chmod(self.path, 0o600)
@@ -810,11 +822,10 @@ class DurableControlState:
         now: datetime,
         sender: Callable[[], None],
     ) -> Tuple[ExecutionStatus, ExecutionRecord]:
-        """Serialize final authority checks and the first adapter send."""
+        """Commit authority and IN_FLIGHT before the immediate dispatch boundary."""
 
         now_text = _utc_text(now)
         connection = self._connect()
-        sender_started = False
         try:
             connection.execute("BEGIN IMMEDIATE")
             unresolved = connection.execute(
@@ -836,7 +847,12 @@ class DurableControlState:
                 outcome = (
                     ExecutionStatus.ALREADY_PROCESSED
                     if record.status
-                    in {ExecutionStatus.APPLIED, ExecutionStatus.NO_CHANGE}
+                    in {
+                        ExecutionStatus.RESERVED,
+                        ExecutionStatus.IN_FLIGHT,
+                        ExecutionStatus.APPLIED,
+                        ExecutionStatus.NO_CHANGE,
+                    }
                     else record.status
                 )
                 return outcome, record
@@ -853,6 +869,7 @@ class DurableControlState:
                     "KILL_SWITCH_ACTIVE",
                     "durable kill switch blocks the unsent command.",
                 )
+            self._require_no_interrupt(prepared.scope)
             approval_row = connection.execute(
                 "SELECT * FROM approvals WHERE approval_id = ?",
                 (approval.approval_id,),
@@ -900,35 +917,26 @@ class DurableControlState:
                     "APPROVAL_ALREADY_USED",
                     "approval was reserved concurrently.",
                 )
-            connection.execute(
+            moved = connection.execute(
                 "UPDATE executions SET status = 'IN_FLIGHT', updated_at = ? "
                 "WHERE execution_key = ? AND status = 'RESERVED'",
                 (now_text, prepared.execution_key()),
             )
+            if moved.rowcount != 1:
+                raise ControlRejected(
+                    "EXECUTION_CONFLICT",
+                    "execution reservation is no longer available.",
+                )
             if self._kill_switch_active_in_connection(connection, prepared.scope):
                 raise ControlRejected(
                     "KILL_SWITCH_ACTIVE",
                     "durable kill switch blocks the unsent command.",
                 )
-            try:
-                sender_started = True
-                sender()
-            except BaseException:
-                connection.execute(
-                    "UPDATE approvals SET used_at = ?, execution_key = ? "
-                    "WHERE approval_id = ? AND reserved_execution_key = ?",
-                    (
-                        now_text,
-                        prepared.execution_key(),
-                        approval.approval_id,
-                        prepared.execution_key(),
-                    ),
-                )
-                connection.commit()
-                raise
-            connection.execute(
+            self._require_no_interrupt(prepared.scope)
+            consumed = connection.execute(
                 "UPDATE approvals SET used_at = ?, execution_key = ? "
-                "WHERE approval_id = ? AND reserved_execution_key = ?",
+                "WHERE approval_id = ? AND reserved_execution_key = ? "
+                "AND used_at IS NULL",
                 (
                     now_text,
                     prepared.execution_key(),
@@ -936,12 +944,17 @@ class DurableControlState:
                     prepared.execution_key(),
                 ),
             )
+            if consumed.rowcount != 1:
+                raise ControlRejected(
+                    "APPROVAL_NOT_APPLICABLE",
+                    "approval reservation cannot be consumed.",
+                )
             row = connection.execute(
                 "SELECT * FROM executions WHERE execution_key = ?",
                 (prepared.execution_key(),),
             ).fetchone()
             connection.commit()
-            return ExecutionStatus.IN_FLIGHT, self._execution_from_row(row)
+            record = self._execution_from_row(row)
         except ControlRejected:
             if connection.in_transaction:
                 connection.rollback()
@@ -953,12 +966,30 @@ class DurableControlState:
                 "CONTROL_STATE_UNAVAILABLE",
                 "durable authority state is unavailable.",
             ) from error
-        except BaseException:
-            if connection.in_transaction and not sender_started:
-                connection.rollback()
-            raise
         finally:
             connection.close()
+
+        try:
+            self._require_no_interrupt(prepared.scope)
+            with self._connect() as dispatch_connection:
+                if self._kill_switch_active_in_connection(
+                    dispatch_connection,
+                    prepared.scope,
+                ):
+                    raise ControlRejected(
+                        "KILL_SWITCH_ACTIVE",
+                        "durable kill switch blocks the unsent command.",
+                    )
+        except ControlRejected as error:
+            self.finish_execution(
+                prepared.execution_key(),
+                ExecutionStatus.BLOCKED,
+                error.reason_code,
+                now,
+            )
+            raise
+        sender()
+        return ExecutionStatus.IN_FLIGHT, record
 
     def mark_approval_used(
         self,
@@ -1057,6 +1088,13 @@ class DurableControlState:
         now: datetime,
     ) -> None:
         self._validate_incident_control(scope, reason, principal)
+        try:
+            self.interrupts.engage("kill_switch", scope, reason, now)
+        except InterruptStateUnavailable as error:
+            raise ControlRejected(
+                "KILL_SWITCH_UNAVAILABLE",
+                "durable interrupt state is unavailable.",
+            ) from error
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO kill_switches "
@@ -1086,6 +1124,13 @@ class DurableControlState:
                 "principal = excluded.principal, updated_at = excluded.updated_at",
                 (scope, reason, principal.identity, _utc_text(now)),
             )
+        try:
+            self.interrupts.release("kill_switch", scope, reason, now)
+        except InterruptStateUnavailable as error:
+            raise ControlRejected(
+                "KILL_SWITCH_UNAVAILABLE",
+                "durable interrupt state remains engaged.",
+            ) from error
 
     def kill_switch_active(self, scope: str) -> bool:
         with self._connect() as connection:
@@ -1097,6 +1142,7 @@ class DurableControlState:
 
     def any_kill_switch_active(self, scope: TrustedScope) -> bool:
         try:
+            self._require_no_interrupt(scope)
             with self._connect() as connection:
                 return self._kill_switch_active_in_connection(connection, scope)
         except sqlite3.Error as error:
@@ -1104,6 +1150,27 @@ class DurableControlState:
                 "KILL_SWITCH_UNAVAILABLE",
                 "durable kill-switch state is unavailable.",
             ) from error
+
+    def _require_no_interrupt(self, scope: TrustedScope) -> None:
+        try:
+            active = self.interrupts.any_active(
+                "kill_switch",
+                kill_switch_scopes(
+                    scope.organization,
+                    scope.connection,
+                    scope.campaign,
+                ),
+            )
+        except InterruptStateUnavailable as error:
+            raise ControlRejected(
+                "KILL_SWITCH_UNAVAILABLE",
+                "durable interrupt state is unavailable.",
+            ) from error
+        if active:
+            raise ControlRejected(
+                "KILL_SWITCH_ACTIVE",
+                "durable kill switch blocks the unsent command.",
+            )
 
     @staticmethod
     def _kill_switch_active_in_connection(

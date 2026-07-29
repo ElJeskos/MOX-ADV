@@ -7,8 +7,12 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional, Protocol, Sequence
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
+from mox_adv.autonomy import (
+    DurableMandateAuthority,
+    MacOSKeychainMandateSigner,
+)
 from mox_adv.contracts import RunOutcome
 from mox_adv.control_state import (
     ControlRejected,
@@ -95,6 +99,21 @@ def build_parser() -> argparse.ArgumentParser:
     kill_switch_release.add_argument("--scope", required=True)
     kill_switch_release.add_argument("--reason", required=True)
     kill_switch_release.add_argument("--reauth", action="store_true", required=True)
+    mandate_parser = subparsers.add_parser(
+        "mandate",
+        help="manage immutable signed bounded-autonomy authority",
+    )
+    mandate_operations = mandate_parser.add_subparsers(
+        dest="operation",
+        required=True,
+    )
+    mandate_issue = mandate_operations.add_parser("issue")
+    mandate_issue.add_argument("--file", required=True, type=Path)
+    mandate_activate = mandate_operations.add_parser("activate")
+    mandate_activate.add_argument("--mandate-id", required=True)
+    mandate_revoke = mandate_operations.add_parser("revoke")
+    mandate_revoke.add_argument("--mandate-id", required=True)
+    mandate_revoke.add_argument("--reason", required=True)
     return parser
 
 
@@ -122,10 +141,35 @@ def _approval_duration(value: str) -> timedelta:
     return timedelta(minutes=15)
 
 
+def _load_gate0_policy() -> Mapping[str, Any]:
+    policy_path = Path(__file__).resolve().parents[2] / "config" / "gate0-policy.json"
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ControlRejected(
+            "CONTROL_STATE_UNAVAILABLE",
+            "Gate 0 policy cannot be loaded.",
+        ) from error
+    if not isinstance(policy, Mapping):
+        raise ControlRejected("INVALID_INPUT", "Gate 0 policy must be an object.")
+    return policy
+
+
+def _default_mandate_authority(
+    state: DurableControlState,
+) -> DurableMandateAuthority:
+    return DurableMandateAuthority(
+        state.path,
+        _load_gate0_policy(),
+        MacOSKeychainMandateSigner(),
+    )
+
+
 def main(
     argv: Optional[Sequence[str]] = None,
     *,
     control_state: Optional[DurableControlState] = None,
+    mandate_authority: Optional[DurableMandateAuthority] = None,
     authenticator: Optional[PrincipalAuthenticator] = None,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> int:
@@ -150,7 +194,7 @@ def main(
             policy_path=arguments.policy,
         )
         return _print_outcome(outcome)
-    if arguments.command in {"approval", "kill-switch"}:
+    if arguments.command in {"approval", "kill-switch", "mandate"}:
         state = _default_control_state() if control_state is None else control_state
         identity = (
             MacOSLocalPrincipalAuthenticator()
@@ -215,6 +259,49 @@ def main(
                 )
                 print("Kill switch released: " + arguments.scope)
                 return 0
+            if arguments.command == "mandate":
+                authority = (
+                    _default_mandate_authority(state)
+                    if mandate_authority is None
+                    else mandate_authority
+                )
+                principal = identity.authenticate()
+                now = clock()
+                if arguments.operation == "issue":
+                    try:
+                        payload = json.loads(arguments.file.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError) as error:
+                        raise ControlRejected(
+                            "INVALID_INPUT",
+                            "Mandate file must contain valid JSON.",
+                        ) from error
+                    if not isinstance(payload, Mapping):
+                        raise ControlRejected(
+                            "INVALID_INPUT",
+                            "Mandate file must contain one object.",
+                        )
+                    mandate = authority.issue(payload, principal, now)
+                    print("Mandate: " + mandate.mandate_id)
+                    print("Canonical hash: " + mandate.canonical_hash)
+                    print("Expiry: " + str(mandate.canonical["expiry"]))
+                    return 0
+                if arguments.operation == "activate":
+                    mandate = authority.activate(
+                        arguments.mandate_id,
+                        principal,
+                        now,
+                    )
+                    print("Mandate activated: " + mandate.mandate_id)
+                    return 0
+                if arguments.operation == "revoke":
+                    mandate = authority.revoke(
+                        arguments.mandate_id,
+                        arguments.reason,
+                        principal,
+                        now,
+                    )
+                    print("Mandate revoked: " + mandate.mandate_id)
+                    return 0
         except ControlRejected as error:
             print(str(error), file=sys.stderr)
             return 2

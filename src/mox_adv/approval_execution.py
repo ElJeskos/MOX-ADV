@@ -372,6 +372,16 @@ class ApprovalExecutionService:
                 None,
             )
         except sqlite3.Error:
+            try:
+                execution = self.state.load_execution(request.execution_key)
+            except (ControlRejected, sqlite3.Error):
+                execution = None
+            if execution is not None and execution.status == ExecutionStatus.IN_FLIGHT:
+                return ExecutionOutcome(
+                    ExecutionStatus.UNKNOWN_RESULT,
+                    "CONTROL_STATE_UNAVAILABLE",
+                    self.adapter.readback(execution.target_key),
+                )
             return ExecutionOutcome(
                 ExecutionStatus.BLOCKED,
                 "CONTROL_STATE_UNAVAILABLE",

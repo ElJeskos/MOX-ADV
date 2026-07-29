@@ -419,6 +419,36 @@ class ApprovalExecutionTests(unittest.TestCase):
             set(results).issubset({"APPLIED", "ALREADY_PROCESSED", "IN_FLIGHT"})
         )
 
+    def test_post_send_state_failure_keeps_in_flight_for_reconciliation(self) -> None:
+        adapter = FakeWriteAdapter(
+            initial_state={self.prepared.target_key(): self.prepared.current_value}
+        )
+        service = self.service(adapter)
+        with mock.patch.object(
+            self.state,
+            "finish_execution",
+            side_effect=sqlite3.OperationalError("post-send state failure"),
+        ):
+            result = service.execute(make_request(self.prepared))
+
+        self.assertEqual("UNKNOWN_RESULT", result.status)
+        self.assertEqual(1, adapter.write_calls)
+        self.assertEqual(
+            "IN_FLIGHT",
+            DurableControlState(self.database)
+            .load_execution(self.prepared.execution_key())
+            .status,
+        )
+
+        reconciled = ApprovalExecutionService(
+            load_policy(),
+            DurableControlState(self.database),
+            adapter,
+            clock=lambda: NOW,
+        ).reconcile(self.prepared.execution_key())
+        self.assertEqual("APPLIED", reconciled.status)
+        self.assertEqual(1, adapter.write_calls)
+
     def test_timeout_reconciliation_distinguishes_failed_and_unknown(self) -> None:
         for readback, expected in (
             (self.prepared.current_value, "FAILED"),
