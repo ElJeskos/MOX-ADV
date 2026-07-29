@@ -44,10 +44,26 @@ The bootstrap validates and clears that channel without putting the credential i
 The local fixture does not use the credential for an external request.
 The container image does not include the macOS `security` utility.
 
+## Read-only OBSERVE run
+
+Run the linked Direct and Metrika fixture through the read-only connector contracts.
+
+```shell
+.venv/bin/mox-adv observe-fixture --run-id observe-001
+```
+
+The command validates trusted scope, period, UTC, attribution, freshness, watermarks, daily grain, and the snapshot fingerprint.
+It creates the same three immutable run artifacts and includes the complete `IntegratedPerformanceSnapshot` in `result.json`.
+The Russian report shows the calculated metrics and comparability status.
+The OBSERVE path does not create a write-proposal and does not invoke an executor.
+The fixture contains a read-only baseline, but its campaign identifier is removed before the decision-facing snapshot is created.
+The internal `read_observe_snapshot` path accepts the versioned Direct Reports, Direct campaign-state, and Metrika read connectors with an explicit trusted scope.
+Those connectors expose typed read queries and share no write-capable transport operation.
+
 ## Safety boundary
 
-The only executable profile in this slice is `SIMULATION`.
-The fixture connector reads a local closed-schema JSON object with at most 1,000 records.
+Both executable fixture paths use simulated evidence and have no external write egress.
+The bootstrap and OBSERVE fixture connectors read local closed-schema JSON objects with at most 1,000 records.
 The policy and executor both fail closed if an operation would gain external write egress.
 No test contacts Yandex or another external service.
 

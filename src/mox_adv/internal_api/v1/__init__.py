@@ -10,7 +10,15 @@ from mox_adv.contracts import (
     AuditVerification,
     ConnectedFixture,
     Decision,
+    DirectCampaignStateBlock,
+    DirectCampaignStateReadQuery,
+    DirectReportBlock,
+    DirectReportsReadQuery,
     ExecutionResult,
+    IntegratedPerformanceSnapshot,
+    IntegratedSnapshotDraft,
+    MetrikaReportBlock,
+    MetrikaReportReadQuery,
     NormalizedSnapshot,
     PersistedEvent,
     PolicyDecision,
@@ -24,6 +32,24 @@ class ConnectorsAPI(Protocol):
         context: RunContext,
         raw_fixture: Mapping[str, Any],
     ) -> ConnectedFixture: ...
+
+
+class DirectReportsReadAPI(Protocol):
+    def read_report(self, query: DirectReportsReadQuery) -> DirectReportBlock: ...
+
+
+class DirectCampaignStateReadAPI(Protocol):
+    def read_campaign_state(
+        self,
+        query: DirectCampaignStateReadQuery,
+    ) -> DirectCampaignStateBlock: ...
+
+
+class MetrikaReportReadAPI(Protocol):
+    def read_metrika_report(
+        self,
+        query: MetrikaReportReadQuery,
+    ) -> MetrikaReportBlock: ...
 
 
 class NormalizationAPI(Protocol):
@@ -40,6 +66,13 @@ class AnalyticsAPI(Protocol):
         context: RunContext,
         snapshot: NormalizedSnapshot,
     ) -> AnalyticsSummary: ...
+
+
+class IntegratedAnalyticsAPI(Protocol):
+    def calculate(
+        self,
+        snapshot: IntegratedSnapshotDraft,
+    ) -> IntegratedPerformanceSnapshot: ...
 
 
 class DecisionAPI(Protocol):
