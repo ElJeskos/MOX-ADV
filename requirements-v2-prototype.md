@@ -30,8 +30,7 @@ LLM не получает OAuth-токены, произвольные endpoint 
 В прототип входят:
 
 - Один локальный оператор.
-- Один тестовый аккаунт Яндекса для тестовых интеграций.
-- Один разрешённый рекламный аккаунт и одна разрешённая пилотная кампания для real read и controlled pilot.
+- Один выделенный allowlisted production-аккаунт Яндекс Директа и одна пилотная кампания для интеграционных проверок, real read и controlled write.
 - Один поддерживаемый тип кампании.
 - Одна группа, одна ключевая фраза или один поддерживаемый таргетинг и одно объявление.
 - Один активный и один заранее подготовленный резервный вариант объявления.
@@ -41,7 +40,7 @@ LLM не получает OAuth-токены, произвольные endpoint 
 - Одна тестовая страница для проверки события цели.
 - Исходные локальные fixtures.
 - Чтение реальной статистики при наличии доступа.
-- Создание полной структуры кампании в подтверждённом тестовом контуре.
+- Создание полной структуры кампании в controlled production pilot.
 - Разовый и плановый read-only анализ.
 - Режимы `OBSERVE`, `RECOMMEND` и `APPROVAL_REQUIRED`.
 - Одно вручную подтверждённое обратимое действие на allowlisted пилотной кампании.
@@ -51,6 +50,7 @@ LLM не получает OAuth-токены, произвольные endpoint 
 Фактические типы созданных объектов сохраняются из ответа API.
 До реализации фиксируется матрица `тип объекта → версия API → среда → методы`.
 Она устраняет конфликт между исходным `v5` и управлением ЕПК через `v501`.
+Все чтения, интеграционные проверки и изменяющие вызовы Direct выполняются через production API внутри controlled pilot.
 
 В прототип не входят:
 
@@ -59,7 +59,7 @@ LLM не получает OAuth-токены, произвольные endpoint 
 - Автономные production-write без подтверждения каждого proposal.
 - Долговременные Mandate и отдельные криптографические человеческие роли.
 - Изменение production-сайта и существующих production-целей.
-- Автоматическое удаление production-объектов.
+- Удаление существующих или чужих production-объектов; cleanup разрешён только для объектов, созданных текущим тестовым запуском.
 - Генерация изображений или видео.
 - Веб-интерфейс.
 - CRM, коллтрекинг и офлайн-конверсии.
@@ -86,7 +86,7 @@ LLM не получает OAuth-токены, произвольные endpoint 
 | Результат impact evaluation | Имя поля и машинное кодирование четырёх вариантов: сохранить, откатить, скорректировать или передать человеку |
 | Данные LLM | Разрешённые поля и срок хранения артефактов |
 
-Пороговые значения из локальных fixtures применяются только к этим fixtures и sandbox-проверкам.
+Пороговые значения из локальных fixtures применяются только к этим fixtures и simulation-проверкам.
 Они не разрешают production-write и не считаются рекомендациями для реальной рекламы.
 Реализация операций Direct не начинается до выбора поддерживаемого типа кампании и заполнения нормативной API-матрицы.
 Любой production-write блокируется, пока остальные решения этой таблицы не утверждены.
@@ -97,8 +97,8 @@ LLM не получает OAuth-токены, произвольные endpoint 
 
 - Сбор, уточнение и документирование функциональных и нефункциональных требований.
 - Своевременную подачу заявок и выполнение действий, необходимых для получения доступа к API Яндекса.
-- Подготовку всех тестовых аккаунтов, приложений, счётчиков, целей, клиентов и кампаний.
-- Оформление и настройку всех необходимых тестовых доступов, включая OAuth-доступы.
+- Подготовку production pilot, приложений, тестовых счётчиков, целей, клиентов и кампаний.
+- Оформление и настройку всех необходимых доступов, включая OAuth-доступы.
 - Разработку прототипа.
 - Автоматическое и ручное тестирование.
 - Установку, запуск и эксплуатацию.
@@ -162,7 +162,7 @@ ID требования: `FR-002`
 
 Ответ:
 
-Исходная матрица сохраняется как тест connector и executor:
+Исходная матрица сохраняется как интеграционная проверка connector и executor в controlled production pilot:
 
 - `Campaigns`: `add`, `get`, `update`, `suspend`, `resume`, `archive`, `unarchive`, `delete`.
 - `AdGroups`: `add`, `get`, `update`, `delete`.
@@ -181,7 +181,7 @@ ID требования: `FR-002`
 `Keywords.update` проверяет `UserParam1`.
 `KeywordBids.set` проверяет `SearchBid`.
 `Ads.update` проверяет установку подготовленных заголовка и текста.
-Архивирование и удаление разрешены только для объектов текущего тестового запуска.
+Архивирование и удаление разрешены только для объектов, созданных текущим тестовым запуском в allowlisted production-аккаунте.
 Интеграционный тест соблюдает допустимую последовательность состояний Яндекса.
 До теста сохраняется исходное состояние.
 После теста исходное состояние восстанавливается либо удаляются только созданные текущим запуском объекты.
@@ -191,7 +191,8 @@ ID требования: `FR-002`
 API-матрица фиксирует фактические host, version, object type, service, method, environment и verification status.
 Заполненная API-матрица является нормативным приложением к настоящему документу.
 Неизвестная комбинация блокируется до запроса.
-В production разрешается только метод одного заранее утверждённого controlled-pilot действия.
+В обычном пользовательском run разрешается только метод одного заранее утверждённого controlled-pilot действия.
+Остальные методы исходной интеграционной матрицы разрешены только отдельному подтверждённому integration run и только для объектов, созданных этим run.
 
 #### 1.3 Какие метрики должен рассчитывать прототип?
 
@@ -328,11 +329,11 @@ Policy независимо проверяет schema, evidence, scope, freshnes
 - Resume разрешён для `SUSPENDED`, не менее `3` конверсий и CPA не выше `1 000 ₽`.
 
 `KEEP` и `REQUEST_HUMAN_HELP` не отправляют write-запрос.
-Эти числовые условия проверяют fixtures и sandbox, но не разрешают controlled-pilot write.
+Эти числовые условия проверяют fixtures и simulation, но не разрешают controlled-pilot write.
 Для controlled pilot применяются отдельно утверждённые числовые limits и monetary cap из раздела обязательных решений.
 Недопустимое действие блокируется.
 За один run допускается не более одного утверждённого высокоуровневого действия.
-Тестовое `create_campaign` считается одним высокоуровневым действием и может выполнить несколько внутренних sandbox-write под одним `execution_key`.
+`create_campaign` считается одним высокоуровневым действием и может выполнить несколько внутренних production-write под одним `execution_key`.
 Изменение snapshot, target, diff или fingerprint требует нового proposal и подтверждения.
 Идемпотентный ключ решения включает organization, connection, campaign, период, модель атрибуции, метрики, состояние кампании, текущие бюджет, ставку и вариант объявления, версию конфигурации объекта и policy version.
 Execution key дополнительно включает утверждённый proposal, целевое действие, целевое значение и expected object version.
@@ -358,10 +359,10 @@ LLM предлагает высокоуровневое действие, а с�
 `CampaignDraftV1` содержит бизнес-цель и основную конверсию, поддерживаемый тип кампании и стратегию, географию и расписание, бюджет и предельные ограничения, группы, ключевые и минус-фразы либо аудитории, тексты и заголовки, ссылки и UTM, allowlisted посадочную страницу и ссылки на подготовленные медиа-материалы.
 Детерминированный слой проверяет schema, ограничения полей, домен посадочной страницы, запрещённые формулировки, дубликаты и полноту.
 После проверки `CampaignDraftV1` orchestrator сохраняет immutable proposal высокоуровневого `create_campaign` с точным diff.
-В тестовом контуре `create_campaign` после approval выполняет одну бизнес-транзакцию: dry-run, создание кампании, группы, объявления и ключевой фразы, сохранение ID и фактических типов, отправку на модерацию, отслеживание статуса, запуск и полный readback.
-Тот же тестовый lifecycle проверяет настройку, изменение бюджета и допустимых параметров, pause и resume.
+В controlled production pilot `create_campaign` после approval выполняет одну бизнес-транзакцию: dry-run, создание кампании, группы, объявления и ключевой фразы, сохранение ID и фактических типов, отправку на модерацию, отслеживание статуса, запуск и полный readback.
+Тот же lifecycle проверяет настройку, изменение бюджета и допустимых параметров, pause и resume.
 Повтор с тем же `execution_key` не создаёт вторую структуру.
-Создание новой production-кампании в текущем прототипе не требуется; controlled pilot выполняется на одной заранее разрешённой кампании.
+Созданная в allowlisted production-аккаунте кампания становится единственной пилотной кампанией текущего прототипа.
 
 `GoalCandidate` содержит название, событие, место на сайте, тип, бизнес-смысл, приоритет и признаки дубликата.
 Детерминированный слой проверяет schema, разрешённый тестовый counter и отсутствие конфликтов.
@@ -457,8 +458,8 @@ ID требования: `NFR-001`
 
 Ответ:
 
-Прототип последовательно обрабатывает по одному активному account, campaign, counter и goal в каждом разрешённом контуре.
-Тестовая структура и пилотная кампания не используются одновременно в одном run.
+Прототип последовательно обрабатывает один allowlisted production-account, одну пилотную campaign, один counter и один goal.
+В одном run обрабатывается только одна пилотная структура.
 Основная и кандидатная цели имеют разные идентификаторы и состояния.
 Fixture содержит не более `1 000` записей.
 `decision_run` имеет тайм-аут `10` минут, а его локальная часть — `5` минут.
@@ -497,10 +498,10 @@ LLM получает только очищенные allowlisted поля с о�
 Используются логические профили:
 
 - `DIRECT_PROD_READ` для production Reports без management connector и write-egress.
-- `DIRECT_SANDBOX_WRITE` только для `api-sandbox.direct.yandex.com`, allowlisted методов и тестовых объектов.
 - `METRIKA_TEST_WRITE` с минимальными `metrika:read` и `metrika:write` для одного тестового counter.
 - `TEST_SITE_PUBLISH` только для тестовой страницы без права публикации на production-сайт.
-- `DIRECT_PILOT_WRITE`, отключённый по умолчанию и ограниченный одной allowlisted кампанией, одним действием и platform-side spend cap.
+- `DIRECT_PILOT_WRITE`, отключённый по умолчанию и ограниченный одним allowlisted production-аккаунтом, подтверждённым действием и platform-side spend cap.
+До создания кампании профиль разрешает только утверждённый `create_campaign`, а после создания — только write по сохранённым идентификаторам пилотной структуры текущего run.
 
 Профили используют раздельные credentials из Keychain.
 Read-only процесс не получает write credential.
@@ -508,7 +509,8 @@ Pilot credential получает только executor непосредстве
 
 Сеть разрешена только к endpoint из нормативной API-матрицы, `api-metrika.yandex.net`, `mc.yandex.ru` и одному model provider.
 Разрешён только `https` на порту `443`.
-Redirects и production-delete запрещены.
+Redirects и удаление существующих или чужих production-объектов запрещены.
+Удаление как часть integration cleanup разрешено только для объектов, созданных текущим run.
 Временный секрет удаляется после run.
 Локальные временные файлы удаляются не позднее двадцати четырёх часов после демонстрации.
 Все OAuth-токены прототипа удаляются из Keychain или отзываются после фиксации заказчиком итогового статуса приёмки.
@@ -577,7 +579,7 @@ Fixtures проверяют расчёты и safety policy, но не треб�
 | Case | Given / fixture | When | Then / ожидаемый status или reason | Timeout | Evidence |
 | --- | --- | --- | --- | --- | --- |
 | 01 | Одна комбинация object type, environment и method | Проверяется нормативная API-матрица | Известная комбинация разрешена; неизвестная получает `BLOCKED` до HTTP | До начала integration run | Нормативная API-матрица, `events.jsonl` |
-| 02 | Один метод исходной Direct-матрицы | Метод выполняется в допустимой sandbox-последовательности | Отдельный success и readback либо проверка удаления | `integration_test_run ≤ 20 минут` | `result.json`, `events.jsonl` |
+| 02 | Один метод исходной Direct-матрицы, подтверждённый integration run и, кроме методов `add`, объект этого run | Метод выполняется в допустимой последовательности controlled production pilot | Отдельный success и readback либо проверка удаления | `integration_test_run ≤ 20 минут` | `result.json`, `events.jsonl` |
 | 03 | Fixture-событие `lead_submitted` | Playwright выполняет пользовательское действие и polling Метрики | Ровно один `reachGoal`; целевой визит либо `INCONCLUSIVE` при доказанной внешней задержке | `T_METRIKA` | `result.json`, `report.md`, `events.jsonl` |
 | 04 | Один из восьми fixtures и заранее названный proposal | Policy проверяет proposal, executor исполняет разрешённый путь | Точное действие, значение и readback из таблицы выше | `decision_run ≤ 10 минут`, write с readback `≤ 2 минуты` | `result.json`, `change_diff.json`, `events.jsonl` |
 | 05 | Некорректный вход | Запускается validation | `NEEDS_HUMAN`, `REQUEST_HUMAN_HELP`, `INVALID_INPUT`, без LLM и write | Локальная часть `decision_run ≤ 5 минут` | `result.json`, `events.jsonl` |
@@ -586,7 +588,7 @@ Fixtures проверяют расчёты и safety policy, но не треб�
 | 08 | Связанные реальные Direct/Metrika identifiers, period, attribution и freshness | Формируется аналитический snapshot | `COMPARABLE` с provenance | `decision_run ≤ 10 минут` | `result.json`, `report.md` |
 | 09 | Несовместимые identifiers, period, attribution или freshness | Формируется аналитический snapshot | `INCOMPATIBLE`, без финансовой рекомендации или proposal | `decision_run ≤ 10 минут` | `result.json`, `events.jsonl` |
 | 10 | Один из четырёх LLM-fixtures | Выполняются пять независимых вызовов | `20/20` schema-valid ответов без неподтверждённых фактов; неоднозначность даёт `NEEDS_HUMAN` или запрос данных | Каждый `decision_run ≤ 10 минут` | `proposal.json`, `result.json` |
-| 11 | Валидный `CampaignDraftV1` и approval | Выполняется `create_campaign` в sandbox | Одна бизнес-транзакция, сохранённые ID и типы, readback либо `UNKNOWN_RESULT` | `integration_test_run ≤ 20 минут` | `approval.json`, `result.json`, `events.jsonl` |
+| 11 | Валидный `CampaignDraftV1`, allowlisted production-account и approval | Выполняется `create_campaign` в controlled pilot | Одна бизнес-транзакция, сохранённые ID и типы, readback либо `UNKNOWN_RESULT` | `integration_test_run ≤ 20 минут` | `approval.json`, `result.json`, `events.jsonl` |
 | 12 | Валидный `GoalCandidate` и подтверждение создания | Создаётся тестовая цель, устанавливается и проверяется событие, затем человек оценивает бизнес-смысл | `APPROVED` либо `INCONCLUSIVE` только при внешней задержке | `T_METRIKA` | `result.json`, `report.md`, `events.jsonl` |
 | 12.1 | Проверенный `GoalCandidate` со статусом `CANDIDATE` | Человек отклоняет бизнес-смысл | Цель исключена из решений и очищена без воздействия на существующие исторические цели | Локальная часть `decision_run ≤ 5 минут` | `result.json`, `report.md`, `events.jsonl` |
 | 13 | Режим `OBSERVE` | Запускается анализ | Нет write-proposal и executor call; `execution_status = NOT_STARTED` | `decision_run ≤ 10 минут` | `result.json`, `events.jsonl` |
@@ -614,30 +616,30 @@ Fixtures проверяют расчёты и safety policy, но не треб�
 - `INCONCLUSIVE` — корректно начатый тест временно не завершён только из-за подтверждённой внешней недоступности или задержки.
 - `NOT_TESTED` — проверка не выполнялась.
 
-Тип evidence указывается отдельно: `SANDBOX`, `TEST_COUNTER`, `REAL_READ_ONLY`, `SIMULATED` или `CONTROLLED_PILOT`.
+Тип evidence указывается отдельно: `TEST_COUNTER`, `REAL_READ_ONLY`, `SIMULATED` или `CONTROLLED_PILOT`.
 
 | Способность | Обязательна в текущем прототипе | Ожидаемое evidence |
 | --- | --- | --- |
-| `CAMPAIGN_LIFECYCLE` | Да, в тестовом контуре | `SANDBOX` |
+| `CAMPAIGN_LIFECYCLE` | Да | `CONTROLLED_PILOT` |
 | `GOAL_LIFECYCLE` | Да, для тестовой цели | `TEST_COUNTER` |
 | `SOURCE_INTEGRATION` | Да | `REAL_READ_ONLY + CONTROLLED_PILOT` |
 | `INTEGRATED_ANALYTICS` | Да | `REAL_READ_ONLY + CONTROLLED_PILOT` |
 | `LLM_ANALYSIS` | Да | `SIMULATED + REAL_READ_ONLY` |
-| `APPROVAL_REQUIRED` | Да | `SANDBOX + CONTROLLED_PILOT` |
+| `APPROVAL_REQUIRED` | Да | `CONTROLLED_PILOT` |
 | `BOUNDED_AUTONOMY` | Нет | Вне scope текущего прототипа |
 | `MONITORING_AND_ALERTING` | Да | `SIMULATED + CONTROLLED_PILOT` |
 | `IMPACT_EVALUATION` | Да | `CONTROLLED_PILOT` |
 | `OPERATIONAL_MODES` | Да, для `OBSERVE`, `RECOMMEND` и `APPROVAL_REQUIRED` | `SIMULATED + CONTROLLED_PILOT` |
-| `TOOL_CONTRACT` | Да | `SIMULATED + SANDBOX` |
-| `ORIGINAL_INTEGRATION_COVERAGE` | Да | `SANDBOX + TEST_COUNTER` |
-| `SAFETY_CORE` | Да, в границах FR-008 и NFR-003–004 | `SANDBOX + SIMULATED + CONTROLLED_PILOT` |
+| `TOOL_CONTRACT` | Да | `SIMULATED + CONTROLLED_PILOT` |
+| `ORIGINAL_INTEGRATION_COVERAGE` | Да | `CONTROLLED_PILOT + TEST_COUNTER` |
+| `SAFETY_CORE` | Да, в границах FR-008 и NFR-003–004 | `SIMULATED + CONTROLLED_PILOT` |
 | `CLOSED_LOOP_CONTROL` | Да, для одного подтверждённого действия | `CONTROLLED_PILOT` |
 
 Любой обязательный `NOT_PROVEN` даёт общий `NOT_PROVEN`.
 При его отсутствии любой обязательный `INCONCLUSIVE` даёт общий `INCONCLUSIVE`.
 Общий `PROVEN` возможен только при `PROVEN` всех обязательных способностей.
-Успешная sandbox-проверка не доказывает production-write, а раздельные read-only данные и sandbox-write не доказывают closed loop.
-Создание новой production-кампании, production-site publish, production goal lifecycle и `BOUNDED_AUTONOMY` отложены за пределы текущего прототипа и не могут получить в нём `PROVEN`.
+Раздельные real read и controlled write не доказывают closed loop, если выполнены не на одной и той же allowlisted пилотной кампании.
+Production-site publish, production goal lifecycle и `BOUNDED_AUTONOMY` отложены за пределы текущего прототипа и не могут получить в нём `PROVEN`.
 Положительный рост KPI не является критерием приёмки.
 
 ## Трассировка правок
@@ -649,7 +651,7 @@ Fixtures проверяют расчёты и safety policy, но не треб�
 | --- | --- | --- |
 | `4.1` Связанная аналитика | Принято | `FR-001`, `FR-003` и `FR-004` используют `IntegratedPerformanceSnapshot`, provenance, attribution, freshness и comparability |
 | `4.2` Роль LLM | Принято | `FR-005` и `FR-006` разделяют гипотезы LLM и детерминированную safety policy без требования единственного ответа модели |
-| `4.3` Создание кампаний и целей | Принято частично | Полный campaign lifecycle проверяется в sandbox, goal lifecycle — в test counter; production creation и production site publish отложены |
+| `4.3` Создание кампаний и целей | Принято частично | Полный campaign lifecycle проверяется в controlled production pilot, goal lifecycle — в test counter; production site publish отложен |
 | `4.4` Человеческий контроль | Принято частично | Реализуются `OBSERVE`, `RECOMMEND` и одноразовый `APPROVAL_REQUIRED`; `BOUNDED_AUTONOMY` и долгосрочный Mandate отложены |
 | `4.5` Мониторинг и эффект | Принято | Добавлены scheduled polling, триггеры, observation window и `impact_report.json` |
 | `4.6` Идемпотентность | Принято | Ключи учитывают состояние, управляемые значения, proposal, policy и expected object version |
@@ -660,10 +662,7 @@ Fixtures проверяют расчёты и safety policy, но не треб�
 ## Проверенные ограничения Яндекса
 
 - Для Direct API требуются OAuth-токен и одобренный доступ приложения.
-- Песочница изолирована от реальной рекламы и может отличаться по типам объектов.
-- Для операций `v5` песочница использует `https://api-sandbox.direct.yandex.com/json/v5/<service>`.
-- У песочницы Директа нет веб-интерфейса.
-- Песочница Директа использует реальные OAuth-токены.
+- Production JSON API использует `https://api.direct.yandex.com/json/v5/<service>` и `https://api.direct.yandex.com/json/v501/<service>`.
 - Фактические host, version и methods фиксируются в нормативной API-матрице.
 - Управление ЕПК проверяется с учётом `v501`.
 - Денежные значения передаются целыми микрорублями.
@@ -672,15 +671,14 @@ Fixtures проверяют расчёты и safety policy, но не треб�
 - Фактический тип созданного объекта может отличаться от compatibility-request.
 - Для чтения Метрики требуется `metrika:read`.
 - Для создания тестовой цели требуется `metrika:write`.
-- Отдельной песочницы Метрики нет; обычный API ограничивается разрешённым тестовым счётчиком.
+- Обычный API Метрики ограничивается разрешённым тестовым счётчиком.
 - Целевые визиты доступны через `ym:s:goal<goal_id>visits`.
 - Reporting API не доказывает отсутствие двойного `reachGoal`, поэтому это проверяет Playwright.
 - Данные Метрики могут задерживаться, поэтому учитываются freshness и observation window.
 
 ## Первичные источники
 
-- [Песочница Яндекс Директа](https://yandex.ru/dev/direct/doc/ru/concepts/sandbox).
-- [Управление песочницей](https://yandex.ru/dev/direct/doc/ru/concepts/sandbox-init).
+- [Обзор API Яндекс Директа](https://yandex.ru/dev/direct/doc/ru/concepts/overview).
 - [Методы кампаний Яндекс Директа](https://yandex.ru/dev/direct/doc/ru/objects/campaign).
 - [Изменение параметров кампании](https://yandex.ru/dev/direct/doc/ru/campaigns/update).
 - [Группы объявлений](https://yandex.ru/dev/direct/doc/ru/objects/adgroup).
