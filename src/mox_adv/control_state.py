@@ -179,6 +179,8 @@ class ApprovalRecord:
     granted_at: str
     expires_at: str
     revoked_at: Optional[str]
+    reserved_at: Optional[str]
+    reserved_execution_key: Optional[str]
     used_at: Optional[str]
     execution_key: Optional[str]
 
@@ -236,6 +238,8 @@ class DurableControlState:
                     granted_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     revoked_at TEXT,
+                    reserved_at TEXT,
+                    reserved_execution_key TEXT,
                     used_at TEXT,
                     execution_key TEXT,
                     FOREIGN KEY(proposal_id) REFERENCES prepared_changes(proposal_id)
@@ -524,6 +528,7 @@ class DurableControlState:
                 current is None
                 or current.used
                 or current.revoked_at is not None
+                or current.reserved_at is not None
                 or current.binding_hash != prepared.binding_hash()
                 or _parse_utc(current.expires_at) <= now.astimezone(timezone.utc)
             ):
@@ -532,8 +537,9 @@ class DurableControlState:
                     "approval changed, expired, or was already consumed.",
                 )
             updated = connection.execute(
-                "UPDATE approvals SET used_at = ?, execution_key = ? "
-                "WHERE approval_id = ? AND used_at IS NULL AND revoked_at IS NULL",
+                "UPDATE approvals SET reserved_at = ?, reserved_execution_key = ? "
+                "WHERE approval_id = ? AND reserved_at IS NULL "
+                "AND used_at IS NULL AND revoked_at IS NULL",
                 (now_text, prepared.execution_key(), approval.approval_id),
             )
             if updated.rowcount != 1:
@@ -563,6 +569,39 @@ class DurableControlState:
             raise
         finally:
             connection.close()
+
+    def mark_approval_used(
+        self,
+        approval_id: str,
+        execution_key: str,
+        now: datetime,
+    ) -> None:
+        with self._connect() as connection:
+            changed = connection.execute(
+                "UPDATE approvals SET used_at = ?, execution_key = ? "
+                "WHERE approval_id = ? AND reserved_execution_key = ? "
+                "AND used_at IS NULL",
+                (_utc_text(now), execution_key, approval_id, execution_key),
+            )
+            if changed.rowcount != 1:
+                raise ControlRejected(
+                    "APPROVAL_NOT_APPLICABLE",
+                    "approval reservation cannot be consumed.",
+                )
+
+    def release_approval_reservation(
+        self,
+        approval_id: str,
+        execution_key: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE approvals SET reserved_at = NULL, "
+                "reserved_execution_key = NULL "
+                "WHERE approval_id = ? AND reserved_execution_key = ? "
+                "AND used_at IS NULL",
+                (approval_id, execution_key),
+            )
 
     def finish_execution(
         self,
@@ -688,6 +727,8 @@ class DurableControlState:
             granted_at=row["granted_at"],
             expires_at=row["expires_at"],
             revoked_at=row["revoked_at"],
+            reserved_at=row["reserved_at"],
+            reserved_execution_key=row["reserved_execution_key"],
             used_at=row["used_at"],
             execution_key=row["execution_key"],
         )

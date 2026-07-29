@@ -317,7 +317,23 @@ class ApprovalExecutionService:
                 self.clock(),
             )
             self.state.begin_execution(prepared, approval, self.clock())
+            if self.state.any_kill_switch_active(prepared.scope):
+                self.state.release_approval_reservation(
+                    approval.approval_id,
+                    prepared.execution_key(),
+                )
+                self.state.finish_execution(
+                    prepared.execution_key(),
+                    "BLOCKED",
+                    "KILL_SWITCH_ACTIVE",
+                    self.clock(),
+                )
+                return ExecutionOutcome("BLOCKED", "KILL_SWITCH_ACTIVE", before)
             if before == prepared.target_value:
+                self.state.release_approval_reservation(
+                    approval.approval_id,
+                    prepared.execution_key(),
+                )
                 self.state.finish_execution(
                     prepared.execution_key(),
                     "NO_CHANGE",
@@ -328,7 +344,17 @@ class ApprovalExecutionService:
             try:
                 self.adapter.apply(prepared.target_key(), command)
             except AdapterTimeout:
+                self.state.mark_approval_used(
+                    approval.approval_id,
+                    prepared.execution_key(),
+                    self.clock(),
+                )
                 return self._reconcile_timeout(prepared)
+            self.state.mark_approval_used(
+                approval.approval_id,
+                prepared.execution_key(),
+                self.clock(),
+            )
             observed = self.adapter.readback(prepared.target_key())
             if observed == prepared.target_value:
                 status = "APPLIED"
