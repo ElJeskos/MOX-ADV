@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MOX-ADV goal event fixture</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: system-ui, sans-serif;
+      }
+
+      body {
+        align-items: center;
+        background: #f4f5f7;
+        display: flex;
+        justify-content: center;
+        margin: 0;
+        min-height: 100vh;
+      }
+
+      main {
+        background: white;
+        border: 1px solid #d9dde5;
+        border-radius: 12px;
+        box-shadow: 0 12px 32px rgb(23 35 58 / 10%);
+        padding: 32px;
+        width: min(420px, calc(100vw - 48px));
+      }
+
+      form {
+        display: grid;
+        gap: 16px;
+      }
+
+      label {
+        display: grid;
+        font-weight: 600;
+        gap: 8px;
+      }
+
+      input,
+      button {
+        border: 1px solid #aeb6c5;
+        border-radius: 8px;
+        box-sizing: border-box;
+        font: inherit;
+        min-height: 44px;
+        padding: 10px 12px;
+        width: 100%;
+      }
+
+      button {
+        background: #202938;
+        color: white;
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      #primary-cta {
+        background: #fff;
+        color: #202938;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Request a prototype review</h1>
+      <form id="lead-form">
+        <label for="lead-name">
+          Name
+          <input id="lead-name" name="name" autocomplete="off">
+        </label>
+        <button id="primary-cta" type="button">Learn more</button>
+        <button id="lead-submit" type="submit">Send request</button>
+      </form>
+    </main>
+    <script>
+      window.__goalEvents = [];
+      const emitted = new Set();
+
+      function reachGoal(event) {
+        if (emitted.has(event)) {
+          return;
+        }
+        emitted.add(event);
+        window.__goalEvents.push(event);
+        void fetch(
+          "https://mc.yandex.ru/watch/999001?event=" + encodeURIComponent(event),
+          {method: "POST", body: JSON.stringify({event})},
+        );
+      }
+
+      document.querySelector("#lead-name").addEventListener(
+        "focus",
+        () => reachGoal("form_started"),
+      );
+      document.querySelector("#primary-cta").addEventListener(
+        "click",
+        () => reachGoal("primary_cta_clicked"),
+      );
+      document.querySelector("#lead-form").addEventListener("submit", event => {
+        event.preventDefault();
+        reachGoal("lead_submitted");
+      });
+    </script>
+  </body>
+</html>
