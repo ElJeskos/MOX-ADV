@@ -17,7 +17,10 @@ from mox_adv.direct_management import (
     DirectAdapterFailure,
     DirectManagementConnectorV1,
     DirectOutcomeUnknown,
+    DirectService,
+    ProductionPilotAuthority,
 )
+from mox_adv.control_state import ControlRejected, DurableControlState
 from mox_adv.recommend_contracts import CampaignDraftV1, SchemaValidationError
 
 
@@ -36,15 +39,32 @@ class CampaignSagaState(str, Enum):
     COMPENSATION_REQUIRED = "COMPENSATION_REQUIRED"
 
 
+class CampaignSagaStep(str, Enum):
+    CAMPAIGN_ADD = "CAMPAIGN_ADD"
+    AD_GROUP_ADD = "AD_GROUP_ADD"
+    ADS_ADD = "ADS_ADD"
+    KEYWORD_ADD = "KEYWORD_ADD"
+    MODERATION_SUBMIT = "MODERATION_SUBMIT"
+    MODERATION_READBACK = "MODERATION_READBACK"
+    CAMPAIGN_LAUNCH = "CAMPAIGN_LAUNCH"
+    FULL_READBACK = "FULL_READBACK"
+
+
+class CreationReservationStatus(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    RESERVED = "RESERVED"
+    USED = "USED"
+
+
 SAGA_STEPS = (
-    "CAMPAIGN_ADD",
-    "AD_GROUP_ADD",
-    "ADS_ADD",
-    "KEYWORD_ADD",
-    "MODERATION_SUBMIT",
-    "MODERATION_READBACK",
-    "CAMPAIGN_LAUNCH",
-    "FULL_READBACK",
+    CampaignSagaStep.CAMPAIGN_ADD,
+    CampaignSagaStep.AD_GROUP_ADD,
+    CampaignSagaStep.ADS_ADD,
+    CampaignSagaStep.KEYWORD_ADD,
+    CampaignSagaStep.MODERATION_SUBMIT,
+    CampaignSagaStep.MODERATION_READBACK,
+    CampaignSagaStep.CAMPAIGN_LAUNCH,
+    CampaignSagaStep.FULL_READBACK,
 )
 
 TERMINAL_STATES = {
@@ -78,12 +98,29 @@ def _canonical_hash(value: Mapping[str, Any]) -> str:
 @dataclass(frozen=True)
 class CreationReservation:
     reservation_id: str
-    status: str
+    status: CreationReservationStatus
     scope_binding: str
     object_type: str
     proposal_id: str
     credential_profile: str
     expires_at: datetime
+
+
+@dataclass(frozen=True)
+class CampaignApproval:
+    approval_id: str
+    proposal_id: str
+    binding_hash: str
+    approver: str
+    authentication: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class CampaignDraftSafetyBindings:
+    allowed_landing_hosts: Tuple[str, ...]
+    prohibited_phrases: Tuple[str, ...]
+    prepared_media_references: Tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -111,13 +148,18 @@ class CampaignCreationRequest:
             "draft": self.draft.as_dict(),
         }
 
+    def approval_binding(self, policy_id: str) -> str:
+        plan = self.canonical_plan(policy_id)
+        plan.pop("approval_id")
+        return _canonical_hash(plan)
+
 
 @dataclass(frozen=True)
 class CampaignSagaResult:
     run_id: str
     execution_key: str
     status: CampaignSagaState
-    completed_steps: Tuple[str, ...]
+    completed_steps: Tuple[CampaignSagaStep, ...]
     created_objects: Tuple[CreatedDirectObject, ...]
     detail: Optional[str]
 
@@ -125,6 +167,7 @@ class CampaignSagaResult:
 def validate_campaign_draft(
     value: Mapping[str, Any],
     policy: Mapping[str, Any],
+    safety_bindings: CampaignDraftSafetyBindings,
 ) -> CampaignDraftV1:
     """Validate the exact Gate 0 unified Search prototype shape."""
 
@@ -189,7 +232,20 @@ def validate_campaign_draft(
     if len(copy_keys) != 2:
         raise LifecycleRejected("DUPLICATE_AD_COPY")
 
+    if (
+        not safety_bindings.allowed_landing_hosts
+        or not safety_bindings.prepared_media_references
+    ):
+        raise LifecycleRejected("TRUSTED_CAMPAIGN_SAFETY_BINDINGS_REQUIRED")
     landing = _validated_https_landing(draft.landing_page)
+    if landing.hostname not in set(safety_bindings.allowed_landing_hosts):
+        raise LifecycleRejected("LANDING_PAGE_NOT_ALLOWLISTED")
+    prohibited = tuple(
+        phrase.strip().casefold()
+        for phrase in safety_bindings.prohibited_phrases
+        if phrase.strip()
+    )
+    prepared_media = set(safety_bindings.prepared_media_references)
     for ad in ads:
         ad_landing = _validated_https_landing(str(ad["landing_page"]))
         if (
@@ -197,8 +253,16 @@ def validate_campaign_draft(
             or ad_landing.path != landing.path
         ):
             raise LifecycleRejected("LANDING_PAGE_OUTSIDE_DRAFT_SCOPE")
-        if ad["media_reference"] not in draft.media_references:
+        copy_text = (str(ad["title"]) + " " + str(ad["text"])).casefold()
+        if any(phrase in copy_text for phrase in prohibited):
+            raise LifecycleRejected("PROHIBITED_AD_FORMULATION")
+        if (
+            ad["media_reference"] not in draft.media_references
+            or ad["media_reference"] not in prepared_media
+        ):
             raise LifecycleRejected("MEDIA_REFERENCE_NOT_PREPARED")
+    if not set(draft.media_references).issubset(prepared_media):
+        raise LifecycleRejected("MEDIA_REFERENCE_NOT_PREPARED")
     start_hour, start_minute = _time_parts(str(draft.schedule["start"]))
     end_hour, end_minute = _time_parts(str(draft.schedule["end"]))
     if (start_hour, start_minute) >= (end_hour, end_minute):
@@ -251,6 +315,7 @@ class CampaignSagaStore:
         return connection
 
     def _initialize(self) -> None:
+        DurableControlState(self.path)
         with self._connect() as connection:
             connection.executescript(
                 """
@@ -318,10 +383,11 @@ class CampaignSagaStore:
     def begin_step(
         self,
         execution_key: str,
-        step_name: str,
+        step_name: CampaignSagaStep,
         now: datetime,
     ) -> None:
-        ordinal = SAGA_STEPS.index(step_name)
+        step = CampaignSagaStep(step_name)
+        ordinal = SAGA_STEPS.index(step)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             completed_count = connection.execute(
@@ -334,7 +400,7 @@ class CampaignSagaStore:
             existing = connection.execute(
                 "SELECT completed_at FROM campaign_saga_dispatches "
                 "WHERE execution_key = ? AND step_name = ?",
-                (execution_key, step_name),
+                (execution_key, step.value),
             ).fetchone()
             if existing is not None:
                 if existing["completed_at"] is None:
@@ -344,10 +410,13 @@ class CampaignSagaStore:
                 "INSERT INTO campaign_saga_dispatches "
                 "(execution_key, ordinal, step_name, dispatched_at) "
                 "VALUES (?, ?, ?, ?)",
-                (execution_key, ordinal, step_name, _utc_text(now)),
+                (execution_key, ordinal, step.value, _utc_text(now)),
             )
 
-    def pending_dispatched_step(self, execution_key: str) -> Optional[str]:
+    def pending_dispatched_step(
+        self,
+        execution_key: str,
+    ) -> Optional[CampaignSagaStep]:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT step_name FROM campaign_saga_dispatches "
@@ -355,7 +424,7 @@ class CampaignSagaStore:
                 "ORDER BY ordinal LIMIT 1",
                 (execution_key,),
             ).fetchone()
-        return None if row is None else str(row["step_name"])
+        return None if row is None else CampaignSagaStep(row["step_name"])
 
     def register_creation_reservation(
         self,
@@ -363,9 +432,13 @@ class CampaignSagaStore:
         now: datetime,
     ) -> None:
         del now
+        try:
+            reservation_status = CreationReservationStatus(reservation.status)
+        except ValueError as error:
+            raise LifecycleRejected("CREATION_RESERVATION_INVALID") from error
         if (
             not reservation.reservation_id
-            or reservation.status != "AVAILABLE"
+            or reservation_status != CreationReservationStatus.AVAILABLE
             or not reservation.scope_binding
             or not reservation.proposal_id
             or not reservation.credential_profile
@@ -377,7 +450,7 @@ class CampaignSagaStore:
                 (reservation.reservation_id,),
             ).fetchone()
             values = (
-                reservation.status,
+                reservation_status.value,
                 reservation.scope_binding,
                 reservation.object_type,
                 reservation.proposal_id,
@@ -402,11 +475,28 @@ class CampaignSagaStore:
                 (reservation.reservation_id,) + values,
             )
 
+    def register_campaign_approval(self, approval: CampaignApproval) -> None:
+        try:
+            DurableControlState(self.path).register_campaign_approval_authority(
+                approval_id=approval.approval_id,
+                proposal_id=approval.proposal_id,
+                binding_hash=approval.binding_hash,
+                approver=approval.approver,
+                authentication=approval.authentication,
+                expires_at=approval.expires_at,
+            )
+        except ControlRejected as error:
+            raise LifecycleRejected(
+                "CAMPAIGN_APPROVAL_INVALID: " + error.reason_code
+            ) from error
+
     def start_or_load(
         self,
         request: CampaignCreationRequest,
         canonical_plan: Mapping[str, Any],
         now: datetime,
+        expected_approver: str,
+        expected_authentication: str,
     ) -> CampaignSagaState:
         digest = _canonical_hash(canonical_plan)
         now_text = _utc_text(now)
@@ -429,6 +519,24 @@ class CampaignSagaStore:
             if reservation is None:
                 raise LifecycleRejected("CREATION_RESERVATION_NOT_FOUND")
             self._validate_reservation(reservation, request, now_text)
+            approval = connection.execute(
+                "SELECT * FROM campaign_approvals WHERE approval_id = ?",
+                (request.approval_id,),
+            ).fetchone()
+            if approval is None:
+                raise LifecycleRejected("CAMPAIGN_APPROVAL_NOT_FOUND")
+            expected_binding = request.approval_binding(
+                str(canonical_plan["policy_id"])
+            )
+            if (
+                approval["status"] != "AVAILABLE"
+                or approval["proposal_id"] != request.proposal_id
+                or approval["binding_hash"] != expected_binding
+                or approval["approver"] != expected_approver
+                or approval["authentication"] != expected_authentication
+                or approval["expires_at"] <= now_text
+            ):
+                raise LifecycleRejected("CAMPAIGN_APPROVAL_NOT_AUTHORIZED")
             connection.execute(
                 "UPDATE creation_reservations SET status = 'RESERVED', "
                 "reserved_execution_key = ? WHERE reservation_id = ? AND status = 'AVAILABLE'",
@@ -436,6 +544,14 @@ class CampaignSagaStore:
             )
             if connection.total_changes != 1:
                 raise LifecycleRejected("CREATION_RESERVATION_ALREADY_USED")
+            updated_approval = connection.execute(
+                "UPDATE campaign_approvals SET status = 'RESERVED', "
+                "reserved_execution_key = ? WHERE approval_id = ? "
+                "AND status = 'AVAILABLE'",
+                (request.execution_key, request.approval_id),
+            ).rowcount
+            if updated_approval != 1:
+                raise LifecycleRejected("CAMPAIGN_APPROVAL_ALREADY_USED")
             connection.execute(
                 "INSERT INTO campaign_sagas "
                 "(execution_key, run_id, proposal_id, reservation_id, plan_hash, "
@@ -477,12 +593,13 @@ class CampaignSagaStore:
     def complete_step(
         self,
         request: CampaignCreationRequest,
-        step_name: str,
+        step_name: CampaignSagaStep,
         response: Mapping[str, Any],
         now: datetime,
         created_objects: Sequence[CreatedDirectObject] = (),
     ) -> None:
-        ordinal = SAGA_STEPS.index(step_name)
+        step = CampaignSagaStep(step_name)
+        ordinal = SAGA_STEPS.index(step)
         now_text = _utc_text(now)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -495,7 +612,7 @@ class CampaignSagaStore:
                 existing = connection.execute(
                     "SELECT 1 FROM campaign_saga_steps "
                     "WHERE execution_key = ? AND step_name = ?",
-                    (request.execution_key, step_name),
+                    (request.execution_key, step.value),
                 ).fetchone()
                 if existing is not None:
                     return
@@ -508,10 +625,10 @@ class CampaignSagaStore:
                     (
                         request.run_id,
                         request.execution_key,
-                        item.service,
+                        item.service.value,
                         item.object_id,
                         item.actual_type,
-                        step_name,
+                        step.value,
                     ),
                 )
             connection.execute(
@@ -521,7 +638,7 @@ class CampaignSagaStore:
                 (
                     request.execution_key,
                     ordinal,
-                    step_name,
+                    step.value,
                     _canonical(dict(response)),
                     now_text,
                 ),
@@ -530,7 +647,7 @@ class CampaignSagaStore:
                 "UPDATE campaign_saga_dispatches SET completed_at = ? "
                 "WHERE execution_key = ? AND step_name = ? "
                 "AND completed_at IS NULL",
-                (now_text, request.execution_key, step_name),
+                (now_text, request.execution_key, step.value),
             ).rowcount
             if updated != 1:
                 raise LifecycleRejected("SAGA_STEP_WAS_NOT_DISPATCHED")
@@ -544,10 +661,51 @@ class CampaignSagaStore:
                         request.execution_key,
                     ),
                 )
+                used_approval = connection.execute(
+                    "UPDATE campaign_approvals SET status = 'USED', used_at = ? "
+                    "WHERE approval_id = ? AND status = 'RESERVED' "
+                    "AND reserved_execution_key = ?",
+                    (now_text, request.approval_id, request.execution_key),
+                ).rowcount
+                if used_approval != 1:
+                    raise LifecycleRejected("CAMPAIGN_APPROVAL_USE_FAILED")
             connection.execute(
                 "UPDATE campaign_sagas SET updated_at = ? WHERE execution_key = ?",
                 (now_text, request.execution_key),
             )
+
+    def register_dispatched_objects(
+        self,
+        request: CampaignCreationRequest,
+        step_name: CampaignSagaStep,
+        created_objects: Sequence[CreatedDirectObject],
+    ) -> None:
+        step = CampaignSagaStep(step_name)
+        if not created_objects:
+            raise LifecycleRejected("CREATED_OBJECT_SET_EMPTY")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            dispatch = connection.execute(
+                "SELECT completed_at FROM campaign_saga_dispatches "
+                "WHERE execution_key = ? AND step_name = ?",
+                (request.execution_key, step.value),
+            ).fetchone()
+            if dispatch is None or dispatch["completed_at"] is not None:
+                raise LifecycleRejected("SAGA_STEP_WAS_NOT_DISPATCHED")
+            for item in created_objects:
+                connection.execute(
+                    "INSERT INTO campaign_created_objects "
+                    "(run_id, execution_key, service, object_id, actual_type, "
+                    "created_step) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        request.run_id,
+                        request.execution_key,
+                        item.service.value,
+                        item.object_id,
+                        str(item.actual_type),
+                        step.value,
+                    ),
+                )
 
     def finish(
         self,
@@ -563,14 +721,17 @@ class CampaignSagaStore:
                 (status.value, detail, _utc_text(now), execution_key),
             )
 
-    def completed_steps(self, execution_key: str) -> Tuple[str, ...]:
+    def completed_steps(
+        self,
+        execution_key: str,
+    ) -> Tuple[CampaignSagaStep, ...]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT step_name FROM campaign_saga_steps "
                 "WHERE execution_key = ? ORDER BY ordinal",
                 (execution_key,),
             ).fetchall()
-        return tuple(row["step_name"] for row in rows)
+        return tuple(CampaignSagaStep(row["step_name"]) for row in rows)
 
     def created_objects(
         self,
@@ -589,7 +750,7 @@ class CampaignSagaStore:
             rows = connection.execute(query, (run_id,)).fetchall()
         return tuple(
             CreatedDirectObject(
-                service=row["service"],
+                service=DirectService(row["service"]),
                 object_id=row["object_id"],
                 actual_type=row["actual_type"],
             )
@@ -613,7 +774,7 @@ class CampaignSagaStore:
                     (
                         run_id,
                         operation_key,
-                        item.service,
+                        item.service.value,
                         item.object_id,
                         item.actual_type,
                     ),
@@ -633,6 +794,34 @@ class CampaignSagaStore:
                 (run_id, service, object_id),
             ).fetchone()
         return row is not None
+
+    def production_authority_is_valid(
+        self,
+        authority: ProductionPilotAuthority,
+    ) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT proposal_id, binding_hash, status, reserved_execution_key "
+                "FROM campaign_approvals WHERE approval_id = ?",
+                (authority.approval_id,),
+            ).fetchone()
+        return bool(
+            row is not None
+            and row["proposal_id"] == authority.proposal_id
+            and row["binding_hash"] == authority.binding_hash
+            and row["status"] in {"RESERVED", "USED"}
+            and row["reserved_execution_key"] == authority.execution_key
+        )
+
+    def campaign_approval_status(self, approval_id: str) -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM campaign_approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        if row is None:
+            raise LifecycleRejected("CAMPAIGN_APPROVAL_NOT_FOUND")
+        return str(row["status"])
 
     def mark_compensated(
         self,
@@ -683,10 +872,12 @@ class CampaignLifecycleService:
         policy: Mapping[str, Any],
         store: CampaignSagaStore,
         connector: DirectManagementConnectorV1,
+        safety_bindings: CampaignDraftSafetyBindings,
     ) -> None:
         self.policy = policy
         self.store = store
         self.connector = connector
+        self.safety_bindings = safety_bindings
 
     def execute(
         self,
@@ -697,7 +888,14 @@ class CampaignLifecycleService:
     ) -> CampaignSagaResult:
         self._validate_request(request)
         canonical_plan = request.canonical_plan(str(self.policy["policy_id"]))
-        existing = self.store.start_or_load(request, canonical_plan, now)
+        approver = self.policy["principals"]["approver"]
+        existing = self.store.start_or_load(
+            request,
+            canonical_plan,
+            now,
+            str(approver["identity"]),
+            str(approver["authentication"]),
+        )
         if existing in TERMINAL_STATES:
             return self.store.result(
                 request.run_id,
@@ -709,7 +907,7 @@ class CampaignLifecycleService:
             self.store.finish(
                 request.execution_key,
                 CampaignSagaState.UNKNOWN_RESULT,
-                "DISPATCHED_STEP_REQUIRES_RECONCILIATION: " + pending_step,
+                "DISPATCHED_STEP_REQUIRES_RECONCILIATION: " + pending_step.value,
                 now,
             )
             return self.store.result(request.run_id, request.execution_key)
@@ -754,7 +952,11 @@ class CampaignLifecycleService:
         )
         if any(not isinstance(value, str) or not value for value in text_values):
             raise LifecycleRejected("CAMPAIGN_CREATION_REQUEST_INVALID")
-        validate_campaign_draft(request.draft.as_dict(), self.policy)
+        validate_campaign_draft(
+            request.draft.as_dict(),
+            self.policy,
+            self.safety_bindings,
+        )
         if request.credential_profile != "DIRECT_PILOT_WRITE":
             raise LifecycleRejected("CAMPAIGN_CREDENTIAL_PROFILE_INVALID")
         simulation = self.policy["bindings"]["simulation"]
@@ -768,7 +970,7 @@ class CampaignLifecycleService:
     def _run_step(
         self,
         request: CampaignCreationRequest,
-        step_name: str,
+        step_name: CampaignSagaStep,
         now: datetime,
     ) -> None:
         self.store.begin_step(request.execution_key, step_name, now)
@@ -776,176 +978,314 @@ class CampaignLifecycleService:
         by_service: Dict[str, Tuple[CreatedDirectObject, ...]] = {}
         for service in ("Campaigns", "AdGroups", "Ads", "Keywords"):
             by_service[service] = tuple(
-                item for item in objects if item.service == service
+                item for item in objects if item.service == DirectService(service)
             )
         operation_key = request.execution_key + ":" + step_name
         group = request.draft.groups[0]
-        if step_name == "CAMPAIGN_ADD":
-            created = self.connector.campaigns_add(
+        handlers = {
+            CampaignSagaStep.CAMPAIGN_ADD: self._step_campaign_add,
+            CampaignSagaStep.AD_GROUP_ADD: self._step_ad_group_add,
+            CampaignSagaStep.ADS_ADD: self._step_ads_add,
+            CampaignSagaStep.KEYWORD_ADD: self._step_keyword_add,
+            CampaignSagaStep.MODERATION_SUBMIT: self._step_moderation_submit,
+            CampaignSagaStep.MODERATION_READBACK: self._step_moderation_readback,
+            CampaignSagaStep.CAMPAIGN_LAUNCH: self._step_campaign_launch,
+            CampaignSagaStep.FULL_READBACK: self._step_full_readback,
+        }
+        handlers[step_name](request, now, by_service, group, operation_key)
+
+    def _complete_add_step(
+        self,
+        request: CampaignCreationRequest,
+        step: CampaignSagaStep,
+        now: datetime,
+        created: Sequence[CreatedDirectObject],
+        expected_types: Sequence[Tuple[str, str]],
+    ) -> None:
+        self.store.register_dispatched_objects(request, step, created)
+        self._require_created_types(created, expected_types)
+        self.store.complete_step(
+            request,
+            step,
+            {"ids": [item.object_id for item in created]},
+            now,
+        )
+
+    def _step_campaign_add(
+        self,
+        request: CampaignCreationRequest,
+        now: datetime,
+        by_service: Mapping[str, Sequence[CreatedDirectObject]],
+        group: Mapping[str, Any],
+        operation_key: str,
+    ) -> None:
+        del by_service, group
+        created = self.connector.campaigns_add(
+            request.run_id,
+            operation_key,
+            {
+                "type": request.draft.campaign_type,
+                "state": "SUSPENDED",
+                "strategy": dict(request.draft.strategy),
+                "geography": list(request.draft.geography),
+                "schedule": dict(request.draft.schedule),
+                "WeeklySpendLimit": request.draft.budget["weekly_micros"],
+            },
+        )
+        self._complete_add_step(
+            request,
+            CampaignSagaStep.CAMPAIGN_ADD,
+            now,
+            created,
+            (("Campaigns", "UNIFIED_CAMPAIGN"),),
+        )
+
+    def _step_ad_group_add(
+        self,
+        request: CampaignCreationRequest,
+        now: datetime,
+        by_service: Mapping[str, Sequence[CreatedDirectObject]],
+        group: Mapping[str, Any],
+        operation_key: str,
+    ) -> None:
+        created = self.connector.adgroups_add(
+            request.run_id,
+            operation_key,
+            {
+                "campaign_id": self._one(by_service, "Campaigns").object_id,
+                "name": group["name"],
+                "negative_keywords": list(group["negative_keywords"]),
+            },
+        )
+        self._complete_add_step(
+            request,
+            CampaignSagaStep.AD_GROUP_ADD,
+            now,
+            created,
+            (("AdGroups", "UNIFIED_AD_GROUP"),),
+        )
+
+    def _step_ads_add(
+        self,
+        request: CampaignCreationRequest,
+        now: datetime,
+        by_service: Mapping[str, Sequence[CreatedDirectObject]],
+        group: Mapping[str, Any],
+        operation_key: str,
+    ) -> None:
+        created = self.connector.ads_add(
+            request.run_id,
+            operation_key,
+            {
+                "ad_group_id": self._one(by_service, "AdGroups").object_id,
+                "items": [dict(item) for item in group["ads"]],
+            },
+        )
+        self._complete_add_step(
+            request,
+            CampaignSagaStep.ADS_ADD,
+            now,
+            created,
+            (("Ads", "TEXT_AD"), ("Ads", "TEXT_AD")),
+        )
+
+    def _step_keyword_add(
+        self,
+        request: CampaignCreationRequest,
+        now: datetime,
+        by_service: Mapping[str, Sequence[CreatedDirectObject]],
+        group: Mapping[str, Any],
+        operation_key: str,
+    ) -> None:
+        created = self.connector.keywords_add(
+            request.run_id,
+            operation_key,
+            {
+                "ad_group_id": self._one(by_service, "AdGroups").object_id,
+                "keyword": group["keywords"][0],
+            },
+        )
+        self._complete_add_step(
+            request,
+            CampaignSagaStep.KEYWORD_ADD,
+            now,
+            created,
+            (("Keywords", "KEYWORD"),),
+        )
+
+    def _step_moderation_submit(
+        self,
+        request: CampaignCreationRequest,
+        now: datetime,
+        by_service: Mapping[str, Sequence[CreatedDirectObject]],
+        group: Mapping[str, Any],
+        operation_key: str,
+    ) -> None:
+        del group, operation_key
+        response = self.connector.ads_moderate(
+            request.run_id,
+            (item.object_id for item in by_service["Ads"]),
+        )
+        self.store.complete_step(
+            request,
+            CampaignSagaStep.MODERATION_SUBMIT,
+            {"states": [item["state"] for item in response]},
+            now,
+        )
+
+    def _step_moderation_readback(
+        self,
+        request: CampaignCreationRequest,
+        now: datetime,
+        by_service: Mapping[str, Sequence[CreatedDirectObject]],
+        group: Mapping[str, Any],
+        operation_key: str,
+    ) -> None:
+        del group, operation_key
+        response = self.connector.ads_get(
+            request.run_id,
+            (item.object_id for item in by_service["Ads"]),
+        )
+        if any(item.get("state") != "MODERATION" for item in response):
+            raise DirectAdapterFailure("MODERATION_REQUEST_NOT_ACCEPTED")
+        self.store.complete_step(
+            request,
+            CampaignSagaStep.MODERATION_READBACK,
+            {"states": [item["state"] for item in response]},
+            now,
+        )
+
+    def _step_campaign_launch(
+        self,
+        request: CampaignCreationRequest,
+        now: datetime,
+        by_service: Mapping[str, Sequence[CreatedDirectObject]],
+        group: Mapping[str, Any],
+        operation_key: str,
+    ) -> None:
+        del group, operation_key
+        response = self.connector.campaigns_resume(
+            request.run_id,
+            self._one(by_service, "Campaigns").object_id,
+        )
+        if response.get("state") != "ON":
+            raise DirectAdapterFailure("CAMPAIGN_LAUNCH_READBACK_FAILED")
+        self.store.complete_step(
+            request,
+            CampaignSagaStep.CAMPAIGN_LAUNCH,
+            {"state": response["state"]},
+            now,
+        )
+
+    def _step_full_readback(
+        self,
+        request: CampaignCreationRequest,
+        now: datetime,
+        by_service: Mapping[str, Sequence[CreatedDirectObject]],
+        group: Mapping[str, Any],
+        operation_key: str,
+    ) -> None:
+        del group, operation_key
+        response = {
+            "campaigns": self.connector.campaigns_get(
                 request.run_id,
-                operation_key,
-                {
-                    "type": request.draft.campaign_type,
-                    "state": "SUSPENDED",
-                    "strategy": dict(request.draft.strategy),
-                    "geography": list(request.draft.geography),
-                    "schedule": dict(request.draft.schedule),
-                    "WeeklySpendLimit": request.draft.budget["weekly_micros"],
-                },
-            )
-            self._require_created_types(created, (("Campaigns", "UNIFIED_CAMPAIGN"),))
-            self.store.complete_step(
-                request,
-                step_name,
-                {"ids": [item.object_id for item in created]},
-                now,
-                created,
-            )
-            return
-        if step_name == "AD_GROUP_ADD":
-            created = self.connector.adgroups_add(
+                self._ids(by_service["Campaigns"]),
+            ),
+            "ad_groups": self.connector.adgroups_get(
                 request.run_id,
-                operation_key,
-                {
-                    "campaign_id": self._one(by_service, "Campaigns").object_id,
-                    "name": group["name"],
-                    "negative_keywords": list(group["negative_keywords"]),
-                },
-            )
-            self._require_created_types(created, (("AdGroups", "UNIFIED_AD_GROUP"),))
-            self.store.complete_step(
-                request,
-                step_name,
-                {"ids": [item.object_id for item in created]},
-                now,
-                created,
-            )
-            return
-        if step_name == "ADS_ADD":
-            created = self.connector.ads_add(
+                self._ids(by_service["AdGroups"]),
+            ),
+            "ads": self.connector.ads_get(
                 request.run_id,
-                operation_key,
-                {
-                    "ad_group_id": self._one(by_service, "AdGroups").object_id,
-                    "items": [dict(item) for item in group["ads"]],
-                },
-            )
-            self._require_created_types(
-                created,
-                (("Ads", "TEXT_AD"), ("Ads", "TEXT_AD")),
-            )
-            self.store.complete_step(
-                request,
-                step_name,
-                {"ids": [item.object_id for item in created]},
-                now,
-                created,
-            )
-            return
-        if step_name == "KEYWORD_ADD":
-            created = self.connector.keywords_add(
+                self._ids(by_service["Ads"]),
+            ),
+            "keywords": self.connector.keywords_get(
                 request.run_id,
-                operation_key,
-                {
-                    "ad_group_id": self._one(by_service, "AdGroups").object_id,
-                    "keyword": group["keywords"][0],
-                },
+                self._ids(by_service["Keywords"]),
+            ),
+        }
+        if not self._full_readback_matches(request, response):
+            raise DirectAdapterFailure("FULL_CAMPAIGN_READBACK_FAILED")
+        self.store.complete_step(
+            request,
+            CampaignSagaStep.FULL_READBACK,
+            {
+                "campaign_ids": [item["id"] for item in response["campaigns"]],
+                "ad_group_ids": [item["id"] for item in response["ad_groups"]],
+                "ad_ids": [item["id"] for item in response["ads"]],
+                "keyword_ids": [item["id"] for item in response["keywords"]],
+            },
+            now,
+        )
+
+    @staticmethod
+    def _full_readback_matches(
+        request: CampaignCreationRequest,
+        response: Mapping[str, Sequence[Mapping[str, Any]]],
+    ) -> bool:
+        campaigns = response["campaigns"]
+        ad_groups = response["ad_groups"]
+        ads = response["ads"]
+        keywords = response["keywords"]
+        if (
+            len(campaigns) != 1
+            or len(ad_groups) != 1
+            or len(ads) != 2
+            or len(keywords) != 1
+        ):
+            return False
+        campaign = campaigns[0]
+        expected_group = request.draft.groups[0]
+        ad_group = ad_groups[0]
+        if any(
+            (
+                campaign.get("type") != "UNIFIED_CAMPAIGN",
+                campaign.get("state") != "ON",
+                campaign.get("strategy") != dict(request.draft.strategy),
+                campaign.get("geography") != list(request.draft.geography),
+                campaign.get("schedule") != dict(request.draft.schedule),
+                campaign.get("WeeklySpendLimit")
+                != request.draft.budget["weekly_micros"],
+                ad_group.get("type") != "UNIFIED_AD_GROUP",
+                ad_group.get("campaign_id") != campaign.get("id"),
+                ad_group.get("name") != expected_group["name"],
+                ad_group.get("negative_keywords")
+                != list(expected_group["negative_keywords"]),
             )
-            self._require_created_types(created, (("Keywords", "KEYWORD"),))
-            self.store.complete_step(
-                request,
-                step_name,
-                {"ids": [item.object_id for item in created]},
-                now,
-                created,
-            )
-            return
-        if step_name == "MODERATION_SUBMIT":
-            response = self.connector.ads_moderate(
-                request.run_id,
-                (item.object_id for item in by_service["Ads"]),
-            )
-            self.store.complete_step(
-                request,
-                step_name,
-                {"states": [item["state"] for item in response]},
-                now,
-            )
-            return
-        if step_name == "MODERATION_READBACK":
-            response = self.connector.ads_get(
-                request.run_id,
-                (item.object_id for item in by_service["Ads"]),
-            )
-            if any(item.get("state") != "MODERATION" for item in response):
-                raise DirectAdapterFailure("MODERATION_REQUEST_NOT_ACCEPTED")
-            self.store.complete_step(
-                request,
-                step_name,
-                {"states": [item["state"] for item in response]},
-                now,
-            )
-            return
-        if step_name == "CAMPAIGN_LAUNCH":
-            response = self.connector.campaigns_resume(
-                request.run_id,
-                self._one(by_service, "Campaigns").object_id,
-            )
-            if response.get("state") != "ON":
-                raise DirectAdapterFailure("CAMPAIGN_LAUNCH_READBACK_FAILED")
-            self.store.complete_step(
-                request,
-                step_name,
-                {"state": response["state"]},
-                now,
-            )
-            return
-        if step_name == "FULL_READBACK":
-            response = {
-                "campaigns": self.connector.campaigns_get(
-                    request.run_id,
-                    self._ids(by_service["Campaigns"]),
-                ),
-                "ad_groups": self.connector.adgroups_get(
-                    request.run_id,
-                    self._ids(by_service["AdGroups"]),
-                ),
-                "ads": self.connector.ads_get(
-                    request.run_id,
-                    self._ids(by_service["Ads"]),
-                ),
-                "keywords": self.connector.keywords_get(
-                    request.run_id,
-                    self._ids(by_service["Keywords"]),
-                ),
-            }
+        ):
+            return False
+        expected_ads = {
+            str(item["variant_id"]): dict(item) for item in expected_group["ads"]
+        }
+        observed_ads = {str(item.get("variant_id")): item for item in ads}
+        if set(observed_ads) != set(expected_ads):
+            return False
+        for variant_id, expected_ad in expected_ads.items():
+            observed = observed_ads[variant_id]
             if (
-                len(response["campaigns"]) != 1
-                or response["campaigns"][0].get("state") != "ON"
-                or len(response["ad_groups"]) != 1
-                or len(response["ads"]) != 2
-                or len(response["keywords"]) != 1
+                observed.get("type") != "TEXT_AD"
+                or observed.get("state") != "MODERATION"
+                or observed.get("ad_group_id") != ad_group.get("id")
+                or any(
+                    observed.get(field) != expected_ad[field]
+                    for field in (
+                        "variant_id",
+                        "title",
+                        "text",
+                        "landing_page",
+                        "utm",
+                        "media_reference",
+                    )
+                )
             ):
-                raise DirectAdapterFailure("FULL_CAMPAIGN_READBACK_FAILED")
-            self.store.complete_step(
-                request,
-                step_name,
-                {
-                    "campaign_ids": [
-                        item["id"] for item in response["campaigns"]
-                    ],
-                    "ad_group_ids": [
-                        item["id"] for item in response["ad_groups"]
-                    ],
-                    "ad_ids": [item["id"] for item in response["ads"]],
-                    "keyword_ids": [
-                        item["id"] for item in response["keywords"]
-                    ],
-                },
-                now,
-            )
-            return
-        raise LifecycleRejected("SAGA_STEP_UNKNOWN")
+                return False
+        keyword = keywords[0]
+        return (
+            keyword.get("type") == "KEYWORD"
+            and keyword.get("state") == "SUSPENDED"
+            and keyword.get("ad_group_id") == ad_group.get("id")
+            and keyword.get("keyword") == expected_group["keywords"][0]
+        )
 
     @staticmethod
     def _require_created_types(
@@ -997,7 +1337,7 @@ class CampaignLifecycleService:
                 )
             except (DirectAdapterFailure, DirectOutcomeUnknown, RuntimeError) as error:
                 failed_compensations.append(
-                    item.service + ":" + item.object_id + ":" + str(error)
+                    item.service.value + ":" + item.object_id + ":" + str(error)
                 )
         if failed_compensations:
             status = CampaignSagaState.COMPENSATION_REQUIRED
@@ -1014,4 +1354,4 @@ class CampaignLifecycleService:
             "Ads": self.connector.ads_delete,
             "Keywords": self.connector.keywords_delete,
         }
-        methods[item.service](run_id, item.object_id)
+        methods[item.service.value](run_id, item.object_id)

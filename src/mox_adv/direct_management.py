@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 
@@ -19,9 +20,45 @@ class DirectOutcomeUnknown(RuntimeError):
     """The adapter outcome cannot be determined without reconciliation."""
 
 
+class DirectService(str, Enum):
+    CAMPAIGNS = "Campaigns"
+    AD_GROUPS = "AdGroups"
+    ADS = "Ads"
+    KEYWORDS = "Keywords"
+    KEYWORD_BIDS = "KeywordBids"
+
+
+class DirectMethod(str, Enum):
+    ADD = "add"
+    GET = "get"
+    UPDATE = "update"
+    SUSPEND = "suspend"
+    RESUME = "resume"
+    ARCHIVE = "archive"
+    UNARCHIVE = "unarchive"
+    MODERATE = "moderate"
+    DELETE = "delete"
+    SET = "set"
+
+
+class DirectState(str, Enum):
+    DRAFT = "DRAFT"
+    MODERATION = "MODERATION"
+    ON = "ON"
+    SUSPENDED = "SUSPENDED"
+    ARCHIVED = "ARCHIVED"
+
+
+class DirectObjectType(str, Enum):
+    UNIFIED_CAMPAIGN = "UNIFIED_CAMPAIGN"
+    UNIFIED_AD_GROUP = "UNIFIED_AD_GROUP"
+    TEXT_AD = "TEXT_AD"
+    KEYWORD = "KEYWORD"
+
+
 @dataclass(frozen=True)
 class CreatedDirectObject:
-    service: str
+    service: DirectService
     object_id: str
     actual_type: str
 
@@ -30,15 +67,15 @@ class CreatedDirectObject:
 class DirectMethodRequest:
     run_id: str
     operation_key: str
-    service: str
-    method: str
+    service: DirectService
+    method: DirectMethod
     payload: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
 class DirectMethodResult:
-    service: str
-    method: str
+    service: DirectService
+    method: DirectMethod
     created_objects: Tuple[CreatedDirectObject, ...]
     readback: Tuple[Mapping[str, Any], ...]
 
@@ -48,6 +85,9 @@ class ProductionPilotAuthority:
     account: str
     credential_profile: str
     approval_id: str
+    proposal_id: str
+    execution_key: str
+    binding_hash: str
     armed: bool
 
 
@@ -65,6 +105,11 @@ class RunObjectRegistry(Protocol):
         run_id: str,
         service: str,
         object_id: str,
+    ) -> bool: ...
+
+    def production_authority_is_valid(
+        self,
+        authority: ProductionPilotAuthority,
     ) -> bool: ...
 
 
@@ -349,25 +394,30 @@ class DirectManagementConnectorV1:
         self,
         run_id: str,
         operation_key: str,
-        service: str,
-        method: str,
+        service: DirectService,
+        method: DirectMethod,
         payload: Mapping[str, Any],
     ) -> DirectMethodResult:
-        if (service, method) not in self._allowed:
+        typed_service = DirectService(service)
+        typed_method = DirectMethod(method)
+        if (typed_service.value, typed_method.value) not in self._allowed:
             raise DirectStateTransitionRejected(
-                "DIRECT_METHOD_NOT_ALLOWLISTED: " + service + "." + method
+                "DIRECT_METHOD_NOT_ALLOWLISTED: "
+                + typed_service.value
+                + "."
+                + typed_method.value
             )
         self._require_adapter_authority()
         result = self._adapter.invoke(
             DirectMethodRequest(
                 run_id=run_id,
                 operation_key=operation_key,
-                service=service,
-                method=method,
+                service=typed_service,
+                method=typed_method,
                 payload=copy.deepcopy(dict(payload)),
             )
         )
-        if result.service != service or result.method != method:
+        if result.service != typed_service or result.method != typed_method:
             raise DirectStateTransitionRejected("DIRECT_RESPONSE_TYPE_MISMATCH")
         return result
 
@@ -382,9 +432,13 @@ class DirectManagementConnectorV1:
             or authority is None
             or not authority.armed
             or not authority.approval_id
+            or not authority.proposal_id
+            or not authority.execution_key
+            or not authority.binding_hash.startswith("sha256:")
             or authority.credential_profile != "DIRECT_PILOT_WRITE"
             or pilot.get("direct_account") != authority.account
             or pilot.get("single_writer") is None
+            or not self._registry.production_authority_is_valid(authority)
         ):
             raise DirectStateTransitionRejected(
                 "PRODUCTION_CONNECTOR_DISABLED: validated pilot authority is absent."
@@ -410,12 +464,12 @@ class DirectManagementConnectorV1:
         self,
         service: str,
         object_id: str,
-        allowed_states: set[str],
+        allowed_states: set[DirectState],
         operation: str,
     ) -> None:
         self._require_adapter_authority()
         state = self._adapter.inspect(service, object_id).get("state")
-        if state not in allowed_states:
+        if DirectState(state) not in allowed_states:
             raise DirectStateTransitionRejected(
                 "INVALID_DIRECT_STATE_TRANSITION: "
                 + service
@@ -456,12 +510,14 @@ class FakeDirectManagementAdapter:
         fail_on: Optional[Tuple[str, str]] = None,
         fail_compensation_on: Optional[Tuple[str, str]] = None,
         timeout_after: Optional[Tuple[str, str]] = None,
+        actual_type_overrides: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.fail_on = fail_on
         self.fail_compensation_on = fail_compensation_on
         self.timeout_after = timeout_after
+        self.actual_type_overrides = dict(actual_type_overrides or {})
         self.calls: List[Tuple[str, str, Mapping[str, Any]]] = []
-        self._objects: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._objects: Dict[Tuple[DirectService, str], Dict[str, Any]] = {}
         self._sequence: Dict[str, int] = {}
         self._idempotent_results: Dict[str, DirectMethodResult] = {}
         self._timed_out_keys: set[str] = set()
@@ -476,49 +532,78 @@ class FakeDirectManagementAdapter:
                 copy.deepcopy(dict(request.payload)),
             )
         )
-        operation = (request.service, request.method)
+        self.calls[-1] = (
+            request.service.value,
+            request.method.value,
+            self.calls[-1][2],
+        )
+        operation = (request.service.value, request.method.value)
         if operation == self.fail_on:
             raise DirectAdapterFailure(
                 "FAKE_DIRECT_OPERATION_FAILED: "
-                + request.service
+                + request.service.value
                 + "."
-                + request.method
+                + request.method.value
             )
-        if operation == self.fail_compensation_on and request.method == "delete":
+        if (
+            operation == self.fail_compensation_on
+            and request.method == DirectMethod.DELETE
+        ):
             raise DirectAdapterFailure(
-                "FAKE_DIRECT_COMPENSATION_FAILED: " + request.service
+                "FAKE_DIRECT_COMPENSATION_FAILED: " + request.service.value
             )
         result = self._apply(request)
-        if request.method == "add":
+        if request.method == DirectMethod.ADD:
             self._idempotent_results[request.operation_key] = result
         if operation == self.timeout_after and request.operation_key not in self._timed_out_keys:
             self._timed_out_keys.add(request.operation_key)
             raise DirectOutcomeUnknown(
                 "FAKE_DIRECT_OUTCOME_UNKNOWN: "
-                + request.service
+                + request.service.value
                 + "."
-                + request.method
+                + request.method.value
             )
         return result
 
     def inspect(self, service: str, object_id: str) -> Mapping[str, Any]:
-        effective_service = "Keywords" if service == "KeywordBids" else service
+        typed_service = DirectService(service)
+        effective_service = (
+            DirectService.KEYWORDS
+            if typed_service == DirectService.KEYWORD_BIDS
+            else typed_service
+        )
         try:
             return copy.deepcopy(self._objects[(effective_service, object_id)])
         except KeyError as error:
             raise DirectStateTransitionRejected(
-                "DIRECT_OBJECT_NOT_FOUND: " + service + ":" + object_id
+                "DIRECT_OBJECT_NOT_FOUND: "
+                + typed_service.value
+                + ":"
+                + object_id
             ) from error
 
     def seed_object(self, service: str, value: Mapping[str, Any]) -> str:
-        object_id = self._next_id(service)
+        typed_service = DirectService(service)
+        object_id = self._next_id(typed_service)
         stored = copy.deepcopy(dict(value))
         stored["id"] = object_id
-        self._objects[(service, object_id)] = stored
+        self._objects[(typed_service, object_id)] = stored
         return object_id
 
     def set_state(self, service: str, object_id: str, state: str) -> None:
-        self._objects[(service, object_id)]["state"] = state
+        self._objects[(DirectService(service), object_id)]["state"] = DirectState(
+            state
+        ).value
+
+    def mutate_object(
+        self,
+        service: str,
+        object_id: str,
+        changes: Mapping[str, Any],
+    ) -> None:
+        self._objects[(DirectService(service), object_id)].update(
+            copy.deepcopy(dict(changes))
+        )
 
     def operation_count(self, service: str, method: str) -> int:
         return sum(1 for called_service, called_method, _ in self.calls if (
@@ -530,31 +615,37 @@ class FakeDirectManagementAdapter:
         return tuple(sorted(object_id for _, object_id in self._objects))
 
     def _apply(self, request: DirectMethodRequest) -> DirectMethodResult:
-        if request.method == "add":
-            return self._add(request)
-        if request.method == "get":
-            return self._read(request)
-        if request.method == "delete":
-            object_id = str(request.payload["id"])
-            effective_service = (
-                "Keywords" if request.service == "KeywordBids" else request.service
-            )
-            self._objects.pop((effective_service, object_id), None)
-            return self._result(request, readback=())
-        if request.method in {"update", "set"}:
-            return self._update(request)
-        if request.method in {
-            "suspend",
-            "resume",
-            "archive",
-            "unarchive",
-            "moderate",
-        }:
-            return self._transition(request)
-        raise DirectAdapterFailure("Unsupported fake Direct operation.")
+        handlers = {
+            DirectMethod.ADD: self._add,
+            DirectMethod.GET: self._read,
+            DirectMethod.DELETE: self._delete,
+            DirectMethod.UPDATE: self._update,
+            DirectMethod.SET: self._update,
+            DirectMethod.SUSPEND: self._transition,
+            DirectMethod.RESUME: self._transition,
+            DirectMethod.ARCHIVE: self._transition,
+            DirectMethod.UNARCHIVE: self._transition,
+            DirectMethod.MODERATE: self._transition,
+        }
+        try:
+            return handlers[request.method](request)
+        except KeyError as error:
+            raise DirectAdapterFailure(
+                "Unsupported fake Direct operation."
+            ) from error
+
+    def _delete(self, request: DirectMethodRequest) -> DirectMethodResult:
+        object_id = str(request.payload["id"])
+        effective_service = (
+            DirectService.KEYWORDS
+            if request.service == DirectService.KEYWORD_BIDS
+            else request.service
+        )
+        self._objects.pop((effective_service, object_id), None)
+        return self._result(request, readback=())
 
     def _add(self, request: DirectMethodRequest) -> DirectMethodResult:
-        if request.service == "Ads":
+        if request.service == DirectService.ADS:
             raw_items = request.payload.get("items")
             if not isinstance(raw_items, list):
                 raw_items = [request.payload]
@@ -563,21 +654,29 @@ class FakeDirectManagementAdapter:
         created = []
         for raw in raw_items:
             object_id = self._next_id(request.service)
-            if request.service == "Campaigns":
-                actual_type = str(raw.get("type", "UNIFIED_CAMPAIGN"))
+            if request.service == DirectService.CAMPAIGNS:
+                actual_type = str(
+                    raw.get("type", DirectObjectType.UNIFIED_CAMPAIGN.value)
+                )
                 state = str(raw.get("state", "SUSPENDED"))
-            elif request.service == "AdGroups":
-                actual_type = "UNIFIED_AD_GROUP"
+            elif request.service == DirectService.AD_GROUPS:
+                actual_type = DirectObjectType.UNIFIED_AD_GROUP.value
                 state = "ON"
-            elif request.service == "Ads":
-                actual_type = "TEXT_AD"
+            elif request.service == DirectService.ADS:
+                actual_type = DirectObjectType.TEXT_AD.value
                 state = "DRAFT"
-            elif request.service == "Keywords":
-                actual_type = "KEYWORD"
+            elif request.service == DirectService.KEYWORDS:
+                actual_type = DirectObjectType.KEYWORD.value
                 state = "SUSPENDED"
             else:
                 raise DirectAdapterFailure("Unsupported fake add service.")
+            actual_type = self.actual_type_overrides.get(
+                request.service.value,
+                actual_type,
+            )
             stored = copy.deepcopy(dict(raw))
+            if request.service == DirectService.ADS:
+                stored["ad_group_id"] = request.payload["ad_group_id"]
             stored.update(
                 {
                     "id": object_id,
@@ -605,7 +704,9 @@ class FakeDirectManagementAdapter:
     def _update(self, request: DirectMethodRequest) -> DirectMethodResult:
         object_id = str(request.payload["id"])
         effective_service = (
-            "Keywords" if request.service == "KeywordBids" else request.service
+            DirectService.KEYWORDS
+            if request.service == DirectService.KEYWORD_BIDS
+            else request.service
         )
         value = self._objects[(effective_service, object_id)]
         value.update(copy.deepcopy(dict(request.payload["changes"])))
@@ -614,15 +715,15 @@ class FakeDirectManagementAdapter:
     def _transition(self, request: DirectMethodRequest) -> DirectMethodResult:
         ids = (
             tuple(str(item) for item in request.payload["ids"])
-            if request.method == "moderate"
+            if request.method == DirectMethod.MODERATE
             else (str(request.payload["id"]),)
         )
         states = {
-            "suspend": "SUSPENDED",
-            "resume": "ON",
-            "archive": "ARCHIVED",
-            "unarchive": "SUSPENDED",
-            "moderate": "MODERATION",
+            DirectMethod.SUSPEND: DirectState.SUSPENDED.value,
+            DirectMethod.RESUME: DirectState.ON.value,
+            DirectMethod.ARCHIVE: DirectState.ARCHIVED.value,
+            DirectMethod.UNARCHIVE: DirectState.SUSPENDED.value,
+            DirectMethod.MODERATE: DirectState.MODERATION.value,
         }
         readback = []
         for object_id in ids:
@@ -631,10 +732,10 @@ class FakeDirectManagementAdapter:
             readback.append(copy.deepcopy(value))
         return self._result(request, readback=tuple(readback))
 
-    def _next_id(self, service: str) -> str:
-        next_value = self._sequence.get(service, 0) + 1
-        self._sequence[service] = next_value
-        return service.lower() + "-" + str(next_value)
+    def _next_id(self, service: DirectService) -> str:
+        next_value = self._sequence.get(service.value, 0) + 1
+        self._sequence[service.value] = next_value
+        return service.value.lower() + "-" + str(next_value)
 
     @staticmethod
     def _result(

@@ -9,7 +9,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mox_adv.campaign_lifecycle import (
+    CampaignApproval,
     CampaignCreationRequest,
+    CampaignDraftSafetyBindings,
     CampaignLifecycleService,
     CampaignSagaState,
     CampaignSagaStore,
@@ -126,10 +128,18 @@ def make_request(
     )
 
 
+def safety_bindings() -> CampaignDraftSafetyBindings:
+    return CampaignDraftSafetyBindings(
+        allowed_landing_hosts=("allowlisted.example",),
+        prohibited_phrases=("guaranteed results",),
+        prepared_media_references=("prepared-media-1", "prepared-media-2"),
+    )
+
+
 class CampaignDraftValidationTests(unittest.TestCase):
     def test_approved_unified_search_shape_is_validated_deterministically(self) -> None:
         policy = load_policy()
-        draft = validate_campaign_draft(draft_payload(), policy)
+        draft = validate_campaign_draft(draft_payload(), policy, safety_bindings())
 
         self.assertEqual("UNIFIED_CAMPAIGN", draft.campaign_type)
         self.assertEqual(("A", "B"), tuple(ad["variant_id"] for ad in draft.groups[0]["ads"]))
@@ -154,10 +164,21 @@ class CampaignDraftValidationTests(unittest.TestCase):
         ] = "https://other.example/lead"
         rejected_values.append(foreign_landing)
 
+        prohibited_copy = draft_payload()
+        prohibited_copy["groups"][0]["ads"][1]["text"] = "Guaranteed results"
+        rejected_values.append(prohibited_copy)
+
+        unprepared_media = draft_payload()
+        unprepared_media["groups"][0]["ads"][1][
+            "media_reference"
+        ] = "unprepared-media"
+        unprepared_media["media_references"].append("unprepared-media")
+        rejected_values.append(unprepared_media)
+
         for value in rejected_values:
             with self.subTest(value=value):
                 with self.assertRaises(LifecycleRejected):
-                    validate_campaign_draft(value, policy)
+                    validate_campaign_draft(value, policy, safety_bindings())
 
 
 class CampaignLifecycleTests(unittest.TestCase):
@@ -169,8 +190,24 @@ class CampaignLifecycleTests(unittest.TestCase):
         self.adapter = FakeDirectManagementAdapter()
         self.store = CampaignSagaStore(self.database)
         self.store.register_creation_reservation(make_reservation(), NOW)
-        self.draft = validate_campaign_draft(draft_payload(), self.policy)
+        self.draft = validate_campaign_draft(
+            draft_payload(),
+            self.policy,
+            safety_bindings(),
+        )
         self.request = make_request(self.draft)
+        self.store.register_campaign_approval(
+            CampaignApproval(
+                approval_id=self.request.approval_id,
+                proposal_id=self.request.proposal_id,
+                binding_hash=self.request.approval_binding(
+                    str(self.policy["policy_id"])
+                ),
+                approver="sviridov",
+                authentication="authenticated_macos_user",
+                expires_at=NOW + timedelta(minutes=15),
+            )
+        )
 
     def service(self) -> CampaignLifecycleService:
         return CampaignLifecycleService(
@@ -181,6 +218,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.adapter,
                 CampaignSagaStore(self.database),
             ),
+            safety_bindings=safety_bindings(),
         )
 
     def test_saga_resumes_each_ordered_step_and_repeating_key_is_idempotent(self) -> None:
@@ -198,6 +236,13 @@ class CampaignLifecycleTests(unittest.TestCase):
         for expected_completed_count in range(1, len(expected_steps) + 1):
             result = self.service().execute(self.request, NOW, max_steps=1)
             self.assertEqual(expected_steps[:expected_completed_count], result.completed_steps)
+            if expected_completed_count == 1:
+                self.assertEqual(
+                    "USED",
+                    self.store.campaign_approval_status(
+                        self.request.approval_id
+                    ),
+                )
 
         self.assertEqual(CampaignSagaState.APPLIED, result.status)
         self.assertEqual(
@@ -226,7 +271,11 @@ class CampaignLifecycleTests(unittest.TestCase):
         self.service().execute(self.request, NOW, max_steps=1)
         changed_payload = draft_payload()
         changed_payload["budget"]["weekly_micros"] = 400_000_000
-        changed_draft = validate_campaign_draft(changed_payload, self.policy)
+        changed_draft = validate_campaign_draft(
+            changed_payload,
+            self.policy,
+            safety_bindings(),
+        )
         changed_request = replace(self.request, draft=changed_draft)
         calls_before = tuple(self.adapter.calls)
 
@@ -263,6 +312,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.adapter,
                 expired_store,
             ),
+            safety_bindings=safety_bindings(),
         )
         with self.assertRaises(LifecycleRejected):
             expired_service.execute(self.request, NOW)
@@ -274,6 +324,7 @@ class CampaignLifecycleTests(unittest.TestCase):
             self.policy,
             self.store,
             DirectManagementConnectorV1(self.policy, adapter, self.store),
+            safety_bindings(),
         )
 
         first = service.execute(self.request, NOW)
@@ -287,7 +338,14 @@ class CampaignLifecycleTests(unittest.TestCase):
 
     def test_restart_after_persisted_dispatch_never_repeats_an_unknown_write(self) -> None:
         canonical_plan = self.request.canonical_plan(str(self.policy["policy_id"]))
-        self.store.start_or_load(self.request, canonical_plan, NOW)
+        approver = self.policy["principals"]["approver"]
+        self.store.start_or_load(
+            self.request,
+            canonical_plan,
+            NOW,
+            approver["identity"],
+            approver["authentication"],
+        )
         self.store.begin_step(self.request.execution_key, "CAMPAIGN_ADD", NOW)
 
         result = self.service().execute(self.request, NOW)
@@ -302,6 +360,7 @@ class CampaignLifecycleTests(unittest.TestCase):
             self.policy,
             self.store,
             DirectManagementConnectorV1(self.policy, adapter, self.store),
+            safety_bindings(),
         )
 
         result = service.execute(self.request, NOW)
@@ -322,12 +381,90 @@ class CampaignLifecycleTests(unittest.TestCase):
             self.policy,
             self.store,
             DirectManagementConnectorV1(self.policy, adapter, self.store),
+            safety_bindings(),
         )
 
         result = service.execute(self.request, NOW)
 
         self.assertEqual(CampaignSagaState.COMPENSATION_REQUIRED, result.status)
         self.assertIn("AdGroups", {item.service for item in result.created_objects})
+
+    def test_missing_or_unbound_approval_blocks_before_first_write(self) -> None:
+        other_database = Path(self.temporary_directory.name) / "approval.sqlite3"
+        store = CampaignSagaStore(other_database)
+        store.register_creation_reservation(make_reservation(), NOW)
+        service = CampaignLifecycleService(
+            self.policy,
+            store,
+            DirectManagementConnectorV1(self.policy, self.adapter, store),
+            safety_bindings(),
+        )
+
+        with self.assertRaises(LifecycleRejected):
+            service.execute(self.request, NOW)
+
+        self.assertEqual([], self.adapter.calls)
+
+        unbound_database = Path(self.temporary_directory.name) / "unbound.sqlite3"
+        unbound_store = CampaignSagaStore(unbound_database)
+        unbound_store.register_creation_reservation(make_reservation(), NOW)
+        unbound_store.register_campaign_approval(
+            CampaignApproval(
+                approval_id=self.request.approval_id,
+                proposal_id=self.request.proposal_id,
+                binding_hash="sha256:" + "0" * 64,
+                approver="sviridov",
+                authentication="authenticated_macos_user",
+                expires_at=NOW + timedelta(minutes=15),
+            )
+        )
+        unbound_service = CampaignLifecycleService(
+            self.policy,
+            unbound_store,
+            DirectManagementConnectorV1(
+                self.policy,
+                self.adapter,
+                unbound_store,
+            ),
+            safety_bindings(),
+        )
+        with self.assertRaises(LifecycleRejected):
+            unbound_service.execute(self.request, NOW)
+        self.assertEqual([], self.adapter.calls)
+
+    def test_full_readback_rejects_structure_that_diverges_from_canonical_plan(self) -> None:
+        first = self.service().execute(self.request, NOW, max_steps=7)
+        campaign_id = next(
+            item.object_id
+            for item in first.created_objects
+            if item.service == "Campaigns"
+        )
+        self.adapter.mutate_object(
+            "Campaigns",
+            campaign_id,
+            {"WeeklySpendLimit": 1},
+        )
+
+        result = self.service().execute(self.request, NOW)
+
+        self.assertNotEqual(CampaignSagaState.APPLIED, result.status)
+        self.assertIn("FULL_CAMPAIGN_READBACK_FAILED", result.detail)
+
+    def test_unexpected_type_is_registered_before_compensation(self) -> None:
+        adapter = FakeDirectManagementAdapter(
+            actual_type_overrides={"Campaigns": "WRONG_CAMPAIGN_TYPE"}
+        )
+        service = CampaignLifecycleService(
+            self.policy,
+            self.store,
+            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            safety_bindings(),
+        )
+
+        result = service.execute(self.request, NOW)
+
+        self.assertEqual(CampaignSagaState.PARTIALLY_APPLIED, result.status)
+        self.assertEqual((), adapter.object_ids())
 
 
 class DirectIntegrationMatrixTests(unittest.TestCase):
@@ -579,6 +716,9 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
                 account="sim-direct-account",
                 credential_profile="DIRECT_PILOT_WRITE",
                 approval_id="approval-1",
+                proposal_id="proposal-1",
+                execution_key="execution-1",
+                binding_hash="sha256:" + "1" * 64,
                 armed=True,
             ),
         )

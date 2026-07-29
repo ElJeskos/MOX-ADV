@@ -298,6 +298,17 @@ class DurableControlState:
                     execution_key TEXT,
                     FOREIGN KEY(proposal_id) REFERENCES prepared_changes(proposal_id)
                 );
+                CREATE TABLE IF NOT EXISTS campaign_approvals (
+                    approval_id TEXT PRIMARY KEY,
+                    proposal_id TEXT NOT NULL,
+                    binding_hash TEXT NOT NULL,
+                    approver TEXT NOT NULL,
+                    authentication TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reserved_execution_key TEXT,
+                    used_at TEXT
+                );
                 CREATE TABLE IF NOT EXISTS kill_switches (
                     scope TEXT PRIMARY KEY,
                     active INTEGER NOT NULL,
@@ -331,6 +342,62 @@ class DurableControlState:
                     SELECT RAISE(ABORT, 'immutable approval fields');
                 END;
                 """
+            )
+
+    def register_campaign_approval_authority(
+        self,
+        *,
+        approval_id: str,
+        proposal_id: str,
+        binding_hash: str,
+        approver: str,
+        authentication: str,
+        expires_at: datetime,
+    ) -> None:
+        immutable = (
+            proposal_id,
+            binding_hash,
+            approver,
+            authentication,
+            _utc_text(expires_at),
+        )
+        if (
+            not approval_id
+            or not proposal_id
+            or not binding_hash.startswith("sha256:")
+            or not approver
+            or not authentication
+        ):
+            raise ControlRejected(
+                "INVALID_INPUT",
+                "campaign approval authority is invalid.",
+            )
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM campaign_approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            if existing is not None:
+                if tuple(
+                    existing[name]
+                    for name in (
+                        "proposal_id",
+                        "binding_hash",
+                        "approver",
+                        "authentication",
+                        "expires_at",
+                    )
+                ) != immutable:
+                    raise ControlRejected(
+                        "IMMUTABLE_APPROVAL_CONFLICT",
+                        "campaign approval binding changed.",
+                    )
+                return
+            connection.execute(
+                "INSERT INTO campaign_approvals "
+                "(approval_id, proposal_id, binding_hash, approver, authentication, "
+                "expires_at, status) VALUES (?, ?, ?, ?, ?, ?, 'AVAILABLE')",
+                (approval_id,) + immutable,
             )
 
     def register_prepared_change(self, prepared: PreparedChange) -> None:
