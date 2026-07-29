@@ -1,0 +1,47 @@
+{
+  "schema_version": "llm-projection-v1",
+  "period_start": "2026-07-21",
+  "period_end": "2026-07-27",
+  "timezone": "UTC",
+  "attribution": {
+    "direct": "AUTO",
+    "metrika": "automatic"
+  },
+  "campaign_state": "ON",
+  "campaign_strategy": "HIGHEST_POSITION",
+  "current_budget": 10000000000,
+  "current_bid": 100000000,
+  "current_ad_variant": "A",
+  "impressions": 10000,
+  "clicks": 100,
+  "cost_micros": 1000000000,
+  "visits": 100,
+  "goal_visits": 0,
+  "ctr": "1",
+  "cpc": "10",
+  "conversion_rate": "0",
+  "cpa": "NOT_APPLICABLE",
+  "budget_utilization": "10",
+  "freshness": {
+    "direct_minutes": 5,
+    "metrika_minutes": 5,
+    "watermark_skew_minutes": 1
+  },
+  "comparability": {
+    "status": "INCOMPATIBLE",
+    "confidence": "READY",
+    "financial_recommendations_allowed": false
+  },
+  "observed_facts": [
+    "SOURCE_MISMATCH"
+  ],
+  "business_goal": {
+    "event": "lead_submitted",
+    "meaning": "A visitor submitted the lead form."
+  },
+  "allowed_change_history": [],
+  "policy_limits": {
+    "source_mismatch_percent": 30,
+    "observation_window_hours": 72
+  }
+}

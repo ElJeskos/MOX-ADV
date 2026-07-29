@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mox-adv.local/schemas/campaign-draft-v1.schema.json",
+  "title": "CampaignDraftV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "draft_id",
+    "business_goal",
+    "primary_conversion",
+    "campaign_type",
+    "strategy",
+    "geography",
+    "schedule",
+    "budget",
+    "limits",
+    "groups",
+    "landing_page",
+    "media_references"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "campaign-draft-v1"
+    },
+    "draft_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "business_goal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "meaning"
+      ],
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/shortText"
+        },
+        "meaning": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "primary_conversion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event"
+      ],
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/shortText"
+        }
+      }
+    },
+    "campaign_type": {
+      "$ref": "#/$defs/shortText"
+    },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "placement",
+        "search",
+        "network"
+      ],
+      "properties": {
+        "placement": {
+          "$ref": "#/$defs/shortText"
+        },
+        "search": {
+          "$ref": "#/$defs/shortText"
+        },
+        "network": {
+          "$ref": "#/$defs/shortText"
+        }
+      }
+    },
+    "geography": {
+      "$ref": "#/$defs/uniqueTextArray"
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timezone",
+        "days",
+        "start",
+        "end"
+      ],
+      "properties": {
+        "timezone": {
+          "$ref": "#/$defs/shortText"
+        },
+        "days": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/uniqueTextArray"
+            },
+            {
+              "minItems": 1
+            }
+          ]
+        },
+        "start": {
+          "type": "string",
+          "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+        },
+        "end": {
+          "type": "string",
+          "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "currency",
+        "weekly_micros"
+      ],
+      "properties": {
+        "currency": {
+          "const": "RUB"
+        },
+        "weekly_micros": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maximum_weekly_micros",
+        "maximum_bid_micros"
+      ],
+      "properties": {
+        "maximum_weekly_micros": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_bid_micros": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "keywords",
+          "negative_keywords",
+          "audiences",
+          "ads"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/$defs/shortText"
+          },
+          "keywords": {
+            "$ref": "#/$defs/uniqueTextArray"
+          },
+          "negative_keywords": {
+            "$ref": "#/$defs/uniqueTextArray"
+          },
+          "audiences": {
+            "$ref": "#/$defs/uniqueTextArray"
+          },
+          "ads": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "variant_id",
+                "title",
+                "text",
+                "landing_page",
+                "utm",
+                "media_reference"
+              ],
+              "properties": {
+                "variant_id": {
+                  "enum": [
+                    "A",
+                    "B"
+                  ]
+                },
+                "title": {
+                  "$ref": "#/$defs/text"
+                },
+                "text": {
+                  "$ref": "#/$defs/text"
+                },
+                "landing_page": {
+                  "$ref": "#/$defs/text"
+                },
+                "utm": {
+                  "$ref": "#/$defs/text"
+                },
+                "media_reference": {
+                  "$ref": "#/$defs/text"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "landing_page": {
+      "$ref": "#/$defs/text"
+    },
+    "media_references": {
+      "$ref": "#/$defs/uniqueTextArray"
+    }
+  },
+  "$defs": {
+    "shortText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "uniqueTextArray": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/text"
+      }
+    }
+  }
+}

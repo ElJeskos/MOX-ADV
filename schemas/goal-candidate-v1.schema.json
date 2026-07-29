@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mox-adv.local/schemas/goal-candidate-v1.schema.json",
+  "title": "GoalCandidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "event",
+    "site_location",
+    "type",
+    "business_meaning",
+    "priority",
+    "duplicate_signals"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "goal-candidate-v1"
+    },
+    "name": {
+      "$ref": "#/$defs/shortText"
+    },
+    "event": {
+      "$ref": "#/$defs/shortText"
+    },
+    "site_location": {
+      "$ref": "#/$defs/text"
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "business_meaning": {
+      "$ref": "#/$defs/text"
+    },
+    "priority": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "duplicate_signals": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/text"
+      }
+    }
+  },
+  "$defs": {
+    "shortText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    }
+  }
+}

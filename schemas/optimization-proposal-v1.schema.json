@@ -1,0 +1,508 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mox-adv.local/schemas/optimization-proposal-v1.schema.json",
+  "title": "OptimizationProposalV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "proposal_id",
+    "proposal_version",
+    "run_id",
+    "snapshot_id",
+    "created_at",
+    "expires_at",
+    "status",
+    "observed_facts",
+    "hypotheses",
+    "actions",
+    "evidence_fields",
+    "expected_effect_direction",
+    "minimum_observation_window_hours",
+    "risks",
+    "preconditions",
+    "rollback_condition",
+    "missing_data_requests",
+    "expected_diff",
+    "expected_fingerprint",
+    "explanation_ru"
+  ],
+  "properties": {
+    "proposal_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$"
+    },
+    "proposal_version": {
+      "const": "optimization-proposal-v1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "enum": [
+        "EFFECTIVE",
+        "INEFFECTIVE",
+        "INSUFFICIENT_DATA",
+        "NEEDS_HUMAN"
+      ]
+    },
+    "observed_facts": {
+      "$ref": "#/$defs/nonEmptyCodes"
+    },
+    "hypotheses": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rank",
+          "code"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          },
+          "code": {
+            "$ref": "#/$defs/code"
+          }
+        }
+      }
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "parameters",
+          "dependencies",
+          "limits",
+          "rollback_conditions"
+        ],
+        "properties": {
+          "action": {
+            "enum": [
+              "KEEP",
+              "INCREASE_WEEKLY_BUDGET",
+              "DECREASE_WEEKLY_BUDGET",
+              "INCREASE_SEARCH_BID",
+              "DECREASE_SEARCH_BID",
+              "SET_AD_VARIANT",
+              "SUSPEND_CAMPAIGN",
+              "RESUME_CAMPAIGN",
+              "REQUEST_HUMAN_HELP"
+            ]
+          },
+          "parameters": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "maxProperties": 0
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "variant_id"
+                ],
+                "properties": {
+                  "variant_id": {
+                    "enum": [
+                      "A",
+                      "B"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reason_code"
+                ],
+                "properties": {
+                  "reason_code": {
+                    "enum": [
+                      "INVALID_INPUT",
+                      "AMBIGUOUS_DATA",
+                      "UNSUPPORTED_STATE",
+                      "UNSUPPORTED_ACTION",
+                      "AGENT_ERROR",
+                      "API_ERROR",
+                      "OUT_OF_BOUNDS",
+                      "UNKNOWN_RESULT"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "dependencies": {
+            "$ref": "#/$defs/codes"
+          },
+          "limits": {
+            "$ref": "#/$defs/codes"
+          },
+          "rollback_conditions": {
+            "$ref": "#/$defs/codes"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "const": "SET_AD_VARIANT"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "variant_id"
+                  ],
+                  "properties": {
+                    "variant_id": {
+                      "enum": [
+                        "A",
+                        "B"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "const": "REQUEST_HUMAN_HELP"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "reason_code"
+                  ],
+                  "properties": {
+                    "reason_code": {
+                      "enum": [
+                        "INVALID_INPUT",
+                        "AMBIGUOUS_DATA",
+                        "UNSUPPORTED_STATE",
+                        "UNSUPPORTED_ACTION",
+                        "AGENT_ERROR",
+                        "API_ERROR",
+                        "OUT_OF_BOUNDS",
+                        "UNKNOWN_RESULT"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "KEEP",
+                    "INCREASE_WEEKLY_BUDGET",
+                    "DECREASE_WEEKLY_BUDGET",
+                    "INCREASE_SEARCH_BID",
+                    "DECREASE_SEARCH_BID",
+                    "SUSPEND_CAMPAIGN",
+                    "RESUME_CAMPAIGN"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "maxProperties": 0
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "evidence_fields": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      }
+    },
+    "expected_effect_direction": {
+      "enum": [
+        "POSITIVE",
+        "NEGATIVE",
+        "NO_CHANGE",
+        "UNKNOWN"
+      ]
+    },
+    "minimum_observation_window_hours": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "risks": {
+      "$ref": "#/$defs/codes"
+    },
+    "preconditions": {
+      "$ref": "#/$defs/codes"
+    },
+    "rollback_condition": {
+      "$ref": "#/$defs/code"
+    },
+    "missing_data_requests": {
+      "$ref": "#/$defs/codes"
+    },
+    "expected_diff": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation"
+          ],
+          "properties": {
+            "operation": {
+              "const": "NO_CHANGE"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "relative_step_percent"
+          ],
+          "properties": {
+            "operation": {
+              "enum": [
+                "INCREASE_WEEKLY_BUDGET",
+                "DECREASE_WEEKLY_BUDGET",
+                "INCREASE_SEARCH_BID",
+                "DECREASE_SEARCH_BID"
+              ]
+            },
+            "relative_step_percent": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "variant_id"
+          ],
+          "properties": {
+            "operation": {
+              "const": "SET_AD_VARIANT"
+            },
+            "variant_id": {
+              "enum": [
+                "A",
+                "B"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "target_state"
+          ],
+          "properties": {
+            "operation": {
+              "enum": [
+                "SUSPEND_CAMPAIGN",
+                "RESUME_CAMPAIGN"
+              ]
+            },
+            "target_state": {
+              "enum": [
+                "SUSPENDED",
+                "ON"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "expected_fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "explanation_ru": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "[А-Яа-яЁё]"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "EFFECTIVE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "KEEP",
+                    "INCREASE_WEEKLY_BUDGET",
+                    "INCREASE_SEARCH_BID",
+                    "RESUME_CAMPAIGN"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "INEFFECTIVE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "KEEP",
+                    "DECREASE_WEEKLY_BUDGET",
+                    "DECREASE_SEARCH_BID",
+                    "SET_AD_VARIANT",
+                    "SUSPEND_CAMPAIGN"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "INSUFFICIENT_DATA"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "properties": {
+                "action": {
+                  "const": "KEEP"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "NEEDS_HUMAN"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "properties": {
+                "action": {
+                  "const": "REQUEST_HUMAN_HELP"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "code": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+    },
+    "codes": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/code"
+      }
+    },
+    "nonEmptyCodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/code"
+      }
+    }
+  }
+}
