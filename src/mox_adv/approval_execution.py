@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping, Optional, Tuple
 
 from mox_adv.commands import (
     ACTION_SPECS,
+    ActionFamily,
     CommandRejected,
     OptimizationAction,
     build_high_level_command,
@@ -173,7 +174,7 @@ class ApprovalRequiredPolicy:
         return PolicyOutcome(True, None)
 
     def numeric_bounds(self, prepared: PreparedChange) -> Tuple[int, int]:
-        if ACTION_SPECS[prepared.action].family == "weekly_budget":
+        if ACTION_SPECS[prepared.action].family == ActionFamily.WEEKLY_BUDGET:
             return (
                 1,
                 int(self.policy["limits"]["platform_weekly_spend_rub"]) * 1_000_000,

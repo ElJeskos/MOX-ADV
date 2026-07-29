@@ -22,9 +22,16 @@ class OptimizationAction(str, Enum):
     RESUME_CAMPAIGN = "RESUME_CAMPAIGN"
 
 
+class ActionFamily(str, Enum):
+    WEEKLY_BUDGET = "weekly_budget"
+    SEARCH_BID = "search_bid"
+    AD_VARIANT = "ad_variant"
+    CAMPAIGN_STATE = "campaign_state"
+
+
 @dataclass(frozen=True)
 class ActionSpec:
-    family: str
+    family: ActionFamily
     service: str
     method: str
     relative_percent: Optional[int] = None
@@ -35,41 +42,41 @@ class ActionSpec:
 
 ACTION_SPECS = {
     OptimizationAction.INCREASE_WEEKLY_BUDGET: ActionSpec(
-        "weekly_budget",
+        ActionFamily.WEEKLY_BUDGET,
         "Campaigns",
         "update",
         10,
         rollback_action=OptimizationAction.DECREASE_WEEKLY_BUDGET,
     ),
     OptimizationAction.DECREASE_WEEKLY_BUDGET: ActionSpec(
-        "weekly_budget",
+        ActionFamily.WEEKLY_BUDGET,
         "Campaigns",
         "update",
         -10,
         rollback_action=OptimizationAction.INCREASE_WEEKLY_BUDGET,
     ),
     OptimizationAction.INCREASE_SEARCH_BID: ActionSpec(
-        "search_bid",
+        ActionFamily.SEARCH_BID,
         "KeywordBids",
         "set",
         10,
         rollback_action=OptimizationAction.DECREASE_SEARCH_BID,
     ),
     OptimizationAction.DECREASE_SEARCH_BID: ActionSpec(
-        "search_bid",
+        ActionFamily.SEARCH_BID,
         "KeywordBids",
         "set",
         -10,
         rollback_action=OptimizationAction.INCREASE_SEARCH_BID,
     ),
     OptimizationAction.SET_AD_VARIANT: ActionSpec(
-        "ad_variant",
+        ActionFamily.AD_VARIANT,
         "Ads",
         "update",
         rollback_action=OptimizationAction.SET_AD_VARIANT,
     ),
     OptimizationAction.SUSPEND_CAMPAIGN: ActionSpec(
-        "campaign_state",
+        ActionFamily.CAMPAIGN_STATE,
         "Campaigns",
         "suspend",
         source_state="ON",
@@ -77,7 +84,7 @@ ACTION_SPECS = {
         rollback_action=OptimizationAction.RESUME_CAMPAIGN,
     ),
     OptimizationAction.RESUME_CAMPAIGN: ActionSpec(
-        "campaign_state",
+        ActionFamily.CAMPAIGN_STATE,
         "Campaigns",
         "resume",
         source_state="SUSPENDED",
@@ -114,13 +121,13 @@ class PreparedCommandSource(Protocol):
 
 @dataclass(frozen=True)
 class RollbackCommand:
-    action: str
+    action: OptimizationAction
     target_value: Any
 
 
 @dataclass(frozen=True)
 class HighLevelCommandBase:
-    action: str
+    action: OptimizationAction
     current_value: Any
     target_value: Any
     dry_run: bool
@@ -215,11 +222,13 @@ def build_high_level_command(
             raise CommandRejected("OUT_OF_BOUNDS: target value exceeds an exact limit.")
         assert spec.rollback_action is not None
         rollback = RollbackCommand(
-            action=spec.rollback_action.value,
+            action=spec.rollback_action,
             target_value=current,
         )
         command_type = (
-            WeeklyBudgetCommand if spec.family == "weekly_budget" else SearchBidCommand
+            WeeklyBudgetCommand
+            if spec.family == ActionFamily.WEEKLY_BUDGET
+            else SearchBidCommand
         )
         return command_type(
             **_authority_fields(
@@ -234,7 +243,7 @@ def build_high_level_command(
             rollback=rollback,
         )
 
-    if spec.family == "ad_variant":
+    if spec.family == ActionFamily.AD_VARIANT:
         if current not in {"A", "B"} or target not in {"A", "B"} or current == target:
             raise CommandRejected("INVALID_INPUT: ad variant transition is invalid.")
         if diff != {"operation": action, "variant_id": target}:
@@ -249,10 +258,10 @@ def build_high_level_command(
                 minimum_value,
                 maximum_value,
             ),
-            rollback=RollbackCommand(action=action.value, target_value=current),
+            rollback=RollbackCommand(action=action, target_value=current),
         )
 
-    if spec.family == "campaign_state":
+    if spec.family == ActionFamily.CAMPAIGN_STATE:
         if current != spec.source_state or target != spec.target_state:
             raise CommandRejected(
                 "INVALID_INPUT: campaign state transition is invalid."
@@ -271,7 +280,7 @@ def build_high_level_command(
                 maximum_value,
             ),
             rollback=RollbackCommand(
-                action=spec.rollback_action.value,
+                action=spec.rollback_action,
                 target_value=current,
             ),
         )
@@ -281,7 +290,7 @@ def build_high_level_command(
 
 def _authority_fields(
     prepared: PreparedCommandSource,
-    action: str,
+    action: OptimizationAction,
     current_value: Any,
     target_value: Any,
     expected_diff: Mapping[str, Any],
