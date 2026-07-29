@@ -62,7 +62,9 @@ class GoalAuthority:
     site_zone: str
     allowed_actions: tuple[str, ...]
     expires_at: datetime
-    binding_hash: str = ""
+    policy_id: str
+    binding_hash: str
+    action_quota: int = 1
 
 
 @dataclass(frozen=True)

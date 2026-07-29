@@ -6,6 +6,10 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
+from mox_adv.control_state import (
+    ControlRejected,
+    MacOSLocalPrincipalAuthenticator,
+)
 from mox_adv.goal_adapters import (
     FakeAdapterTimeout,
     FakeMetrikaGoalAdapter,
@@ -41,6 +45,7 @@ class GoalLifecycleService:
         store: GoalLifecycleStore,
         goal_adapter: FakeMetrikaGoalAdapter,
         site_adapter: FakeSitePublishAdapter,
+        semantic_authenticator: Any = None,
     ) -> None:
         if not goal_adapter.is_fake or not site_adapter.is_fake:
             raise GoalLifecycleRejected("FAKE_ADAPTER_REQUIRED")
@@ -48,6 +53,15 @@ class GoalLifecycleService:
         self.store = store
         self.goal_adapter = goal_adapter
         self.site_adapter = site_adapter
+        self.semantic_authenticator = (
+            MacOSLocalPrincipalAuthenticator(
+                expected_identity=str(
+                    policy["principals"]["product_signoff"]["identity"]
+                )
+            )
+            if semantic_authenticator is None
+            else semantic_authenticator
+        )
 
     def create_candidate(
         self,
@@ -100,6 +114,7 @@ class GoalLifecycleService:
             credential_profile=credential_profile,
             authority_id=authority_id,
             authority_binding_hash=binding_hash,
+            policy_id=str(self.policy["policy_id"]),
             signature=signature,
             plan_hash=canonical_hash(plan),
             expected_approval_principal=self.policy["principals"]["approver"],
@@ -196,6 +211,7 @@ class GoalLifecycleService:
             site_zone=site_zone,
             authority_id=authority_id,
             authority_binding_hash=binding_hash,
+            policy_id=str(self.policy["policy_id"]),
             plan_hash=canonical_hash(plan),
             expected_approval_principal=self.policy["principals"]["approver"],
             expected_mandate_principal=self.policy["principals"]["mandate_issuer"],
@@ -310,8 +326,19 @@ class GoalLifecycleService:
     ) -> GoalCandidateRecord:
         del now
         candidate = self.store.load_candidate(candidate_id)
-        expected = self.policy["principals"]["product_signoff"]["identity"]
-        if not reviewer or reviewer != expected:
+        expected = self.policy["principals"]["product_signoff"]
+        try:
+            principal = self.semantic_authenticator.authenticate()
+        except ControlRejected as error:
+            raise GoalLifecycleRejected(
+                "SEMANTIC_AUTHENTICATION_FAILED"
+            ) from error
+        if (
+            not reviewer
+            or reviewer != principal.identity
+            or principal.identity != expected["identity"]
+            or principal.authentication != expected["authentication"]
+        ):
             raise GoalLifecycleRejected("SEMANTIC_REVIEWER_INVALID")
         if approved and candidate.technical_status != GoalTechnicalStatus.VERIFIED:
             raise GoalLifecycleRejected("TECHNICAL_VERIFICATION_REQUIRED")

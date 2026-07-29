@@ -65,7 +65,10 @@ class GoalLifecycleStore:
                     counter_id TEXT NOT NULL,
                     site_zone TEXT NOT NULL,
                     allowed_actions TEXT NOT NULL,
+                    policy_id TEXT NOT NULL,
                     binding_hash TEXT NOT NULL,
+                    action_quota INTEGER NOT NULL,
+                    actions_used INTEGER NOT NULL DEFAULT 0,
                     expires_at TEXT NOT NULL,
                     execution_key TEXT
                 );
@@ -152,6 +155,13 @@ class GoalLifecycleStore:
 
     def register_authority(self, authority: GoalAuthority) -> None:
         kind = AuthorityKind(authority.kind)
+        if (
+            not authority.policy_id
+            or not authority.binding_hash
+            or isinstance(authority.action_quota, bool)
+            or authority.action_quota < 1
+        ):
+            raise GoalLifecycleRejected("AUTHORITY_INVALID")
         status = "AVAILABLE" if kind == AuthorityKind.APPROVAL else "ACTIVE"
         actions = ",".join(sorted(set(authority.allowed_actions)))
         values = (
@@ -162,13 +172,16 @@ class GoalLifecycleStore:
             authority.counter_id,
             authority.site_zone,
             actions,
+            authority.policy_id,
             authority.binding_hash,
+            authority.action_quota,
             utc_text(authority.expires_at),
         )
         with self._connect() as connection:
             existing = connection.execute(
                 "SELECT kind, principal, authentication, proposal_id, counter_id, "
-                "site_zone, allowed_actions, binding_hash, expires_at "
+                "site_zone, allowed_actions, policy_id, binding_hash, "
+                "action_quota, expires_at "
                 "FROM goal_authorities WHERE authority_id = ?",
                 (authority.authority_id,),
             ).fetchone()
@@ -179,8 +192,9 @@ class GoalLifecycleStore:
             connection.execute(
                 "INSERT INTO goal_authorities "
                 "(authority_id, kind, status, principal, authentication, proposal_id, "
-                "counter_id, site_zone, allowed_actions, binding_hash, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "counter_id, site_zone, allowed_actions, policy_id, binding_hash, "
+                "action_quota, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (authority.authority_id, kind.value, status) + values[1:],
             )
 
@@ -198,6 +212,7 @@ class GoalLifecycleStore:
         credential_profile: str,
         authority_id: str,
         authority_binding_hash: str,
+        policy_id: str,
         signature: str,
         plan_hash: str,
         expected_approval_principal: Mapping[str, str],
@@ -219,6 +234,7 @@ class GoalLifecycleStore:
                 counter_id=counter_id,
                 site_zone=site_zone,
                 action="GOAL_AUTHORING",
+                policy_id=policy_id,
                 binding_hash=authority_binding_hash,
                 execution_key=execution_key,
                 expected_approval_principal=expected_approval_principal,
@@ -286,6 +302,7 @@ class GoalLifecycleStore:
         site_zone: str,
         authority_id: str,
         authority_binding_hash: str,
+        policy_id: str,
         plan_hash: str,
         expected_approval_principal: Mapping[str, str],
         expected_mandate_principal: Mapping[str, str],
@@ -311,6 +328,7 @@ class GoalLifecycleStore:
                 counter_id=candidate.counter_id,
                 site_zone=site_zone,
                 action="SITE_PUBLISH",
+                policy_id=policy_id,
                 binding_hash=authority_binding_hash,
                 execution_key=execution_key,
                 expected_approval_principal=expected_approval_principal,
@@ -620,6 +638,7 @@ class GoalLifecycleStore:
         counter_id: str,
         site_zone: str,
         action: str,
+        policy_id: str,
         binding_hash: str,
         execution_key: str,
         expected_approval_principal: Mapping[str, str],
@@ -649,8 +668,10 @@ class GoalLifecycleStore:
             or row["principal"] != expected_principal["identity"]
             or row["authentication"] != expected_principal["authentication"]
             or action not in row["allowed_actions"].split(",")
+            or row["policy_id"] != policy_id
             or row["expires_at"] <= utc_text(now)
-            or (kind == AuthorityKind.APPROVAL and row["binding_hash"] != binding_hash)
+            or row["binding_hash"] != binding_hash
+            or int(row["actions_used"]) >= int(row["action_quota"])
         ):
             raise GoalLifecycleRejected("AUTHORITY_INVALID")
         updated = connection.execute(
@@ -668,19 +689,25 @@ class GoalLifecycleStore:
         execution_key: str,
     ) -> None:
         row = connection.execute(
-            "SELECT kind FROM goal_authorities WHERE authority_id = ? "
+            "SELECT kind, action_quota, actions_used FROM goal_authorities "
+            "WHERE authority_id = ? "
             "AND status = 'RESERVED' AND execution_key = ?",
             (authority_id, execution_key),
         ).fetchone()
         if row is None:
             raise GoalLifecycleRejected("AUTHORITY_INVALID")
-        terminal = (
-            "USED" if row["kind"] == AuthorityKind.APPROVAL.value else "EXHAUSTED"
-        )
+        actions_used = int(row["actions_used"]) + 1
+        if row["kind"] == AuthorityKind.APPROVAL.value:
+            terminal = "USED"
+        elif actions_used >= int(row["action_quota"]):
+            terminal = "EXHAUSTED"
+        else:
+            terminal = "ACTIVE"
         connection.execute(
-            "UPDATE goal_authorities SET status = ? WHERE authority_id = ? "
+            "UPDATE goal_authorities SET status = ?, actions_used = ?, "
+            "execution_key = NULL WHERE authority_id = ? "
             "AND status = 'RESERVED' AND execution_key = ?",
-            (terminal, authority_id, execution_key),
+            (terminal, actions_used, authority_id, execution_key),
         )
 
     @staticmethod

@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from mox_adv.control_state import AuthenticatedPrincipal
 from mox_adv.goal_lifecycle import (
     AuthorityKind,
     CreationReservation,
@@ -43,6 +44,22 @@ def goal_payload(event: str = "lead_submitted") -> dict:
     }
 
 
+class FakeSemanticAuthenticator:
+    def __init__(
+        self,
+        identity: str = "sviridov",
+        authentication: str = "authenticated_macos_user",
+    ) -> None:
+        self.identity = identity
+        self.authentication = authentication
+
+    def authenticate(self) -> AuthenticatedPrincipal:
+        return AuthenticatedPrincipal(
+            identity=self.identity,
+            authentication=self.authentication,
+        )
+
+
 class GoalLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.policy = load_policy()
@@ -66,6 +83,7 @@ class GoalLifecycleTests(unittest.TestCase):
             self.store,
             self.goal_adapter,
             self.site_adapter,
+            FakeSemanticAuthenticator(),
         )
 
     def create_test_candidate(
@@ -91,6 +109,18 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("GOAL_AUTHORING",),
             expires_at=NOW + timedelta(hours=1),
+            policy_id=self.policy["policy_id"],
+            binding_hash=goal_creation_binding(
+                policy_id=self.policy["policy_id"],
+                run_id=run_id,
+                candidate_id="candidate-" + run_id,
+                proposal_id=proposal_id,
+                reservation_id=reservation.reservation_id,
+                counter_id="sim-test-counter",
+                site_zone="sim-test-site-zone",
+                credential_profile="METRIKA_TEST_WRITE",
+                payload=goal_payload(),
+            ),
         )
         self.store.register_reservation(reservation)
         self.store.register_authority(authority)
@@ -117,6 +147,7 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("SITE_PUBLISH",),
             expires_at=NOW + timedelta(minutes=15),
+            policy_id=self.policy["policy_id"],
             binding_hash=site_publish_binding(
                 policy_id=self.policy["policy_id"],
                 candidate=candidate,
@@ -158,6 +189,18 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("GOAL_AUTHORING",),
             expires_at=NOW + timedelta(hours=1),
+            policy_id=self.policy["policy_id"],
+            binding_hash=goal_creation_binding(
+                policy_id=self.policy["policy_id"],
+                run_id="goal-run-1",
+                candidate_id="candidate-goal-run-1",
+                proposal_id="goal-proposal-1",
+                reservation_id=reservation.reservation_id,
+                counter_id="sim-test-counter",
+                site_zone="sim-test-site-zone",
+                credential_profile="METRIKA_TEST_WRITE",
+                payload=goal_payload(),
+            ),
         )
         self.store.register_reservation(reservation)
         self.store.register_authority(authority)
@@ -206,6 +249,7 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-pilot-site-zone",
             allowed_actions=("GOAL_AUTHORING",),
             expires_at=NOW + timedelta(minutes=15),
+            policy_id=self.policy["policy_id"],
             binding_hash=goal_creation_binding(
                 policy_id=self.policy["policy_id"],
                 run_id="goal-run-pilot",
@@ -264,6 +308,7 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("GOAL_AUTHORING",),
             expires_at=NOW + timedelta(minutes=15),
+            policy_id=self.policy["policy_id"],
             binding_hash=goal_creation_binding(
                 policy_id=self.policy["policy_id"],
                 run_id="goal-run-duplicate",
@@ -347,6 +392,7 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("SITE_PUBLISH",),
             expires_at=NOW + timedelta(minutes=15),
+            policy_id=self.policy["policy_id"],
             binding_hash=site_publish_binding(
                 policy_id=self.policy["policy_id"],
                 candidate=candidate,
@@ -399,6 +445,16 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-pilot-site-zone",
             allowed_actions=("SITE_PUBLISH",),
             expires_at=NOW + timedelta(minutes=15),
+            policy_id=self.policy["policy_id"],
+            binding_hash=site_publish_binding(
+                policy_id=self.policy["policy_id"],
+                candidate=candidate,
+                exact_diff=site_publish_diff(
+                    candidate,
+                    "sim-pilot-site-zone",
+                    "pilot-page-v1",
+                ),
+            ),
         )
         self.store.register_authority(publish_authority)
 
@@ -441,6 +497,21 @@ class GoalLifecycleTests(unittest.TestCase):
         technically_verified = self.store.load_candidate(candidate.candidate_id)
         self.assertEqual(GoalCandidateStatus.CANDIDATE, technically_verified.status)
         self.assertFalse(technically_verified.optimization_eligible)
+
+        spoofed_service = GoalLifecycleService(
+            self.policy,
+            self.store,
+            self.goal_adapter,
+            self.site_adapter,
+            FakeSemanticAuthenticator(authentication="caller_supplied_string"),
+        )
+        with self.assertRaisesRegex(RuntimeError, "SEMANTIC_REVIEWER_INVALID"):
+            spoofed_service.decide_business_semantics(
+                candidate.candidate_id,
+                approved=True,
+                reviewer="sviridov",
+                now=NOW,
+            )
 
         approved = self.service.decide_business_semantics(
             candidate.candidate_id,

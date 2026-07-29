@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from mox_adv.control_state import AuthenticatedPrincipal
 from mox_adv.goal_lifecycle import (
     AuthorityKind,
     CreationReservation,
@@ -45,6 +46,14 @@ def payload(
         "priority": 1,
         "duplicate_signals": [],
     }
+
+
+class FakeSemanticAuthenticator:
+    def authenticate(self) -> AuthenticatedPrincipal:
+        return AuthenticatedPrincipal(
+            identity="sviridov",
+            authentication="authenticated_macos_user",
+        )
 
 
 class FailingFinalizeStore(GoalLifecycleStore):
@@ -116,6 +125,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
                     "sim-pilot-site-zone": "pilot-page-v1",
                 }
             ),
+            FakeSemanticAuthenticator(),
         )
 
     def register_creation(
@@ -137,19 +147,17 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
             credential_profile="METRIKA_TEST_WRITE",
             expires_at=NOW + timedelta(minutes=15),
         )
-        binding_hash = ""
-        if authority_kind == AuthorityKind.APPROVAL:
-            binding_hash = goal_creation_binding(
-                policy_id=self.policy["policy_id"],
-                run_id=run_id,
-                candidate_id="candidate-" + run_id,
-                proposal_id=proposal_id,
-                reservation_id=reservation_id,
-                counter_id="sim-test-counter",
-                site_zone="sim-test-site-zone",
-                credential_profile="METRIKA_TEST_WRITE",
-                payload=goal_payload,
-            )
+        binding_hash = goal_creation_binding(
+            policy_id=self.policy["policy_id"],
+            run_id=run_id,
+            candidate_id="candidate-" + run_id,
+            proposal_id=proposal_id,
+            reservation_id=reservation_id,
+            counter_id="sim-test-counter",
+            site_zone="sim-test-site-zone",
+            credential_profile="METRIKA_TEST_WRITE",
+            payload=goal_payload,
+        )
         authority = GoalAuthority(
             authority_id=authority_id,
             kind=authority_kind,
@@ -160,6 +168,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("GOAL_AUTHORING",),
             expires_at=NOW + timedelta(hours=1),
+            policy_id=self.policy["policy_id"],
             binding_hash=binding_hash,
         )
         store.register_reservation(reservation)
@@ -203,6 +212,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("SITE_PUBLISH",),
             expires_at=NOW + timedelta(minutes=15),
+            policy_id=self.policy["policy_id"],
             binding_hash=site_publish_binding(
                 policy_id=self.policy["policy_id"],
                 candidate=candidate,
@@ -293,6 +303,42 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
         self.assertTrue(adapter.saw_reserved_boundary)
         self.assertEqual("USED", store.reservation_status("reservation-inspection"))
         self.assertEqual("USED", store.authority_status("approval-inspection"))
+
+    def test_mandate_cannot_authorize_a_different_candidate_payload(self) -> None:
+        store = GoalLifecycleStore(self.database)
+        adapter = FakeMetrikaGoalAdapter(
+            ("sim-test-counter", "sim-pilot-counter")
+        )
+        service = self.service(store, adapter)
+        self.register_creation(
+            store,
+            run_id="mandate-binding",
+            proposal_id="proposal-mandate-binding",
+            reservation_id="reservation-mandate-binding",
+            authority_id="mandate-binding",
+            authority_kind=AuthorityKind.MANDATE,
+            goal_payload=payload(),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "AUTHORITY_INVALID"):
+            self.create(
+                service,
+                run_id="mandate-binding",
+                proposal_id="proposal-mandate-binding",
+                reservation_id="reservation-mandate-binding",
+                authority_id="mandate-binding",
+                goal_payload=payload(
+                    event="form_started",
+                    name="Started form",
+                ),
+            )
+
+        self.assertEqual(0, adapter.add_calls)
+        self.assertEqual("ACTIVE", store.authority_status("mandate-binding"))
+        self.assertEqual(
+            "AVAILABLE",
+            store.reservation_status("reservation-mandate-binding"),
+        )
 
     def test_concurrent_duplicate_signatures_are_claimed_before_write(self) -> None:
         store = GoalLifecycleStore(self.database)
@@ -570,6 +616,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("SITE_PUBLISH",),
             expires_at=NOW + timedelta(minutes=15),
+            policy_id=self.policy["policy_id"],
             binding_hash=site_publish_binding(
                 policy_id=self.policy["policy_id"],
                 candidate=first,
