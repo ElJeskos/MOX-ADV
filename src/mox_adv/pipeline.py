@@ -27,6 +27,10 @@ from mox_adv.contracts import (
 from mox_adv.decision import DecisionEngineV1
 from mox_adv.errors import RunAlreadyExistsError, RunRejectedError
 from mox_adv.execution import SimulationExecutorV1
+from mox_adv.host_launcher import (
+    CredentialProfileRejected,
+    resolve_keychain_binding,
+)
 from mox_adv.internal_api.v1 import (
     AnalyticsAPI,
     ConnectorsAPI,
@@ -259,6 +263,7 @@ def run_fixture(
     fixture_path: Path,
     policy_path: Path,
     credential_stream: Optional[BinaryIO] = None,
+    credential_profile: Optional[str] = None,
 ) -> RunOutcome:
     """Execute one immutable simulation run and return a safe process outcome."""
 
@@ -334,11 +339,34 @@ def run_fixture(
         if initial_rejection is not None:
             raise initial_rejection
         if credential_stream is not None:
+            if credential_profile is None:
+                raise RunRejectedError(
+                    "CREDENTIAL_PROFILE_REJECTED",
+                    "credential_ingress",
+                    "The ephemeral credential channel has no trusted profile.",
+                )
+            try:
+                resolve_keychain_binding(policy, credential_profile)
+            except CredentialProfileRejected as profile_error:
+                raise RunRejectedError(
+                    "CREDENTIAL_PROFILE_REJECTED",
+                    "credential_ingress",
+                    "The credential profile is not authorized for this run.",
+                ) from profile_error
             _consume_ephemeral_credential(credential_stream)
             stages.append("credential_ingress")
             journal.append(
                 "credential_ingress.completed",
-                {"channel": "EPHEMERAL_STDIN"},
+                {
+                    "channel": "EPHEMERAL_STDIN",
+                    "credential_profile": credential_profile,
+                },
+            )
+        elif credential_profile is not None:
+            raise RunRejectedError(
+                "CREDENTIAL_PROFILE_REJECTED",
+                "credential_ingress",
+                "A credential profile requires the ephemeral credential channel.",
             )
         connectors: ConnectorsAPI = FixtureConnectorV1()
         normalization: NormalizationAPI = NormalizerV1()

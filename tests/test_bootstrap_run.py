@@ -264,6 +264,7 @@ class FixtureRunTests(unittest.TestCase):
                 fixture_path=FIXTURE,
                 policy_path=POLICY,
                 credential_stream=io.BytesIO(canary + b"\n"),
+                credential_profile="DIRECT_PROD_READ",
             )
 
             self.assertEqual(0, outcome.exit_code)

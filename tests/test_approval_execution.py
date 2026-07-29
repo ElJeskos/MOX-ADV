@@ -815,6 +815,7 @@ class EgressGuardTests(unittest.TestCase):
             version="v501",
             service="Campaigns",
             operation="get",
+            credential_profile="DIRECT_PILOT_WRITE",
         )
         guard.authorize(
             "GET",
@@ -822,6 +823,7 @@ class EgressGuardTests(unittest.TestCase):
             version="v1",
             service="Statistics",
             operation="get",
+            credential_profile="METRIKA_TEST_WRITE",
         )
 
     def test_http_guard_rejects_path_host_version_method_and_redirect_changes(
@@ -838,6 +840,7 @@ class EgressGuardTests(unittest.TestCase):
             version="v501",
             service="Campaigns",
             operation="update",
+            credential_profile="DIRECT_PILOT_WRITE",
             pilot_armed=True,
         )
         cases = (
@@ -890,6 +893,7 @@ class EgressGuardTests(unittest.TestCase):
                     version=version,
                     service=service,
                     operation=operation,
+                    credential_profile="DIRECT_PILOT_WRITE",
                     redirected=redirected,
                     pilot_armed=True,
                 )

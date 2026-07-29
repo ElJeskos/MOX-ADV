@@ -53,6 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="read one ephemeral credential from standard input without persisting it",
     )
+    run_parser.add_argument(
+        "--credential-profile",
+        help="bind credential stdin to one exact Gate 0 profile",
+    )
     observe_parser = subparsers.add_parser(
         "observe-fixture",
         help="run linked read-only OBSERVE analytics from a local fixture",
@@ -184,6 +188,7 @@ def main(
             credential_stream=(
                 sys.stdin.buffer if arguments.credential_stdin else None
             ),
+            credential_profile=arguments.credential_profile,
         )
         return _print_outcome(outcome)
     if arguments.command == "observe-fixture":

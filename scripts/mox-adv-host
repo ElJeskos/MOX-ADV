@@ -5,22 +5,23 @@ repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 image_name="mox-adv:local"
 runs_directory="$repository_root/runs"
 keychain_command=${MOX_ADV_KEYCHAIN_COMMAND:-/usr/bin/security}
+policy_path="$repository_root/config/gate0-policy.json"
 
 usage() {
     echo "Usage: scripts/mox-adv-host build"
-    echo "       scripts/mox-adv-host run-fixture --run-id RUN_ID [--keychain-service SERVICE]"
-    echo "       scripts/mox-adv-host print-run-command --run-id RUN_ID [--keychain-service SERVICE]"
+    echo "       scripts/mox-adv-host run-fixture --run-id RUN_ID [--credential-profile PROFILE]"
+    echo "       scripts/mox-adv-host print-run-command --run-id RUN_ID [--credential-profile PROFILE]"
 }
 
 print_run_command() {
     run_id=$1
-    keychain_service=$2
+    credential_profile=$2
     credential_prefix=""
     credential_flag=""
     interactive_flag=""
-    if [ -n "$keychain_service" ]; then
+    if [ -n "$credential_profile" ]; then
         credential_prefix="<ephemeral-keychain-secret> | "
-        credential_flag=" --credential-stdin"
+        credential_flag=" --credential-profile $credential_profile --credential-stdin"
         interactive_flag=" -i"
     fi
     printf '%s\n' \
@@ -30,6 +31,7 @@ print_run_command() {
 run_container() {
     credential_mode=$1
     run_id=$2
+    credential_profile=$3
     set -- \
         --rm \
         --network=none \
@@ -43,7 +45,7 @@ run_container() {
     fi
     set -- docker run "$@" "$image_name" run-fixture --run-id "$run_id"
     if [ "$credential_mode" = "with-credential" ]; then
-        set -- "$@" --credential-stdin
+        set -- "$@" --credential-profile "$credential_profile" --credential-stdin
     fi
     "$@"
 }
@@ -60,7 +62,7 @@ fi
 command_name=$1
 shift
 run_id=""
-keychain_service=""
+credential_profile=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --run-id)
@@ -71,12 +73,12 @@ while [ "$#" -gt 0 ]; do
             run_id=$2
             shift 2
             ;;
-        --keychain-service)
+        --credential-profile)
             [ "$#" -ge 2 ] || {
                 usage >&2
                 exit 2
             }
-            keychain_service=$2
+            credential_profile=$2
             shift 2
             ;;
         *)
@@ -92,23 +94,34 @@ case "$run_id" in
         exit 2
         ;;
 esac
-case "$keychain_service" in
+case "$credential_profile" in
     *[!A-Za-z0-9._:-]*)
-        echo "Invalid Keychain service identifier." >&2
+        echo "Invalid credential profile." >&2
         exit 2
         ;;
 esac
 
 mkdir -p "$runs_directory"
 if [ "$command_name" = "print-run-command" ]; then
-    print_run_command "$run_id" "$keychain_service"
+    if [ -n "$credential_profile" ]; then
+        PYTHONPATH="$repository_root/src" python3 -m mox_adv.host_launcher \
+            --policy "$policy_path" \
+            --credential-profile "$credential_profile" >/dev/null
+    fi
+    print_run_command "$run_id" "$credential_profile"
     exit 0
 fi
 
-if [ -z "$keychain_service" ]; then
-    run_container without-credential "$run_id"
+if [ -z "$credential_profile" ]; then
+    run_container without-credential "$run_id" ""
     exit $?
 fi
+
+keychain_service=$(
+    PYTHONPATH="$repository_root/src" python3 -m mox_adv.host_launcher \
+        --policy "$policy_path" \
+        --credential-profile "$credential_profile"
+)
 
 if [ ! -x "$keychain_command" ]; then
     echo "The configured Keychain command is unavailable." >&2
@@ -125,7 +138,7 @@ if [ -z "$credential" ]; then
 fi
 set +e
 printf '%s\n' "$credential" |
-    run_container with-credential "$run_id"
+    run_container with-credential "$run_id" "$credential_profile"
 docker_status=$?
 set -e
 credential=""

@@ -16,12 +16,14 @@ class EgressDenied(PermissionError):
 
 @dataclass(frozen=True)
 class ApprovedEndpoint:
+    system: str
     host: str
     path_template: str
     version: str
     service: str
     operation: str
     http_method: str
+    access_class: str
 
     def matches(
         self,
@@ -59,15 +61,21 @@ class HttpEgressGuard:
         )
         self._endpoints = tuple(
             ApprovedEndpoint(
+                system=str(item["system"]),
                 host=str(item["host"]),
                 path_template=str(item["path"]),
                 version=str(item["version"]),
                 service=str(item["service"]),
                 operation=str(item["method"]),
                 http_method=str(item["http_verb"]).upper(),
+                access_class=str(item["access_class"]),
             )
             for item in policy["api_matrix"]
         )
+        self._credential_access = {
+            str(item["name"]): str(item["access"])
+            for item in policy["credentials"]["profiles"]
+        }
 
     def authorize(
         self,
@@ -77,6 +85,7 @@ class HttpEgressGuard:
         version: str,
         service: str,
         operation: str,
+        credential_profile: str,
         redirected: bool = False,
         pilot_armed: bool = False,
     ) -> None:
@@ -118,12 +127,38 @@ class HttpEgressGuard:
             raise EgressDenied(
                 "EXTERNAL_EGRESS_DENIED: endpoint is absent from the Gate 0 matrix."
             )
+        if not self._credential_matches(endpoint, credential_profile):
+            raise EgressDenied(
+                "EXTERNAL_EGRESS_DENIED: credential profile does not match endpoint."
+            )
         if endpoint.is_read:
             return
         if not pilot_armed or not self._production_write_authorized:
             raise EgressDenied(
                 "EXTERNAL_WRITE_EGRESS_DENIED: pilot process is not armed."
             )
+
+    def _credential_matches(
+        self,
+        endpoint: ApprovedEndpoint,
+        credential_profile: str,
+    ) -> bool:
+        access = self._credential_access.get(credential_profile)
+        if endpoint.system == "DIRECT_REPORTS":
+            return access == "direct_reports_read_only"
+        if endpoint.system == "DIRECT":
+            return access == "one_allowlisted_account_write_disabled_by_default"
+        if endpoint.system == "METRIKA":
+            return access in {
+                "one_test_counter_read_write",
+                "one_pilot_counter_candidate_goal_write",
+            }
+        if endpoint.system == "METRIKA_BROWSER":
+            return access in {
+                "test_page_only",
+                "one_allowlisted_production_site_zone",
+            }
+        return False
 
     def enforce_adapter(self, adapter: Any, command: Any) -> None:
         """Bind every non-fake adapter to its exact approved matrix operation."""
@@ -138,6 +173,7 @@ class HttpEgressGuard:
                 version=adapter.version,
                 service=spec.service,
                 operation=spec.method,
+                credential_profile=adapter.credential_profile,
                 redirected=adapter.redirected,
                 pilot_armed=adapter.pilot_armed,
             )

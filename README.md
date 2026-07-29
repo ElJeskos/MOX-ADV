@@ -39,7 +39,7 @@ Run the fixture through the host launcher.
 
 The launcher starts the container with no network, a read-only root filesystem, no Linux capabilities, and no privilege escalation.
 The bootstrap does not require a credential and does not read macOS Keychain.
-The optional `--keychain-service` argument makes the host launcher read one credential with the macOS `security` command and pass it through an ephemeral standard-input pipe.
+The optional `--credential-profile DIRECT_PROD_READ` argument resolves the exact Gate 0 Keychain binding, reads one credential with the macOS `security` command, and passes it through an ephemeral standard-input pipe.
 The bootstrap validates and clears that channel without putting the credential in environment variables, command-line arguments, logs, artifacts, or Docker metadata.
 The local fixture does not use the credential for an external request.
 The container image does not include the macOS `security` utility.

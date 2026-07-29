@@ -7,12 +7,12 @@ import json
 import os
 import sqlite3
 import tempfile
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 from mox_adv.contracts import AuditVerification, PersistedEvent
-
 
 GENESIS_HASH = "0" * 64
 
@@ -23,6 +23,64 @@ class AuditIntegrityError(RuntimeError):
 
 class AuditSealedError(RuntimeError):
     """A sealed journal is immutable."""
+
+
+class AuditAnchorVerificationError(RuntimeError):
+    """A signed audit anchor is invalid, stale, or belongs to another journal."""
+
+
+class AuditWriteBlocked(RuntimeError):
+    """A write lacks a current, signed pre-write audit event."""
+
+
+class AuditAnchorSigner(Protocol):
+    """Sign and verify a canonical anchor without exposing signing material."""
+
+    key_id: str
+
+    def sign(self, payload: bytes) -> str: ...
+
+    def verify(self, payload: bytes, signature: str) -> bool: ...
+
+
+@dataclass(frozen=True)
+class SignedAuditAnchor:
+    schema_version: str
+    run_id: str
+    policy_version: str
+    final_sequence: int
+    final_hash: str
+    anchored_at: str
+    key_id: str
+    signature: str
+
+    def signing_payload(self) -> bytes:
+        return _canonical_json(
+            {
+                "anchored_at": self.anchored_at,
+                "final_hash": self.final_hash,
+                "final_sequence": self.final_sequence,
+                "key_id": self.key_id,
+                "policy_version": self.policy_version,
+                "run_id": self.run_id,
+                "schema_version": self.schema_version,
+            }
+        ).encode("utf-8")
+
+    def as_dict(self) -> Mapping[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "run_id": self.run_id,
+            "policy_version": self.policy_version,
+            "final_sequence": self.final_sequence,
+            "final_hash": self.final_hash,
+            "anchored_at": self.anchored_at,
+            "key_id": self.key_id,
+            "signature": self.signature,
+        }
+
+    def with_signature(self, signature: str) -> "SignedAuditAnchor":
+        return replace(self, signature=signature)
 
 
 def _utc_now() -> str:
@@ -371,6 +429,107 @@ class SQLiteAuditJournal:
                 "The " + state_label + " audit anchor does not match."
             )
         return verification
+
+    def create_signed_anchor(
+        self,
+        signer: AuditAnchorSigner,
+        anchored_at: datetime,
+    ) -> SignedAuditAnchor:
+        if anchored_at.tzinfo is None or anchored_at.utcoffset() is None:
+            raise ValueError("Audit anchor time must be timezone-aware.")
+        verification = self.verify()
+        unsigned = SignedAuditAnchor(
+            schema_version=self.schema_version,
+            run_id=self.run_id,
+            policy_version=self.policy_version,
+            final_sequence=verification.final_sequence,
+            final_hash=verification.final_hash,
+            anchored_at=anchored_at.astimezone(timezone.utc).isoformat(),
+            key_id=signer.key_id,
+            signature="",
+        )
+        return unsigned.with_signature(signer.sign(unsigned.signing_payload()))
+
+    def verify_signed_anchor(
+        self,
+        anchor: SignedAuditAnchor,
+        signer: AuditAnchorSigner,
+        *,
+        now: datetime,
+        maximum_age: timedelta,
+    ) -> AuditVerification:
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("Audit verification time must be timezone-aware.")
+        if maximum_age <= timedelta(0):
+            raise ValueError("Audit anchor maximum age must be positive.")
+        verification = self.verify()
+        if (
+            anchor.schema_version != self.schema_version
+            or anchor.run_id != self.run_id
+            or anchor.policy_version != self.policy_version
+            or anchor.final_sequence != verification.final_sequence
+            or anchor.final_hash != verification.final_hash
+            or anchor.key_id != signer.key_id
+        ):
+            raise AuditAnchorVerificationError(
+                "The signed audit anchor does not match the current journal."
+            )
+        try:
+            anchored_at = datetime.fromisoformat(anchor.anchored_at)
+        except ValueError as error:
+            raise AuditAnchorVerificationError(
+                "The signed audit anchor time is invalid."
+            ) from error
+        if anchored_at.tzinfo is None or anchored_at.utcoffset() is None:
+            raise AuditAnchorVerificationError(
+                "The signed audit anchor time is not timezone-aware."
+            )
+        age = now.astimezone(timezone.utc) - anchored_at.astimezone(timezone.utc)
+        if age < timedelta(0) or age > maximum_age:
+            raise AuditAnchorVerificationError(
+                "The signed audit anchor is outside its approved period."
+            )
+        if not signer.verify(anchor.signing_payload(), anchor.signature):
+            raise AuditAnchorVerificationError(
+                "The signed audit anchor signature is invalid."
+            )
+        return verification
+
+    def verify_pre_write_anchor(
+        self,
+        anchor: SignedAuditAnchor,
+        signer: AuditAnchorSigner,
+        expected_pre_write_hash: Any,
+        *,
+        now: datetime,
+        maximum_age: timedelta,
+    ) -> None:
+        if not isinstance(expected_pre_write_hash, str):
+            raise AuditWriteBlocked("PRE_WRITE_AUDIT_MISSING")
+        try:
+            verification = self.verify_signed_anchor(
+                anchor,
+                signer,
+                now=now,
+                maximum_age=maximum_age,
+            )
+        except (AuditIntegrityError, AuditAnchorVerificationError) as error:
+            raise AuditWriteBlocked("AUDIT_ANCHOR_INVALID") from error
+        latest = self._connection.execute(
+            """
+            SELECT event_type, event_hash
+            FROM events
+            ORDER BY sequence DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if (
+            latest is None
+            or latest["event_type"] != "write.intent.recorded"
+            or latest["event_hash"] != expected_pre_write_hash
+            or verification.final_hash != expected_pre_write_hash
+        ):
+            raise AuditWriteBlocked("PRE_WRITE_AUDIT_MISSING")
 
     def export_jsonl(self, path: Path) -> None:
         verification = self.verify()
