@@ -1,0 +1,530 @@
+"""Candidate-goal orchestration over durable state and fake write adapters."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import datetime
+from typing import Any
+
+from mox_adv.goal_adapters import (
+    FakeAdapterTimeout,
+    FakeMetrikaGoalAdapter,
+    FakeSitePublishAdapter,
+)
+from mox_adv.goal_contracts import (
+    GoalCandidateRecord,
+    GoalCandidateStatus,
+    GoalExecutionStatus,
+    GoalLifecycleRejected,
+    GoalTechnicalStatus,
+    SitePublication,
+    canonical_hash,
+    goal_creation_binding,
+    goal_creation_plan,
+    goal_signature,
+    site_publish_binding,
+    site_publish_diff,
+    site_publish_plan,
+    utc_text,
+    validate_candidate,
+)
+from mox_adv.goal_evidence import GoalEventEvidence, GoalTechnicalEvidence
+from mox_adv.goal_store import GoalLifecycleStore
+
+
+class GoalLifecycleService:
+    """Execute one serialized candidate-goal lifecycle in fake/local mode."""
+
+    def __init__(
+        self,
+        policy: Mapping[str, Any],
+        store: GoalLifecycleStore,
+        goal_adapter: FakeMetrikaGoalAdapter,
+        site_adapter: FakeSitePublishAdapter,
+    ) -> None:
+        if not goal_adapter.is_fake or not site_adapter.is_fake:
+            raise GoalLifecycleRejected("FAKE_ADAPTER_REQUIRED")
+        self.policy = policy
+        self.store = store
+        self.goal_adapter = goal_adapter
+        self.site_adapter = site_adapter
+
+    def create_candidate(
+        self,
+        run_id: str,
+        proposal_id: str,
+        reservation_id: str,
+        authority_id: str,
+        counter_id: str,
+        credential_profile: str,
+        payload: Mapping[str, Any],
+        now: datetime,
+    ) -> GoalCandidateRecord:
+        normalized = validate_candidate(payload, self.policy)
+        scope_binding = self._counter_scope(counter_id)
+        site_zone = self._site_zone_for_counter(counter_id)
+        signature = goal_signature(normalized)
+        candidate_id = "candidate-" + run_id
+        plan = goal_creation_plan(
+            policy_id=str(self.policy["policy_id"]),
+            run_id=run_id,
+            candidate_id=candidate_id,
+            proposal_id=proposal_id,
+            reservation_id=reservation_id,
+            counter_id=counter_id,
+            site_zone=site_zone,
+            credential_profile=credential_profile,
+            payload=normalized,
+        )
+        binding_hash = goal_creation_binding(
+            policy_id=str(self.policy["policy_id"]),
+            run_id=run_id,
+            candidate_id=candidate_id,
+            proposal_id=proposal_id,
+            reservation_id=reservation_id,
+            counter_id=counter_id,
+            site_zone=site_zone,
+            credential_profile=credential_profile,
+            payload=normalized,
+        )
+        execution_key = "goal-create:" + candidate_id
+        begun = self.store.begin_goal_creation(
+            execution_key=execution_key,
+            run_id=run_id,
+            candidate_id=candidate_id,
+            proposal_id=proposal_id,
+            counter_id=counter_id,
+            site_zone=site_zone,
+            reservation_id=reservation_id,
+            scope_binding=scope_binding,
+            credential_profile=credential_profile,
+            authority_id=authority_id,
+            authority_binding_hash=binding_hash,
+            signature=signature,
+            plan_hash=canonical_hash(plan),
+            expected_approval_principal=self.policy["principals"]["approver"],
+            expected_mandate_principal=self.policy["principals"]["mandate_issuer"],
+            now=now,
+        )
+        if begun.record.status == GoalExecutionStatus.APPLIED:
+            return self.store.load_candidate(candidate_id)
+        if not begun.newly_started:
+            return self._reconcile_goal_creation(
+                execution_key=execution_key,
+                candidate_id=candidate_id,
+                run_id=run_id,
+                proposal_id=proposal_id,
+                counter_id=counter_id,
+                authority_id=authority_id,
+                reservation_id=reservation_id,
+                signature=signature,
+                normalized=normalized,
+                now=now,
+            )
+        try:
+            self._reject_existing_duplicate(counter_id, normalized)
+        except GoalLifecycleRejected:
+            self.store.abort_before_write(
+                execution_key,
+                authority_id,
+                reservation_id,
+            )
+            raise
+        try:
+            goal = self.goal_adapter.add_goal(
+                counter_id,
+                normalized,
+                signature,
+                execution_key,
+            )
+        except FakeAdapterTimeout:
+            return self._reconcile_goal_creation(
+                execution_key=execution_key,
+                candidate_id=candidate_id,
+                run_id=run_id,
+                proposal_id=proposal_id,
+                counter_id=counter_id,
+                authority_id=authority_id,
+                reservation_id=reservation_id,
+                signature=signature,
+                normalized=normalized,
+                now=now,
+            )
+        candidate = self._candidate_from_goal(
+            candidate_id,
+            run_id,
+            proposal_id,
+            counter_id,
+            normalized,
+            goal,
+            now,
+        )
+        return self.store.complete_goal_creation(
+            execution_key,
+            candidate,
+            authority_id,
+            reservation_id,
+            now,
+        )
+
+    def publish_candidate_event(
+        self,
+        candidate_id: str,
+        authority_id: str,
+        site_zone: str,
+        expected_version: str,
+        now: datetime,
+    ) -> SitePublication:
+        candidate = self.store.load_candidate(candidate_id)
+        if site_zone != self._site_zone_for_counter(candidate.counter_id):
+            raise GoalLifecycleRejected("SITE_ZONE_NOT_BOUND_TO_COUNTER")
+        exact_diff = site_publish_diff(candidate, site_zone, expected_version)
+        plan = site_publish_plan(
+            policy_id=str(self.policy["policy_id"]),
+            candidate=candidate,
+            exact_diff=exact_diff,
+        )
+        binding_hash = site_publish_binding(
+            policy_id=str(self.policy["policy_id"]),
+            candidate=candidate,
+            exact_diff=exact_diff,
+        )
+        execution_key = "site-publish:" + candidate.candidate_id
+        begun = self.store.begin_site_publication(
+            execution_key=execution_key,
+            candidate=candidate,
+            site_zone=site_zone,
+            authority_id=authority_id,
+            authority_binding_hash=binding_hash,
+            plan_hash=canonical_hash(plan),
+            expected_approval_principal=self.policy["principals"]["approver"],
+            expected_mandate_principal=self.policy["principals"]["mandate_issuer"],
+            now=now,
+        )
+        if begun.record.status == GoalExecutionStatus.APPLIED:
+            return self.store.load_publication(candidate_id)
+        if not begun.newly_started:
+            return self._reconcile_site_publication(
+                execution_key,
+                candidate,
+                authority_id,
+                now,
+            )
+        if self.site_adapter.current_version(site_zone) != expected_version:
+            self.store.abort_before_write(execution_key, authority_id)
+            raise GoalLifecycleRejected("SITE_VERSION_MISMATCH")
+        try:
+            publication = self.site_adapter.publish_event(
+                candidate_id=candidate.candidate_id,
+                run_id=candidate.run_id,
+                site_zone=site_zone,
+                expected_version=expected_version,
+                event=candidate.event,
+                selector=candidate.site_location,
+                author=str(self.policy["principals"]["approver"]["identity"]),
+                exact_diff=exact_diff,
+            )
+        except FakeAdapterTimeout:
+            return self._reconcile_site_publication(
+                execution_key,
+                candidate,
+                authority_id,
+                now,
+            )
+        except GoalLifecycleRejected:
+            self.store.abort_before_write(execution_key, authority_id)
+            raise
+        return self.store.complete_site_publication(
+            execution_key,
+            publication,
+            authority_id,
+            now,
+        )
+
+    def verify_candidate_delivery(
+        self,
+        candidate_id: str,
+        event_evidence: GoalEventEvidence,
+        now: datetime,
+    ) -> GoalTechnicalEvidence:
+        candidate = self.store.load_candidate(candidate_id)
+        publication = self.store.load_publication(candidate_id)
+        if (
+            event_evidence.event != candidate.event
+            or event_evidence.selector != candidate.site_location
+            or event_evidence.emitted_count != 1
+            or not event_evidence.intercepted_locally
+            or event_evidence.real_network_requests != 0
+            or publication.event != candidate.event
+            or publication.selector != candidate.site_location
+        ):
+            raise GoalLifecycleRejected("GOAL_EVENT_EVIDENCE_INVALID")
+        poll_minutes = int(self.policy["timing"]["goal_verification_poll_minutes"])
+        timeout_minutes = int(
+            self.policy["timing"]["goal_verification_timeout_minutes"]
+        )
+        external_reason = None
+        for elapsed in range(0, timeout_minutes + 1, poll_minutes):
+            observation = self.goal_adapter.poll_goal_visit(
+                candidate.counter_id,
+                candidate.goal_id,
+            )
+            if observation == "DELIVERED":
+                self.store.set_technical_status(
+                    candidate_id,
+                    GoalTechnicalStatus.VERIFIED,
+                )
+                return self._technical_evidence(
+                    candidate,
+                    publication,
+                    event_evidence,
+                    GoalTechnicalStatus.VERIFIED,
+                    elapsed,
+                    None,
+                    now,
+                )
+            if observation in {"EXTERNAL_DELAY", "UNAVAILABLE"}:
+                external_reason = observation
+        if external_reason is None:
+            raise GoalLifecycleRejected("METRIKA_DELIVERY_NOT_EVIDENCED")
+        self.store.set_technical_status(
+            candidate_id,
+            GoalTechnicalStatus.INCONCLUSIVE,
+        )
+        return self._technical_evidence(
+            candidate,
+            publication,
+            event_evidence,
+            GoalTechnicalStatus.INCONCLUSIVE,
+            timeout_minutes,
+            external_reason,
+            now,
+        )
+
+    def decide_business_semantics(
+        self,
+        candidate_id: str,
+        approved: bool,
+        reviewer: str,
+        now: datetime,
+    ) -> GoalCandidateRecord:
+        del now
+        candidate = self.store.load_candidate(candidate_id)
+        expected = self.policy["principals"]["product_signoff"]["identity"]
+        if not reviewer or reviewer != expected:
+            raise GoalLifecycleRejected("SEMANTIC_REVIEWER_INVALID")
+        if approved and candidate.technical_status != GoalTechnicalStatus.VERIFIED:
+            raise GoalLifecycleRejected("TECHNICAL_VERIFICATION_REQUIRED")
+        status = (
+            GoalCandidateStatus.APPROVED if approved else GoalCandidateStatus.REJECTED
+        )
+        return self.store.set_semantic_status(candidate_id, status, reviewer)
+
+    def evaluate_optimization_eligibility(
+        self,
+        candidate_id: str,
+        observed_at: datetime,
+        sample_clicks: int,
+        sample_conversions: int,
+    ) -> GoalCandidateRecord:
+        candidate = self.store.load_candidate(candidate_id)
+        if (
+            observed_at.tzinfo is None
+            or isinstance(sample_clicks, bool)
+            or isinstance(sample_conversions, bool)
+            or sample_clicks < 0
+            or sample_conversions < 0
+        ):
+            raise GoalLifecycleRejected("OPTIMIZATION_SAMPLE_INVALID")
+        required_age = int(self.policy["timing"]["observation_window_hours"])
+        age_hours = (
+            observed_at.astimezone(candidate.created_at.tzinfo) - candidate.created_at
+        ).total_seconds() / 3600
+        minimum = self.policy["mandate"]["minimum_sample"]
+        passed = (
+            age_hours >= required_age
+            and sample_clicks >= int(minimum["clicks"])
+            and sample_conversions >= int(minimum["conversions"])
+        )
+        return self.store.set_optimization_gate(candidate_id, passed)
+
+    def cleanup_rejected_candidate(
+        self,
+        candidate_id: str,
+        run_id: str,
+    ) -> None:
+        candidate = self.store.load_candidate(candidate_id)
+        if candidate.run_id != run_id:
+            raise GoalLifecycleRejected("CLEANUP_RUN_MISMATCH")
+        if candidate.status != GoalCandidateStatus.REJECTED:
+            raise GoalLifecycleRejected("ONLY_REJECTED_CANDIDATE_CAN_BE_CLEANED")
+        publication = self.store.load_publication(candidate_id)
+        self.site_adapter.rollback_publication(publication, run_id)
+        self.goal_adapter.delete_goal(candidate.counter_id, candidate.goal_id)
+        self.store.finish_cleanup(
+            candidate_id,
+            "goal-create:" + candidate.candidate_id,
+        )
+
+    def _reconcile_goal_creation(
+        self,
+        *,
+        execution_key: str,
+        candidate_id: str,
+        run_id: str,
+        proposal_id: str,
+        counter_id: str,
+        authority_id: str,
+        reservation_id: str,
+        signature: str,
+        normalized: Mapping[str, Any],
+        now: datetime,
+    ) -> GoalCandidateRecord:
+        matches = self.goal_adapter.find_goals_by_signature(counter_id, signature)
+        if len(matches) != 1:
+            self.store.mark_unknown(
+                execution_key,
+                "Goal readback did not identify exactly one created target.",
+                now,
+            )
+            raise GoalLifecycleRejected("UNKNOWN_RESULT")
+        candidate = self._candidate_from_goal(
+            candidate_id,
+            run_id,
+            proposal_id,
+            counter_id,
+            normalized,
+            matches[0],
+            now,
+        )
+        return self.store.complete_goal_creation(
+            execution_key,
+            candidate,
+            authority_id,
+            reservation_id,
+            now,
+        )
+
+    def _reconcile_site_publication(
+        self,
+        execution_key: str,
+        candidate: GoalCandidateRecord,
+        authority_id: str,
+        now: datetime,
+    ) -> SitePublication:
+        publication = self.site_adapter.publication_for_candidate(
+            candidate.candidate_id
+        )
+        if publication is None:
+            self.store.mark_unknown(
+                execution_key,
+                "Site readback did not identify the published page version.",
+                now,
+            )
+            raise GoalLifecycleRejected("UNKNOWN_RESULT")
+        return self.store.complete_site_publication(
+            execution_key,
+            publication,
+            authority_id,
+            now,
+        )
+
+    @staticmethod
+    def _candidate_from_goal(
+        candidate_id: str,
+        run_id: str,
+        proposal_id: str,
+        counter_id: str,
+        normalized: Mapping[str, Any],
+        goal: Mapping[str, Any],
+        now: datetime,
+    ) -> GoalCandidateRecord:
+        return GoalCandidateRecord(
+            candidate_id=candidate_id,
+            run_id=run_id,
+            proposal_id=proposal_id,
+            counter_id=counter_id,
+            goal_id=str(goal["goal_id"]),
+            name=str(normalized["name"]),
+            event=str(normalized["event"]),
+            site_location=str(normalized["site_location"]),
+            goal_type=str(normalized["type"]),
+            business_meaning=str(normalized["business_meaning"]),
+            priority=int(normalized["priority"]),
+            status=GoalCandidateStatus.CANDIDATE,
+            technical_status=GoalTechnicalStatus.PENDING,
+            created_at=now,
+        )
+
+    def _technical_evidence(
+        self,
+        candidate: GoalCandidateRecord,
+        publication: SitePublication,
+        event_evidence: GoalEventEvidence,
+        status: GoalTechnicalStatus,
+        elapsed: int,
+        external_reason: str | None,
+        now: datetime,
+    ) -> GoalTechnicalEvidence:
+        return GoalTechnicalEvidence(
+            candidate_id=candidate.candidate_id,
+            counter_id=candidate.counter_id,
+            goal_id=candidate.goal_id,
+            goal_type=candidate.goal_type,
+            site_zone=publication.site_zone,
+            event=candidate.event,
+            selector=candidate.site_location,
+            classification=self._event_classification(candidate.event),
+            emitted_count=event_evidence.emitted_count,
+            duplicate_event_absent=event_evidence.emitted_count == 1,
+            intercepted_locally=event_evidence.intercepted_locally,
+            real_network_requests=event_evidence.real_network_requests,
+            delivery_observed=status == GoalTechnicalStatus.VERIFIED,
+            status=status,
+            virtual_elapsed_minutes=elapsed,
+            poll_count=self.goal_adapter.visit_poll_count(
+                candidate.counter_id,
+                candidate.goal_id,
+            ),
+            external_reason=external_reason,
+            checked_at=utc_text(now),
+            author=publication.author,
+            configuration_version=publication.published_version,
+        )
+
+    def _reject_existing_duplicate(
+        self,
+        counter_id: str,
+        normalized: Mapping[str, Any],
+    ) -> None:
+        event = str(normalized["event"]).strip().casefold()
+        duplicate = bool(normalized["duplicate_signals"]) or any(
+            str(item.get("event", "")).strip().casefold() == event
+            for item in self.goal_adapter.list_goals(counter_id)
+        )
+        if duplicate:
+            raise GoalLifecycleRejected("DUPLICATE_GOAL_CANDIDATE")
+
+    def _counter_scope(self, counter_id: str) -> str:
+        simulation = self.policy["bindings"]["simulation"]
+        if counter_id == simulation["test_counter"]:
+            return "test_counter"
+        if counter_id == simulation["pilot_counter"]:
+            return "pilot_counter"
+        raise GoalLifecycleRejected("COUNTER_NOT_ALLOWLISTED")
+
+    def _site_zone_for_counter(self, counter_id: str) -> str:
+        simulation = self.policy["bindings"]["simulation"]
+        if counter_id == simulation["test_counter"]:
+            return str(simulation["test_site_zone"])
+        if counter_id == simulation["pilot_counter"]:
+            return str(simulation["pilot_site_zone"])
+        raise GoalLifecycleRejected("COUNTER_NOT_ALLOWLISTED")
+
+    def _event_classification(self, event: str) -> str:
+        if event == self.policy["conversion"]["primary"]["event"]:
+            return str(self.policy["conversion"]["primary"]["classification"])
+        for item in self.policy["conversion"]["microconversions"]:
+            if event == item["event"]:
+                return str(item["classification"])
+        raise GoalLifecycleRejected("GOAL_EVENT_NOT_ALLOWLISTED")

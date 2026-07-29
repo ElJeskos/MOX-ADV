@@ -17,6 +17,9 @@ from mox_adv.goal_lifecycle import (
     GoalLifecycleService,
     GoalLifecycleStore,
     GoalTechnicalStatus,
+    goal_creation_binding,
+    site_publish_binding,
+    site_publish_diff,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +117,15 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("SITE_PUBLISH",),
             expires_at=NOW + timedelta(minutes=15),
+            binding_hash=site_publish_binding(
+                policy_id=self.policy["policy_id"],
+                candidate=candidate,
+                exact_diff=site_publish_diff(
+                    candidate,
+                    "sim-test-site-zone",
+                    "test-page-v1",
+                ),
+            ),
         )
         self.store.register_authority(publish_authority)
         self.service.publish_candidate_event(
@@ -168,6 +180,10 @@ class GoalLifecycleTests(unittest.TestCase):
         self.assertEqual(
             "USED", self.store.reservation_status(reservation.reservation_id)
         )
+        self.assertEqual(
+            "EXHAUSTED",
+            self.store.authority_status(authority.authority_id),
+        )
 
     def test_goal_authoring_approval_can_create_only_in_bound_pilot_counter(
         self,
@@ -190,6 +206,17 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-pilot-site-zone",
             allowed_actions=("GOAL_AUTHORING",),
             expires_at=NOW + timedelta(minutes=15),
+            binding_hash=goal_creation_binding(
+                policy_id=self.policy["policy_id"],
+                run_id="goal-run-pilot",
+                candidate_id="candidate-goal-run-pilot",
+                proposal_id="goal-proposal-pilot",
+                reservation_id=reservation.reservation_id,
+                counter_id="sim-pilot-counter",
+                site_zone="sim-pilot-site-zone",
+                credential_profile="METRIKA_PILOT_WRITE",
+                payload=goal_payload(event="form_started"),
+            ),
         )
         self.store.register_reservation(reservation)
         self.store.register_authority(authority)
@@ -237,6 +264,17 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("GOAL_AUTHORING",),
             expires_at=NOW + timedelta(minutes=15),
+            binding_hash=goal_creation_binding(
+                policy_id=self.policy["policy_id"],
+                run_id="goal-run-duplicate",
+                candidate_id="candidate-goal-run-duplicate",
+                proposal_id="goal-proposal-duplicate",
+                reservation_id=reservation.reservation_id,
+                counter_id="sim-test-counter",
+                site_zone="sim-test-site-zone",
+                credential_profile="METRIKA_TEST_WRITE",
+                payload=goal_payload(),
+            ),
         )
         self.store.register_reservation(reservation)
         self.store.register_authority(authority)
@@ -309,6 +347,15 @@ class GoalLifecycleTests(unittest.TestCase):
             site_zone="sim-test-site-zone",
             allowed_actions=("SITE_PUBLISH",),
             expires_at=NOW + timedelta(minutes=15),
+            binding_hash=site_publish_binding(
+                policy_id=self.policy["policy_id"],
+                candidate=candidate,
+                exact_diff=site_publish_diff(
+                    candidate,
+                    "sim-test-site-zone",
+                    "test-page-v1",
+                ),
+            ),
         )
         self.store.register_authority(publish_authority)
 
@@ -323,33 +370,22 @@ class GoalLifecycleTests(unittest.TestCase):
         self.assertEqual("lead_submitted", publication.event)
         self.assertEqual("#lead-form", publication.selector)
         self.assertEqual("test-page-v1+goal-run-1", publication.published_version)
+        self.assertEqual("INSTALL_REACH_GOAL", publication.exact_diff["operation"])
+        self.assertEqual(
+            "test-page-v1",
+            publication.exact_diff["before"]["page_version"],
+        )
         self.assertEqual(1, self.site_adapter.publish_calls)
 
-        stale_version_authority = GoalAuthority(
-            authority_id="site-publish-approval-stale-version",
-            kind=AuthorityKind.APPROVAL,
-            principal="sviridov",
-            authentication="authenticated_macos_user",
-            proposal_id=candidate.proposal_id,
-            counter_id=candidate.counter_id,
+        repeated = self.service.publish_candidate_event(
+            candidate.candidate_id,
+            authority_id=publish_authority.authority_id,
             site_zone="sim-test-site-zone",
-            allowed_actions=("SITE_PUBLISH",),
-            expires_at=NOW + timedelta(minutes=15),
+            expected_version="test-page-v1",
+            now=NOW,
         )
-        self.store.register_authority(stale_version_authority)
-        with self.assertRaisesRegex(RuntimeError, "SITE_VERSION_MISMATCH"):
-            self.service.publish_candidate_event(
-                candidate.candidate_id,
-                authority_id=stale_version_authority.authority_id,
-                site_zone="sim-test-site-zone",
-                expected_version="test-page-v1",
-                now=NOW,
-            )
+        self.assertEqual(publication, repeated)
         self.assertEqual(1, self.site_adapter.publish_calls)
-        self.assertEqual(
-            "AVAILABLE",
-            self.store.authority_status(stale_version_authority.authority_id),
-        )
 
     def test_site_publish_cannot_cross_the_counter_site_zone_binding(self) -> None:
         candidate = self.create_test_candidate()
@@ -414,7 +450,29 @@ class GoalLifecycleTests(unittest.TestCase):
         )
 
         self.assertEqual(GoalCandidateStatus.APPROVED, approved.status)
-        self.assertTrue(approved.optimization_eligible)
+        self.assertFalse(approved.optimization_eligible)
+
+        learning = self.service.evaluate_optimization_eligibility(
+            candidate.candidate_id,
+            observed_at=NOW + timedelta(hours=71),
+            sample_clicks=50,
+            sample_conversions=3,
+        )
+        self.assertFalse(learning.optimization_eligible)
+        insufficient_sample = self.service.evaluate_optimization_eligibility(
+            candidate.candidate_id,
+            observed_at=NOW + timedelta(hours=72),
+            sample_clicks=49,
+            sample_conversions=2,
+        )
+        self.assertFalse(insufficient_sample.optimization_eligible)
+        eligible = self.service.evaluate_optimization_eligibility(
+            candidate.candidate_id,
+            observed_at=NOW + timedelta(hours=72),
+            sample_clicks=50,
+            sample_conversions=3,
+        )
+        self.assertTrue(eligible.optimization_eligible)
 
     def test_virtual_polling_is_inconclusive_only_with_external_evidence(self) -> None:
         candidate = self.publish_test_candidate()
