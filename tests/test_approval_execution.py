@@ -534,6 +534,25 @@ class ApprovalExecutionTests(unittest.TestCase):
         self.assertEqual("CONTROL_STATE_UNAVAILABLE", result.reason_code)
         self.assertEqual(0, adapter.write_calls)
 
+    def test_locked_control_state_fails_closed_within_kill_switch_sla(self) -> None:
+        adapter = FakeWriteAdapter(
+            initial_state={self.prepared.target_key(): self.prepared.current_value}
+        )
+        lock = sqlite3.connect(str(self.database))
+        lock.execute("BEGIN IMMEDIATE")
+        started = time.monotonic()
+        try:
+            result = self.service(adapter).execute(make_request(self.prepared))
+        finally:
+            lock.rollback()
+            lock.close()
+        elapsed = time.monotonic() - started
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual("CONTROL_STATE_UNAVAILABLE", result.reason_code)
+        self.assertEqual(0, adapter.write_calls)
+        self.assertLess(elapsed, 1)
+
 
 class KillSwitchAndCliTests(unittest.TestCase):
     def setUp(self) -> None:

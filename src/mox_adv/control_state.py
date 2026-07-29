@@ -267,10 +267,10 @@ class DurableControlState:
             os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path), timeout=5)
+        connection = sqlite3.connect(str(self.path), timeout=0.25)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA busy_timeout = 250")
         return connection
 
     def _initialize(self) -> None:
