@@ -24,6 +24,7 @@ from mox_adv.control_state import (
 from mox_adv.egress import EgressDenied, HttpEgressGuard
 from mox_adv.fake_write_adapter import AdapterTimeout, FakeWriteAdapter
 from mox_adv.mandate_store import DurableMandateAuthority
+from mox_adv.write_window import DurableWriteWindowCoordinator
 
 
 class BoundedAutonomyService:
@@ -45,6 +46,11 @@ class BoundedAutonomyService:
         self.clock = clock
         self.before_dispatch = before_dispatch
         self.egress_guard = HttpEgressGuard(policy)
+        self.write_window = DurableWriteWindowCoordinator(
+            control_state.path,
+            policy,
+            clock,
+        )
 
     def execute(
         self,
@@ -272,6 +278,9 @@ class BoundedAutonomyService:
             self.clock(),
             lambda: self.adapter.apply(prepared.target_key(), command),
             before_dispatch=self.before_dispatch,
+            at_dispatch_boundary=lambda: self.write_window.reserve(
+                prepared.execution_key()
+            ),
         )
         if send_status != ExecutionStatus.IN_FLIGHT:
             return BoundedAutonomyOutcome(
@@ -326,6 +335,10 @@ class BoundedAutonomyService:
                 classification.status,
                 classification.reason_code,
                 self.clock(),
+            )
+            self.write_window.settle(
+                prepared.execution_key(),
+                classification.status,
             )
         except (ControlRejected, sqlite3.Error):
             return BoundedAutonomyOutcome(

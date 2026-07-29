@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -85,6 +86,19 @@ class SnapshotVersion:
     snapshot_id: str
     version: int
     deduplicated: bool
+
+
+@dataclass(frozen=True)
+class PollClaim:
+    token: str
+    generation: int
+
+
+@dataclass(frozen=True)
+class WriteWindowDecision:
+    allowed: bool
+    reason_code: Optional[str]
+    blocked_until: Optional[str]
 
 
 def _decimal(value: object) -> Optional[Decimal]:
@@ -431,8 +445,27 @@ class MonitoringStore:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS scheduler_state ("
                 "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
-                "last_polled_at TEXT NOT NULL)"
+                "last_completed_at TEXT, "
+                "claim_token TEXT, "
+                "claim_started_at TEXT, "
+                "claim_generation INTEGER NOT NULL DEFAULT 0, "
+                "lease_expires_at TEXT)"
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(scheduler_state)"
+                ).fetchall()
+            }
+            if "claim_generation" not in columns:
+                connection.execute(
+                    "ALTER TABLE scheduler_state "
+                    "ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0"
+                )
+            if "lease_expires_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE scheduler_state ADD COLUMN lease_expires_at TEXT"
+                )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS snapshot_versions ("
                 "snapshot_id TEXT PRIMARY KEY, "
@@ -455,31 +488,128 @@ class MonitoringStore:
                 "ON active_proposals(snapshot_id, reason_code) WHERE active = 1"
             )
 
-    def claim_poll(self, now: datetime, interval: timedelta) -> bool:
+    def claim_poll(
+        self,
+        now: datetime,
+        interval: timedelta,
+        lease_timeout: timedelta,
+    ) -> Optional[PollClaim]:
         timestamp = _utc(now)
+        claim_token = uuid.uuid4().hex
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT last_polled_at FROM scheduler_state WHERE singleton = 1"
+                "SELECT last_completed_at, claim_token, claim_generation, "
+                "lease_expires_at "
+                "FROM scheduler_state WHERE singleton = 1"
             ).fetchone()
             if row is not None:
-                last_polled_at = datetime.fromisoformat(str(row[0]))
-                if timestamp - _utc(last_polled_at) < interval:
-                    return False
+                if row[1] is not None and row[3] is not None:
+                    lease_expires_at = datetime.fromisoformat(str(row[3]))
+                    if timestamp < _utc(lease_expires_at):
+                        return None
+                if row[0] is not None:
+                    last_completed_at = datetime.fromisoformat(str(row[0]))
+                    if timestamp - _utc(last_completed_at) < interval:
+                        return None
+                generation = int(row[2]) + 1
                 connection.execute(
-                    "UPDATE scheduler_state SET last_polled_at = ? WHERE singleton = 1",
-                    (timestamp.isoformat(),),
+                    "UPDATE scheduler_state SET claim_token = ?, "
+                    "claim_started_at = ?, claim_generation = ?, "
+                    "lease_expires_at = ? WHERE singleton = 1",
+                    (
+                        claim_token,
+                        timestamp.isoformat(),
+                        generation,
+                        (timestamp + lease_timeout).isoformat(),
+                    ),
                 )
             else:
+                generation = 1
                 connection.execute(
-                    "INSERT INTO scheduler_state(singleton, last_polled_at) "
-                    "VALUES (1, ?)",
-                    (timestamp.isoformat(),),
+                    "INSERT INTO scheduler_state("
+                    "singleton, last_completed_at, claim_token, claim_started_at, "
+                    "claim_generation, lease_expires_at"
+                    ") VALUES (1, NULL, ?, ?, ?, ?)",
+                    (
+                        claim_token,
+                        timestamp.isoformat(),
+                        generation,
+                        (timestamp + lease_timeout).isoformat(),
+                    ),
                 )
-        return True
+        return PollClaim(claim_token, generation)
 
-    def save_snapshot(
+    def heartbeat_poll(
         self,
+        claim: PollClaim,
+        now: datetime,
+        lease_timeout: timedelta,
+    ) -> None:
+        timestamp = _utc(now)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                "UPDATE scheduler_state SET lease_expires_at = ? "
+                "WHERE singleton = 1 AND claim_token = ? "
+                "AND claim_generation = ? AND lease_expires_at > ?",
+                (
+                    (timestamp + lease_timeout).isoformat(),
+                    claim.token,
+                    claim.generation,
+                    timestamp.isoformat(),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise MonitoringRejected("Scheduler poll claim was lost.")
+
+    def release_poll(self, claim: PollClaim) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE scheduler_state SET claim_token = NULL, "
+                "claim_started_at = NULL, lease_expires_at = NULL "
+                "WHERE singleton = 1 AND claim_token = ? "
+                "AND claim_generation = ?",
+                (claim.token, claim.generation),
+            )
+
+    def persist_poll(
+        self,
+        claim: PollClaim,
+        snapshot: IntegratedPerformanceSnapshot,
+        proposal_reason_codes: Tuple[str, ...],
+        completed_at: datetime,
+    ) -> Tuple[SnapshotVersion, Tuple[ActiveProposal, ...]]:
+        timestamp = _utc(completed_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_claim(connection, claim, timestamp)
+            snapshot_version = self._save_snapshot(connection, snapshot)
+            proposals = tuple(
+                self._active_proposal(
+                    connection,
+                    snapshot.snapshot_id,
+                    reason_code,
+                    timestamp,
+                )
+                for reason_code in proposal_reason_codes
+            )
+            changed = connection.execute(
+                "UPDATE scheduler_state SET last_completed_at = ?, "
+                "claim_token = NULL, claim_started_at = NULL, "
+                "lease_expires_at = NULL "
+                "WHERE singleton = 1 AND claim_token = ? "
+                "AND claim_generation = ?",
+                (timestamp.isoformat(), claim.token, claim.generation),
+            )
+            if changed.rowcount != 1:
+                raise MonitoringRejected("Scheduler poll claim was lost.")
+        return snapshot_version, proposals
+
+    @staticmethod
+    def _save_snapshot(
+        connection: sqlite3.Connection,
         snapshot: IntegratedPerformanceSnapshot,
     ) -> SnapshotVersion:
         canonical_bytes = json.dumps(
@@ -517,35 +647,33 @@ class MonitoringStore:
                 ).encode("utf-8")
             ).hexdigest()
         )
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT version, canonical_bytes FROM snapshot_versions "
-                "WHERE snapshot_id = ?",
-                (snapshot.snapshot_id,),
-            ).fetchone()
-            if existing is not None:
-                if bytes(existing[1]) != canonical_bytes:
-                    raise MonitoringRejected(
-                        "An immutable snapshot ID contains different bytes."
-                    )
-                return SnapshotVersion(
-                    snapshot.snapshot_id,
-                    int(existing[0]),
-                    True,
+        existing = connection.execute(
+            "SELECT version, canonical_bytes FROM snapshot_versions "
+            "WHERE snapshot_id = ?",
+            (snapshot.snapshot_id,),
+        ).fetchone()
+        if existing is not None:
+            if bytes(existing[1]) != canonical_bytes:
+                raise MonitoringRejected(
+                    "An immutable snapshot ID contains different bytes."
                 )
-            row = connection.execute(
-                "SELECT COALESCE(MAX(version), 0) FROM snapshot_versions "
-                "WHERE series_key = ?",
-                (series_key,),
-            ).fetchone()
-            version = int(row[0]) + 1
-            connection.execute(
-                "INSERT INTO snapshot_versions("
-                "snapshot_id, series_key, version, canonical_bytes"
-                ") VALUES (?, ?, ?, ?)",
-                (snapshot.snapshot_id, series_key, version, canonical_bytes),
+            return SnapshotVersion(
+                snapshot.snapshot_id,
+                int(existing[0]),
+                True,
             )
+        row = connection.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM snapshot_versions "
+            "WHERE series_key = ?",
+            (series_key,),
+        ).fetchone()
+        version = int(row[0]) + 1
+        connection.execute(
+            "INSERT INTO snapshot_versions("
+            "snapshot_id, series_key, version, canonical_bytes"
+            ") VALUES (?, ?, ?, ?)",
+            (snapshot.snapshot_id, series_key, version, canonical_bytes),
+        )
         return SnapshotVersion(snapshot.snapshot_id, version, False)
 
     def load_snapshot_bytes(self, snapshot_id: str) -> bytes:
@@ -558,8 +686,9 @@ class MonitoringStore:
             raise MonitoringRejected("Snapshot is not stored.")
         return bytes(row[0])
 
-    def active_proposal(
-        self,
+    @staticmethod
+    def _active_proposal(
+        connection: sqlite3.Connection,
         snapshot_id: str,
         reason_code: str,
         created_at: datetime,
@@ -571,27 +700,25 @@ class MonitoringStore:
                 (snapshot_id + "\x00" + reason_code).encode("utf-8")
             ).hexdigest()[:24]
         )
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT proposal_id, created_at FROM active_proposals "
-                "WHERE snapshot_id = ? AND reason_code = ? AND active = 1",
-                (snapshot_id, reason_code),
-            ).fetchone()
-            if existing is not None:
-                return ActiveProposal(
-                    proposal_id=str(existing[0]),
-                    snapshot_id=snapshot_id,
-                    reason_code=reason_code,
-                    created_at=str(existing[1]),
-                    deduplicated=True,
-                )
-            connection.execute(
-                "INSERT INTO active_proposals("
-                "proposal_id, snapshot_id, reason_code, created_at, active"
-                ") VALUES (?, ?, ?, ?, 1)",
-                (proposal_id, snapshot_id, reason_code, timestamp),
+        existing = connection.execute(
+            "SELECT proposal_id, created_at FROM active_proposals "
+            "WHERE snapshot_id = ? AND reason_code = ? AND active = 1",
+            (snapshot_id, reason_code),
+        ).fetchone()
+        if existing is not None:
+            return ActiveProposal(
+                proposal_id=str(existing[0]),
+                snapshot_id=snapshot_id,
+                reason_code=reason_code,
+                created_at=str(existing[1]),
+                deduplicated=True,
             )
+        connection.execute(
+            "INSERT INTO active_proposals("
+            "proposal_id, snapshot_id, reason_code, created_at, active"
+            ") VALUES (?, ?, ?, ?, 1)",
+            (proposal_id, snapshot_id, reason_code, timestamp),
+        )
         return ActiveProposal(
             proposal_id=proposal_id,
             snapshot_id=snapshot_id,
@@ -603,6 +730,111 @@ class MonitoringStore:
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(str(self.path), isolation_level=None)
 
+    @staticmethod
+    def _require_claim(
+        connection: sqlite3.Connection,
+        claim: PollClaim,
+        now: datetime,
+    ) -> None:
+        row = connection.execute(
+            "SELECT 1 FROM scheduler_state WHERE singleton = 1 "
+            "AND claim_token = ? AND claim_generation = ? "
+            "AND lease_expires_at > ?",
+            (claim.token, claim.generation, _utc(now).isoformat()),
+        ).fetchone()
+        if row is None:
+            raise MonitoringRejected("Scheduler poll claim was lost.")
+
+
+class DurableWriteWindowGate:
+    """Serialize write attempts and enforce the durable Gate 0 quiet window."""
+
+    def __init__(self, path: Path, policy: Mapping[str, Any]) -> None:
+        self.path = path
+        self.window = timedelta(
+            hours=max(
+                int(policy["timing"]["cooldown_hours"]),
+                int(policy["timing"]["observation_window_hours"]),
+            )
+        )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def reserve(self, execution_key: str, now: datetime) -> WriteWindowDecision:
+        if not execution_key:
+            raise MonitoringRejected("Write-window execution key is required.")
+        timestamp = _utc(now)
+        with self._connect() as connection:
+            self._ensure_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT execution_key, status, active_until "
+                "FROM write_window_gate WHERE singleton = 1"
+            ).fetchone()
+            if row is not None:
+                if str(row[1]) == "IN_PROGRESS":
+                    return WriteWindowDecision(
+                        False,
+                        "WRITE_WINDOW_IN_PROGRESS",
+                        None,
+                    )
+                active_until = datetime.fromisoformat(str(row[2]))
+                if timestamp < _utc(active_until):
+                    return WriteWindowDecision(
+                        False,
+                        "COOLDOWN_AND_OBSERVATION_ACTIVE",
+                        _utc(active_until).isoformat(),
+                    )
+            connection.execute(
+                "INSERT INTO write_window_gate("
+                "singleton, execution_key, status, reserved_at, active_until"
+                ") VALUES (1, ?, 'IN_PROGRESS', ?, NULL) "
+                "ON CONFLICT(singleton) DO UPDATE SET "
+                "execution_key = excluded.execution_key, "
+                "status = excluded.status, reserved_at = excluded.reserved_at, "
+                "active_until = NULL",
+                (execution_key, timestamp.isoformat()),
+            )
+        return WriteWindowDecision(True, None, None)
+
+    def activate(self, execution_key: str, applied_at: datetime) -> None:
+        timestamp = _utc(applied_at)
+        with self._connect() as connection:
+            self._ensure_schema(connection)
+            changed = connection.execute(
+                "UPDATE write_window_gate SET status = 'ACTIVE', "
+                "active_until = ? WHERE singleton = 1 "
+                "AND execution_key = ? AND status = 'IN_PROGRESS'",
+                ((timestamp + self.window).isoformat(), execution_key),
+            )
+            if changed.rowcount != 1:
+                raise MonitoringRejected(
+                    "Write-window reservation cannot be activated."
+                )
+
+    def release(self, execution_key: str) -> None:
+        with self._connect() as connection:
+            self._ensure_schema(connection)
+            connection.execute(
+                "DELETE FROM write_window_gate WHERE singleton = 1 "
+                "AND execution_key = ? AND status = 'IN_PROGRESS'",
+                (execution_key,),
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(str(self.path), isolation_level=None)
+
+    @staticmethod
+    def _ensure_schema(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS write_window_gate ("
+            "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+            "execution_key TEXT NOT NULL, "
+            "status TEXT NOT NULL "
+            "CHECK (status IN ('IN_PROGRESS', 'ACTIVE')), "
+            "reserved_at TEXT NOT NULL, "
+            "active_until TEXT)"
+        )
+
 
 class MonitoringScheduler:
     """Run one due read-only poll through a clock-controlled public seam."""
@@ -613,76 +845,88 @@ class MonitoringScheduler:
         source: ReadOnlyMonitoringSource,
         store: MonitoringStore,
         clock: Callable[[], datetime],
+        lease_timeout: timedelta = timedelta(minutes=5),
     ) -> None:
         self.policy = policy
         self.source = source
         self.store = store
         self.clock = clock
+        self.lease_timeout = lease_timeout
         self.anomaly_policy = Gate0AnomalyPolicy(policy)
 
     def poll(self) -> MonitoringOutcome:
         now = _utc(self.clock())
         interval = timedelta(minutes=int(self.policy["monitoring"]["poll_minutes"]))
-        if not self.store.claim_poll(now, interval):
+        claim = self.store.claim_poll(now, interval, self.lease_timeout)
+        if claim is None:
             return MonitoringOutcome(status="NOT_DUE", snapshot_id=None)
-        monitoring_read = self.source.read()
-        snapshot = monitoring_read.snapshot
-        if snapshot.policy_version != self.policy["policy_id"]:
-            raise MonitoringRejected("Snapshot policy version does not match Gate 0.")
-        if not IntegratedSnapshotNormalizerV1.verify_fingerprint(snapshot.as_dict()):
-            raise MonitoringRejected("Snapshot fingerprint is invalid.")
-        snapshot_version = self.store.save_snapshot(snapshot)
-        anomalies = self.anomaly_policy.evaluate(monitoring_read, now)
-        write_blocked, block_reason = self._write_window(
-            monitoring_read.last_applied_write_at,
-            now,
-        )
-        safe_for_financial_proposal = (
-            snapshot.comparability_status == "COMPARABLE"
-            and snapshot.confidence_status == "READY"
-            and snapshot.financial_recommendations_allowed
-            and not any(not anomaly.financial for anomaly in anomalies)
-            and not write_blocked
-        )
-        proposals = (
-            tuple(
-                self.store.active_proposal(
-                    snapshot.snapshot_id,
-                    anomaly.reason_code,
-                    now,
+        try:
+            monitoring_read = self.source.read()
+            self.store.heartbeat_poll(claim, _utc(self.clock()), self.lease_timeout)
+            snapshot = monitoring_read.snapshot
+            if snapshot.policy_version != self.policy["policy_id"]:
+                raise MonitoringRejected(
+                    "Snapshot policy version does not match Gate 0."
+                )
+            if not IntegratedSnapshotNormalizerV1.verify_fingerprint(
+                snapshot.as_dict()
+            ):
+                raise MonitoringRejected("Snapshot fingerprint is invalid.")
+            self.store.heartbeat_poll(claim, _utc(self.clock()), self.lease_timeout)
+            anomalies = self.anomaly_policy.evaluate(monitoring_read, now)
+            write_blocked, block_reason = self._write_window(
+                monitoring_read.last_applied_write_at,
+                now,
+            )
+            safe_for_financial_proposal = (
+                snapshot.comparability_status == "COMPARABLE"
+                and snapshot.confidence_status == "READY"
+                and snapshot.financial_recommendations_allowed
+                and not any(not anomaly.financial for anomaly in anomalies)
+                and not write_blocked
+            )
+            proposal_reason_codes = (
+                tuple(anomaly.reason_code for anomaly in anomalies if anomaly.financial)
+                if safe_for_financial_proposal
+                else ()
+            )
+            self.store.heartbeat_poll(claim, _utc(self.clock()), self.lease_timeout)
+            alerts = tuple(
+                MonitoringAlert(
+                    alert_id="monitoring-alert-"
+                    + hashlib.sha256(
+                        (snapshot.snapshot_id + "\x00" + anomaly.reason_code).encode(
+                            "utf-8"
+                        )
+                    ).hexdigest()[:24],
+                    snapshot_id=snapshot.snapshot_id,
+                    reason_code=anomaly.reason_code,
+                    observed_value=anomaly.observed_value,
+                    threshold=anomaly.threshold,
+                    created_at=now.isoformat(),
                 )
                 for anomaly in anomalies
-                if anomaly.financial
             )
-            if safe_for_financial_proposal
-            else ()
-        )
-        alerts = tuple(
-            MonitoringAlert(
-                alert_id="monitoring-alert-"
-                + hashlib.sha256(
-                    (snapshot.snapshot_id + "\x00" + anomaly.reason_code).encode(
-                        "utf-8"
-                    )
-                ).hexdigest()[:24],
+            snapshot_version, proposals = self.store.persist_poll(
+                claim,
+                snapshot,
+                proposal_reason_codes,
+                _utc(self.clock()),
+            )
+            outcome = MonitoringOutcome(
+                status="POLLED",
                 snapshot_id=snapshot.snapshot_id,
-                reason_code=anomaly.reason_code,
-                observed_value=anomaly.observed_value,
-                threshold=anomaly.threshold,
-                created_at=now.isoformat(),
+                anomalies=anomalies,
+                alerts=alerts,
+                proposals=proposals,
+                snapshot_version=snapshot_version.version,
+                write_blocked=write_blocked,
+                block_reason=block_reason,
             )
-            for anomaly in anomalies
-        )
-        return MonitoringOutcome(
-            status="POLLED",
-            snapshot_id=snapshot.snapshot_id,
-            anomalies=anomalies,
-            alerts=alerts,
-            proposals=proposals,
-            snapshot_version=snapshot_version.version,
-            write_blocked=write_blocked,
-            block_reason=block_reason,
-        )
+            return outcome
+        except BaseException:
+            self.store.release_poll(claim)
+            raise
 
     def _write_window(
         self,

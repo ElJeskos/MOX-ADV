@@ -525,6 +525,7 @@ class DurableMandateAuthority:
         now: datetime,
         sender: Callable[[], None],
         before_dispatch: Optional[Callable[[], None]] = None,
+        at_dispatch_boundary: Optional[Callable[[], None]] = None,
     ) -> tuple[ExecutionStatus, ExecutionRecord]:
         connection = self._connect()
         try:
@@ -592,6 +593,8 @@ class DurableMandateAuthority:
         if before_dispatch is not None:
             before_dispatch()
         self._require_dispatch_allowed(mandate_id, prepared.scope, now)
+        if at_dispatch_boundary is not None:
+            at_dispatch_boundary()
         sender()
         return ExecutionStatus.IN_FLIGHT, record
 

@@ -36,6 +36,7 @@ from mox_adv.control_state import (
 )
 from mox_adv.egress import EgressDenied, HttpEgressGuard
 from mox_adv.fake_write_adapter import FakeWriteAdapter
+from mox_adv.monitoring import DurableWriteWindowGate
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "config" / "gate0-policy.json"
@@ -219,12 +220,16 @@ class ApprovalExecutionTests(unittest.TestCase):
             now=NOW,
         )
 
-    def service(self, adapter: FakeWriteAdapter) -> ApprovalExecutionService:
+    def service(
+        self,
+        adapter: FakeWriteAdapter,
+        now: datetime = NOW,
+    ) -> ApprovalExecutionService:
         return ApprovalExecutionService(
             policy=load_policy(),
             state=self.state,
             adapter=adapter,
-            clock=lambda: NOW,
+            clock=lambda: now,
         )
 
     def test_happy_path_is_applied_only_after_exact_fake_readback(self) -> None:
@@ -243,6 +248,56 @@ class ApprovalExecutionTests(unittest.TestCase):
             .load_execution(self.prepared.execution_key())
             .status,
         )
+
+    def test_durable_write_window_blocks_until_exact_72_hour_boundary(
+        self,
+    ) -> None:
+        for label, elapsed, expected_status, expected_writes in (
+            (
+                "before",
+                timedelta(hours=71, minutes=59, seconds=59),
+                "BLOCKED",
+                0,
+            ),
+            ("boundary", timedelta(hours=72), "APPLIED", 1),
+        ):
+            with self.subTest(label=label):
+                database = Path(self.temporary_directory.name) / (
+                    "approval-window-" + label + ".sqlite3"
+                )
+                state = DurableControlState(database)
+                prepared = make_prepared(proposal_id="proposal-window-" + label)
+                state.register_prepared_change(prepared)
+                state.grant_approval(
+                    prepared.proposal_id,
+                    NOW + timedelta(minutes=15),
+                    "Approve exact window test.",
+                    self.principal,
+                    NOW,
+                )
+                gate = DurableWriteWindowGate(database, load_policy())
+                applied_at = NOW - elapsed
+                self.assertTrue(gate.reserve("prior-execution", applied_at).allowed)
+                gate.activate("prior-execution", applied_at)
+                adapter = FakeWriteAdapter(
+                    initial_state={
+                        prepared.target_key(): prepared.current_value,
+                    }
+                )
+                result = ApprovalExecutionService(
+                    load_policy(),
+                    state,
+                    adapter,
+                    clock=lambda: NOW,
+                ).execute(make_request(prepared))
+
+                self.assertEqual(expected_status, result.status)
+                self.assertEqual(expected_writes, adapter.write_calls)
+                if label == "before":
+                    self.assertEqual(
+                        "COOLDOWN_AND_OBSERVATION_ACTIVE",
+                        result.reason_code,
+                    )
 
     def test_approval_is_immutable_exact_and_single_use(self) -> None:
         with self.assertRaises(ControlRejected):

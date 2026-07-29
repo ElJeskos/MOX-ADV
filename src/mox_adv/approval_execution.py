@@ -23,6 +23,7 @@ from mox_adv.control_state import (
 )
 from mox_adv.egress import EgressDenied, HttpEgressGuard
 from mox_adv.fake_write_adapter import AdapterTimeout
+from mox_adv.write_window import DurableWriteWindowCoordinator
 
 __all__ = [
     "ApprovalExecutionService",
@@ -274,6 +275,11 @@ class ApprovalExecutionService:
         self.adapter = adapter
         self.clock = clock
         self.egress_guard = HttpEgressGuard(policy)
+        self.write_window = DurableWriteWindowCoordinator(
+            state.path,
+            policy,
+            clock,
+        )
 
     def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
         try:
@@ -328,6 +334,9 @@ class ApprovalExecutionService:
                     approval,
                     self.clock(),
                     lambda: self.adapter.apply(prepared.target_key(), command),
+                    at_dispatch_boundary=lambda: self.write_window.reserve(
+                        prepared.execution_key()
+                    ),
                 )
             except AdapterTimeout:
                 return self._reconcile_timeout(prepared)
@@ -353,6 +362,7 @@ class ApprovalExecutionService:
                 reason,
                 self.clock(),
             )
+            self.write_window.settle(prepared.execution_key(), status)
             return ExecutionOutcome(status, reason, observed)
         except CommandRejected as error:
             reason = (
@@ -422,6 +432,7 @@ class ApprovalExecutionService:
                 reason,
                 self.clock(),
             )
+            self.write_window.settle(execution_key, status)
             return ExecutionOutcome(status, reason, observed)
         except ControlRejected as error:
             return ExecutionOutcome(
@@ -447,4 +458,5 @@ class ApprovalExecutionService:
             reason,
             self.clock(),
         )
+        self.write_window.settle(prepared.execution_key(), status)
         return ExecutionOutcome(status, reason, observed)

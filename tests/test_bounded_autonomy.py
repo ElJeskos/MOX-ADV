@@ -29,6 +29,7 @@ from mox_adv.control_state import (
     TrustedScope,
 )
 from mox_adv.fake_write_adapter import FakeWriteAdapter
+from mox_adv.monitoring import DurableWriteWindowGate
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "config" / "gate0-policy.json"
@@ -372,6 +373,60 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
         self.assertEqual(1, usage.action_count)
         self.assertEqual(10, usage.total_monetary_exposure_rub)
         self.assertEqual(10, usage.daily_cumulative_change_percent)
+
+    def test_durable_write_window_blocks_until_exact_72_hour_boundary(
+        self,
+    ) -> None:
+        for label, elapsed, expected_status, expected_writes in (
+            (
+                "before",
+                timedelta(hours=71, minutes=59, seconds=59),
+                "BLOCKED",
+                0,
+            ),
+            ("boundary", timedelta(hours=72), "APPLIED", 1),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                database = Path(temporary) / "control.sqlite3"
+                policy = load_policy()
+                signer = HMACMandateSigner(b"window-gate-test-key")
+                control = DurableControlState(database)
+                authority = DurableMandateAuthority(database, policy, signer)
+                principal = FixedAuthenticator().authenticate()
+                issued = authority.issue(
+                    make_mandate_payload(),
+                    principal,
+                    NOW,
+                )
+                mandate = authority.activate(issued.mandate_id, principal, NOW)
+                prepared = make_prepared(
+                    proposal_id="proposal-window-" + label,
+                )
+                control.register_prepared_change(prepared)
+                gate = DurableWriteWindowGate(database, policy)
+                applied_at = NOW - elapsed
+                self.assertTrue(gate.reserve("prior-execution", applied_at).allowed)
+                gate.activate("prior-execution", applied_at)
+                adapter = FakeWriteAdapter(
+                    initial_state={
+                        prepared.target_key(): prepared.current_value,
+                    }
+                )
+                result = BoundedAutonomyService(
+                    policy,
+                    control,
+                    authority,
+                    adapter,
+                    clock=lambda: NOW,
+                ).execute(make_request(prepared, mandate))
+
+                self.assertEqual(expected_status, result.status)
+                self.assertEqual(expected_writes, adapter.write_calls)
+                if label == "before":
+                    self.assertEqual(
+                        "COOLDOWN_AND_OBSERVATION_ACTIVE",
+                        result.reason_code,
+                    )
 
     def test_suspend_campaign_reaches_exact_fake_readback(self) -> None:
         prepared = make_prepared(
@@ -753,26 +808,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
     def test_revocation_and_linked_kill_switch_block_next_unsent_command_under_sla(
         self,
     ) -> None:
-        for name, blocker in (
-            (
-                "revocation",
-                lambda: self.authority.revoke(
-                    self.mandate.mandate_id,
-                    "Immediate revoke.",
-                    self.principal,
-                    NOW,
-                ),
-            ),
-            (
-                "kill-switch",
-                lambda: self.control.engage_kill_switch(
-                    "campaign:campaign-1",
-                    "Immediate incident stop.",
-                    self.principal,
-                    NOW,
-                ),
-            ),
-        ):
+        for name in ("revocation", "kill-switch"):
             with self.subTest(name=name):
                 database = Path(self.temporary_directory.name) / f"{name}.sqlite3"
                 control = DurableControlState(database)

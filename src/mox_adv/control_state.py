@@ -494,16 +494,19 @@ class DurableControlState:
                 (approval_id,),
             ).fetchone()
             if existing is not None:
-                if tuple(
-                    existing[name]
-                    for name in (
-                        "proposal_id",
-                        "binding_hash",
-                        "approver",
-                        "authentication",
-                        "expires_at",
+                if (
+                    tuple(
+                        existing[name]
+                        for name in (
+                            "proposal_id",
+                            "binding_hash",
+                            "approver",
+                            "authentication",
+                            "expires_at",
+                        )
                     )
-                ) != immutable:
+                    != immutable
+                ):
                     raise ControlRejected(
                         "IMMUTABLE_APPROVAL_CONFLICT",
                         "campaign approval binding changed.",
@@ -821,6 +824,7 @@ class DurableControlState:
         approval: ApprovalRecord,
         now: datetime,
         sender: Callable[[], None],
+        at_dispatch_boundary: Optional[Callable[[], None]] = None,
     ) -> Tuple[ExecutionStatus, ExecutionRecord]:
         """Commit authority and IN_FLIGHT before the immediate dispatch boundary."""
 
@@ -980,6 +984,8 @@ class DurableControlState:
                         "KILL_SWITCH_ACTIVE",
                         "durable kill switch blocks the unsent command.",
                     )
+            if at_dispatch_boundary is not None:
+                at_dispatch_boundary()
         except ControlRejected as error:
             self.finish_execution(
                 prepared.execution_key(),

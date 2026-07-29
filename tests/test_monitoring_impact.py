@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,7 @@ from mox_adv.impact import (
 )
 from mox_adv.monitoring import (
     MonitoringRead,
+    MonitoringRejected,
     MonitoringScheduler,
     MonitoringStore,
 )
@@ -46,6 +48,28 @@ class FixtureReadSource:
 
     def read(self) -> MonitoringRead:
         self.calls += 1
+        return self.value
+
+
+class FailOnceReadSource(FixtureReadSource):
+    def read(self) -> MonitoringRead:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary read failure")
+        return self.value
+
+
+class BlockingReadSource(FixtureReadSource):
+    def __init__(self, read: MonitoringRead) -> None:
+        super().__init__(read)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def read(self) -> MonitoringRead:
+        self.calls += 1
+        self.started.set()
+        if not self.release.wait(timeout=2):
+            raise RuntimeError("blocking test timed out")
         return self.value
 
 
@@ -129,6 +153,151 @@ class MonitoringSchedulerTests(unittest.TestCase):
         self.assertEqual("NOT_DUE", too_early.status)
         self.assertEqual("POLLED", boundary.status)
         self.assertEqual(2, source.calls)
+
+    def test_failed_read_releases_poll_claim_for_immediate_retry(self) -> None:
+        policy, fixture = linked_input()
+        snapshot = build_snapshot(fixture, policy)
+        clock = VirtualClock(datetime(2026, 7, 28, 0, 15, tzinfo=timezone.utc))
+        source = FailOnceReadSource(MonitoringRead(snapshot=snapshot))
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            scheduler = MonitoringScheduler(
+                policy=load_policy(),
+                source=source,
+                store=MonitoringStore(
+                    Path(temporary_directory) / "monitoring.sqlite3",
+                ),
+                clock=clock,
+            )
+            with self.assertRaisesRegex(RuntimeError, "temporary read failure"):
+                scheduler.poll()
+            retry = scheduler.poll()
+
+        self.assertEqual("POLLED", retry.status)
+        self.assertEqual(2, source.calls)
+
+    def test_post_read_validation_failure_releases_claim_for_immediate_retry(
+        self,
+    ) -> None:
+        policy, fixture = linked_input()
+        snapshot = build_snapshot(fixture, policy)
+        invalid = replace(snapshot, snapshot_id="sha256:" + "0" * 64)
+        clock = VirtualClock(datetime(2026, 7, 28, 0, 15, tzinfo=timezone.utc))
+        source = FixtureReadSource(MonitoringRead(snapshot=invalid))
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            scheduler = MonitoringScheduler(
+                policy=load_policy(),
+                source=source,
+                store=MonitoringStore(
+                    Path(temporary_directory) / "monitoring.sqlite3",
+                ),
+                clock=clock,
+            )
+            with self.assertRaisesRegex(
+                MonitoringRejected,
+                "fingerprint is invalid",
+            ):
+                scheduler.poll()
+            source.value = MonitoringRead(snapshot=snapshot)
+            retry = scheduler.poll()
+
+        self.assertEqual("POLLED", retry.status)
+        self.assertEqual(2, source.calls)
+
+    def test_concurrent_scheduler_caller_cannot_duplicate_an_in_progress_poll(
+        self,
+    ) -> None:
+        policy, fixture = linked_input()
+        snapshot = build_snapshot(fixture, policy)
+        clock = VirtualClock(datetime(2026, 7, 28, 0, 15, tzinfo=timezone.utc))
+        source = BlockingReadSource(MonitoringRead(snapshot=snapshot))
+        results = []
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            scheduler = MonitoringScheduler(
+                policy=load_policy(),
+                source=source,
+                store=MonitoringStore(
+                    Path(temporary_directory) / "monitoring.sqlite3",
+                ),
+                clock=clock,
+            )
+            worker = threading.Thread(target=lambda: results.append(scheduler.poll()))
+            worker.start()
+            self.assertTrue(source.started.wait(timeout=2))
+            concurrent = scheduler.poll()
+            source.release.set()
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual("NOT_DUE", concurrent.status)
+        self.assertEqual(1, source.calls)
+        self.assertEqual(["POLLED"], [result.status for result in results])
+
+    def test_expired_slow_worker_is_fenced_before_persisting_after_takeover(
+        self,
+    ) -> None:
+        policy, fixture = linked_input()
+        original = build_snapshot(fixture, policy)
+        replacement = replace_metric(original, "spend_rub", "1600")
+        clock = VirtualClock(datetime(2026, 7, 28, 0, 15, tzinfo=timezone.utc))
+        slow_source = BlockingReadSource(MonitoringRead(snapshot=original))
+        current_source = FixtureReadSource(MonitoringRead(snapshot=replacement))
+        slow_results = []
+        slow_errors = []
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "monitoring.sqlite3"
+            store = MonitoringStore(path)
+            slow_scheduler = MonitoringScheduler(
+                policy=load_policy(),
+                source=slow_source,
+                store=store,
+                clock=clock,
+                lease_timeout=timedelta(seconds=30),
+            )
+            current_scheduler = MonitoringScheduler(
+                policy=load_policy(),
+                source=current_source,
+                store=store,
+                clock=clock,
+                lease_timeout=timedelta(seconds=30),
+            )
+
+            def run_slow_poll() -> None:
+                try:
+                    slow_results.append(slow_scheduler.poll())
+                except BaseException as error:
+                    slow_errors.append(error)
+
+            slow_worker = threading.Thread(target=run_slow_poll)
+            slow_worker.start()
+            self.assertTrue(slow_source.started.wait(timeout=2))
+            clock.advance(seconds=30)
+            current = current_scheduler.poll()
+            slow_source.release.set()
+            slow_worker.join(timeout=2)
+
+            expected_bytes = json.dumps(
+                replacement.as_dict(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            self.assertEqual(
+                expected_bytes,
+                store.load_snapshot_bytes(replacement.snapshot_id),
+            )
+            with self.assertRaisesRegex(MonitoringRejected, "not stored"):
+                store.load_snapshot_bytes(original.snapshot_id)
+
+        self.assertFalse(slow_worker.is_alive())
+        self.assertEqual("POLLED", current.status)
+        self.assertEqual([], slow_results)
+        self.assertEqual(1, len(slow_errors))
+        self.assertIsInstance(slow_errors[0], MonitoringRejected)
+        self.assertIn("claim was lost", str(slow_errors[0]))
 
     def test_exact_gate0_performance_thresholds_are_active_at_their_boundaries(
         self,
@@ -751,6 +920,32 @@ class ImpactEvaluationTests(unittest.TestCase):
             "DELAYED_CONVERSION_WINDOW_ACTIVE",
         ):
             ImpactEvaluator(policy).evaluate(before)
+
+    def test_impact_periods_must_be_temporally_linked_to_the_change(self) -> None:
+        policy = load_policy()
+        request = load_impact_fixture(IMPACT_FIXTURE, policy)
+        overlapping_post = replace(
+            request,
+            post_change=replace(
+                request.post_change,
+                period_start="2026-06-30",
+            ),
+        )
+        late_baseline = replace(
+            request,
+            baseline=replace(
+                request.baseline,
+                period_end="2026-07-01",
+            ),
+        )
+
+        for invalid in (overlapping_post, late_baseline):
+            with self.subTest(request=invalid):
+                with self.assertRaisesRegex(
+                    ImpactRejected,
+                    "TEMPORAL_LINKAGE_INVALID",
+                ):
+                    ImpactEvaluator(policy).evaluate(invalid)
 
     def test_missing_evidence_or_confounders_escalate_and_never_claim_causality(
         self,

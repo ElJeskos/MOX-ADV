@@ -318,6 +318,22 @@ class ImpactEvaluator:
             raise ImpactRejected("Impact observations must use the same campaign.")
         evaluated_at = _utc(request.evaluated_at, "Evaluation time")
         changed_at = _utc(request.change_applied_at, "Change time")
+        baseline_closed_at = datetime.combine(
+            date.fromisoformat(request.baseline.period_end) + timedelta(days=1),
+            time.min,
+            tzinfo=timezone.utc,
+        )
+        post_started_at = datetime.combine(
+            date.fromisoformat(request.post_change.period_start),
+            time.min,
+            tzinfo=timezone.utc,
+        )
+        if (
+            baseline_closed_at > changed_at
+            or post_started_at < changed_at
+            or post_started_at < baseline_closed_at
+        ):
+            raise ImpactRejected("TEMPORAL_LINKAGE_INVALID")
         observation_hours = int(self.policy["timing"]["observation_window_hours"])
         if evaluated_at - changed_at < timedelta(hours=observation_hours):
             raise ImpactRejected("OBSERVATION_WINDOW_ACTIVE")
