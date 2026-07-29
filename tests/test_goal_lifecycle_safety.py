@@ -598,6 +598,14 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
                 expected_version="test-page-v2",
                 now=NOW,
             )
+        with self.assertRaisesRegex(RuntimeError, "SITE_VERSION_MISMATCH"):
+            service.publish_candidate_event(
+                first.candidate_id,
+                authority_id=authority.authority_id,
+                site_zone="sim-test-site-zone",
+                expected_version="test-page-v1",
+                now=NOW,
+            )
 
         self.assertEqual(0, site_adapter.publish_calls)
         self.assertEqual("AVAILABLE", store.authority_status(authority.authority_id))
