@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=58"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mox-adv"
+version = "0.1.0"
+description = "Safe local MOX-ADV prototype bootstrap"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+mox-adv = "mox_adv.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

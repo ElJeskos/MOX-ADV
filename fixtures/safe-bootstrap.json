@@ -1,0 +1,12 @@
+{
+  "fixture_id": "safe-bootstrap",
+  "records": [
+    {
+      "clicks": 25,
+      "conversions": 3,
+      "cost_rub": "750.00",
+      "impressions": 1000
+    }
+  ],
+  "schema_version": "safe-bootstrap-fixture-v1"
+}

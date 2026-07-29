@@ -1,0 +1,133 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+image_name="mox-adv:local"
+runs_directory="$repository_root/runs"
+keychain_command=${MOX_ADV_KEYCHAIN_COMMAND:-/usr/bin/security}
+
+usage() {
+    echo "Usage: scripts/mox-adv-host build"
+    echo "       scripts/mox-adv-host run-fixture --run-id RUN_ID [--keychain-service SERVICE]"
+    echo "       scripts/mox-adv-host print-run-command --run-id RUN_ID [--keychain-service SERVICE]"
+}
+
+print_run_command() {
+    run_id=$1
+    keychain_service=$2
+    credential_prefix=""
+    credential_flag=""
+    interactive_flag=""
+    if [ -n "$keychain_service" ]; then
+        credential_prefix="<ephemeral-keychain-secret> | "
+        credential_flag=" --credential-stdin"
+        interactive_flag=" -i"
+    fi
+    printf '%s\n' \
+        "${credential_prefix}docker run${interactive_flag} --rm --network=none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop=ALL --security-opt=no-new-privileges --mount type=bind,source=$runs_directory,target=/app/runs $image_name run-fixture --run-id $run_id${credential_flag}"
+}
+
+run_container() {
+    credential_mode=$1
+    run_id=$2
+    set -- \
+        --rm \
+        --network=none \
+        --read-only \
+        --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+        --cap-drop=ALL \
+        --security-opt=no-new-privileges \
+        --mount "type=bind,source=$runs_directory,target=/app/runs"
+    if [ "$credential_mode" = "with-credential" ]; then
+        set -- -i "$@"
+    fi
+    set -- docker run "$@" "$image_name" run-fixture --run-id "$run_id"
+    if [ "$credential_mode" = "with-credential" ]; then
+        set -- "$@" --credential-stdin
+    fi
+    "$@"
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = "build" ]; then
+    exec docker build --tag "$image_name" "$repository_root"
+fi
+
+if [ "$#" -lt 3 ] || { [ "$1" != "run-fixture" ] && [ "$1" != "print-run-command" ]; }; then
+    usage >&2
+    exit 2
+fi
+
+command_name=$1
+shift
+run_id=""
+keychain_service=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --run-id)
+            [ "$#" -ge 2 ] || {
+                usage >&2
+                exit 2
+            }
+            run_id=$2
+            shift 2
+            ;;
+        --keychain-service)
+            [ "$#" -ge 2 ] || {
+                usage >&2
+                exit 2
+            }
+            keychain_service=$2
+            shift 2
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$run_id" in
+    ""|*[!A-Za-z0-9._-]*|.*)
+        echo "Invalid run identifier." >&2
+        exit 2
+        ;;
+esac
+case "$keychain_service" in
+    *[!A-Za-z0-9._:-]*)
+        echo "Invalid Keychain service identifier." >&2
+        exit 2
+        ;;
+esac
+
+mkdir -p "$runs_directory"
+if [ "$command_name" = "print-run-command" ]; then
+    print_run_command "$run_id" "$keychain_service"
+    exit 0
+fi
+
+if [ -z "$keychain_service" ]; then
+    run_container without-credential "$run_id"
+    exit $?
+fi
+
+if [ ! -x "$keychain_command" ]; then
+    echo "The configured Keychain command is unavailable." >&2
+    exit 2
+fi
+credential=$(
+    "$keychain_command" find-generic-password \
+        -w \
+        -s "$keychain_service"
+)
+if [ -z "$credential" ]; then
+    echo "The Keychain credential is empty." >&2
+    exit 2
+fi
+set +e
+printf '%s\n' "$credential" |
+    run_container with-credential "$run_id"
+docker_status=$?
+set -e
+credential=""
+unset credential
+exit "$docker_status"

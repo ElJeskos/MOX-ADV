@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+**/__pycache__
+*.key
+*.log
+*.pem
+*.pyc
+*.sqlite
+*.sqlite3
+artifacts
+coverage
+dist
+node_modules
+runs
+secrets
+tests
