@@ -1,0 +1,56 @@
+{
+  "baseline": {
+    "campaign": "sim-campaign",
+    "comparability_status": "COMPARABLE",
+    "confidence_status": "READY",
+    "metrics": {
+      "clicks": 100,
+      "cost_micros": 4000000000,
+      "goal_visits": 4,
+      "impressions": 5000,
+      "visits": 80
+    },
+    "period_end": "2026-06-30",
+    "period_start": "2026-06-24",
+    "snapshot_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "watermarks": {
+      "direct_report": "2026-07-01T00:00:00+00:00",
+      "direct_state": "2026-07-01T00:00:00+00:00",
+      "metrika_report": "2026-07-03T00:00:00+00:00"
+    }
+  },
+  "change_applied_at": "2026-07-01T00:00:00+00:00",
+  "change_id": "sim-change-cpa-improved",
+  "confounders": [],
+  "evaluated_at": "2026-07-07T00:00:00+00:00",
+  "evidence": [
+    "baseline-linked-snapshot",
+    "post-change-linked-snapshot",
+    "change-readback"
+  ],
+  "fixture_name": "IMPACT_CPA_IMPROVED_KEEP",
+  "known_interventions": [],
+  "policy_version": "mox-adv-gate0-2026-07-29",
+  "post_change": {
+    "campaign": "sim-campaign",
+    "comparability_status": "COMPARABLE",
+    "confidence_status": "READY",
+    "metrics": {
+      "clicks": 120,
+      "cost_micros": 4500000000,
+      "goal_visits": 6,
+      "impressions": 6000,
+      "visits": 100
+    },
+    "period_end": "2026-07-03",
+    "period_start": "2026-07-01",
+    "snapshot_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "watermarks": {
+      "direct_report": "2026-07-04T00:00:00+00:00",
+      "direct_state": "2026-07-04T00:00:00+00:00",
+      "metrika_report": "2026-07-07T00:00:00+00:00"
+    }
+  },
+  "run_id": "impact-cpa-improved-keep",
+  "seasonality": "NO_KNOWN_SEASONAL_SHIFT"
+}
