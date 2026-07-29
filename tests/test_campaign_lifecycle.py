@@ -319,7 +319,7 @@ class CampaignLifecycleTests(unittest.TestCase):
         self.assertEqual([], self.adapter.calls)
 
     def test_unknown_write_result_blocks_restart_without_blind_retry(self) -> None:
-        adapter = FakeDirectManagementAdapter(timeout_after=("Ads", "add"))
+        adapter = FakeDirectManagementAdapter(timeout_after=("Campaigns", "add"))
         service = CampaignLifecycleService(
             self.policy,
             self.store,
@@ -334,7 +334,11 @@ class CampaignLifecycleTests(unittest.TestCase):
         self.assertEqual(CampaignSagaState.UNKNOWN_RESULT, first.status)
         self.assertEqual(CampaignSagaState.UNKNOWN_RESULT, second.status)
         self.assertEqual(calls_after_unknown, tuple(adapter.calls))
-        self.assertEqual(1, adapter.operation_count("Ads", "add"))
+        self.assertEqual(1, adapter.operation_count("Campaigns", "add"))
+        self.assertEqual(
+            "USED",
+            self.store.campaign_approval_status(self.request.approval_id),
+        )
 
     def test_restart_after_persisted_dispatch_never_repeats_an_unknown_write(self) -> None:
         canonical_plan = self.request.canonical_plan(str(self.policy["policy_id"]))
@@ -367,6 +371,10 @@ class CampaignLifecycleTests(unittest.TestCase):
 
         self.assertEqual(CampaignSagaState.PARTIALLY_APPLIED, result.status)
         self.assertEqual((), adapter.object_ids())
+        self.assertEqual(
+            "USED",
+            self.store.campaign_approval_status(self.request.approval_id),
+        )
         self.assertEqual(
             {"Campaigns", "AdGroups", "Ads", "Keywords"},
             {service_name for service_name, method, _ in adapter.calls if method == "delete"},
@@ -465,6 +473,10 @@ class CampaignLifecycleTests(unittest.TestCase):
 
         self.assertEqual(CampaignSagaState.PARTIALLY_APPLIED, result.status)
         self.assertEqual((), adapter.object_ids())
+        self.assertEqual(
+            "USED",
+            self.store.campaign_approval_status(self.request.approval_id),
+        )
 
 
 class DirectIntegrationMatrixTests(unittest.TestCase):

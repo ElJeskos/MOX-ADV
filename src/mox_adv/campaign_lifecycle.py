@@ -20,7 +20,11 @@ from mox_adv.direct_management import (
     DirectService,
     ProductionPilotAuthority,
 )
-from mox_adv.control_state import ControlRejected, DurableControlState
+from mox_adv.control_state import (
+    CampaignApprovalRepository,
+    ControlRejected,
+    DurableControlState,
+)
 from mox_adv.recommend_contracts import CampaignDraftV1, SchemaValidationError
 
 
@@ -519,39 +523,29 @@ class CampaignSagaStore:
             if reservation is None:
                 raise LifecycleRejected("CREATION_RESERVATION_NOT_FOUND")
             self._validate_reservation(reservation, request, now_text)
-            approval = connection.execute(
-                "SELECT * FROM campaign_approvals WHERE approval_id = ?",
-                (request.approval_id,),
-            ).fetchone()
-            if approval is None:
-                raise LifecycleRejected("CAMPAIGN_APPROVAL_NOT_FOUND")
             expected_binding = request.approval_binding(
                 str(canonical_plan["policy_id"])
             )
-            if (
-                approval["status"] != "AVAILABLE"
-                or approval["proposal_id"] != request.proposal_id
-                or approval["binding_hash"] != expected_binding
-                or approval["approver"] != expected_approver
-                or approval["authentication"] != expected_authentication
-                or approval["expires_at"] <= now_text
-            ):
-                raise LifecycleRejected("CAMPAIGN_APPROVAL_NOT_AUTHORIZED")
-            connection.execute(
+            try:
+                CampaignApprovalRepository.reserve(
+                    connection,
+                    approval_id=request.approval_id,
+                    proposal_id=request.proposal_id,
+                    binding_hash=expected_binding,
+                    approver=expected_approver,
+                    authentication=expected_authentication,
+                    execution_key=request.execution_key,
+                    now_text=now_text,
+                )
+            except ControlRejected as error:
+                raise LifecycleRejected(error.reason_code) from error
+            reserved = connection.execute(
                 "UPDATE creation_reservations SET status = 'RESERVED', "
                 "reserved_execution_key = ? WHERE reservation_id = ? AND status = 'AVAILABLE'",
                 (request.execution_key, request.reservation_id),
-            )
-            if connection.total_changes != 1:
-                raise LifecycleRejected("CREATION_RESERVATION_ALREADY_USED")
-            updated_approval = connection.execute(
-                "UPDATE campaign_approvals SET status = 'RESERVED', "
-                "reserved_execution_key = ? WHERE approval_id = ? "
-                "AND status = 'AVAILABLE'",
-                (request.execution_key, request.approval_id),
             ).rowcount
-            if updated_approval != 1:
-                raise LifecycleRejected("CAMPAIGN_APPROVAL_ALREADY_USED")
+            if reserved != 1:
+                raise LifecycleRejected("CREATION_RESERVATION_ALREADY_USED")
             connection.execute(
                 "INSERT INTO campaign_sagas "
                 "(execution_key, run_id, proposal_id, reservation_id, plan_hash, "
@@ -651,28 +645,36 @@ class CampaignSagaStore:
             ).rowcount
             if updated != 1:
                 raise LifecycleRejected("SAGA_STEP_WAS_NOT_DISPATCHED")
-            if ordinal == 0:
-                connection.execute(
-                    "UPDATE creation_reservations SET status = 'USED', used_at = ? "
-                    "WHERE reservation_id = ? AND reserved_execution_key = ?",
-                    (
-                        now_text,
-                        request.reservation_id,
-                        request.execution_key,
-                    ),
-                )
-                used_approval = connection.execute(
-                    "UPDATE campaign_approvals SET status = 'USED', used_at = ? "
-                    "WHERE approval_id = ? AND status = 'RESERVED' "
-                    "AND reserved_execution_key = ?",
-                    (now_text, request.approval_id, request.execution_key),
-                ).rowcount
-                if used_approval != 1:
-                    raise LifecycleRejected("CAMPAIGN_APPROVAL_USE_FAILED")
             connection.execute(
                 "UPDATE campaign_sagas SET updated_at = ? WHERE execution_key = ?",
                 (now_text, request.execution_key),
             )
+
+    def consume_first_write_authority(
+        self,
+        request: CampaignCreationRequest,
+        now: datetime,
+    ) -> None:
+        now_text = _utc_text(now)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            reservation_updated = connection.execute(
+                "UPDATE creation_reservations SET status = 'USED', used_at = ? "
+                "WHERE reservation_id = ? AND status = 'RESERVED' "
+                "AND reserved_execution_key = ?",
+                (now_text, request.reservation_id, request.execution_key),
+            ).rowcount
+            if reservation_updated != 1:
+                raise LifecycleRejected("CREATION_RESERVATION_USE_FAILED")
+            try:
+                CampaignApprovalRepository.consume(
+                    connection,
+                    approval_id=request.approval_id,
+                    execution_key=request.execution_key,
+                    now_text=now_text,
+                )
+            except ControlRejected as error:
+                raise LifecycleRejected(error.reason_code) from error
 
     def register_dispatched_objects(
         self,
@@ -800,28 +802,20 @@ class CampaignSagaStore:
         authority: ProductionPilotAuthority,
     ) -> bool:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT proposal_id, binding_hash, status, reserved_execution_key "
-                "FROM campaign_approvals WHERE approval_id = ?",
-                (authority.approval_id,),
-            ).fetchone()
-        return bool(
-            row is not None
-            and row["proposal_id"] == authority.proposal_id
-            and row["binding_hash"] == authority.binding_hash
-            and row["status"] in {"RESERVED", "USED"}
-            and row["reserved_execution_key"] == authority.execution_key
-        )
+            return CampaignApprovalRepository.authority_is_valid(
+                connection,
+                approval_id=authority.approval_id,
+                proposal_id=authority.proposal_id,
+                binding_hash=authority.binding_hash,
+                execution_key=authority.execution_key,
+            )
 
     def campaign_approval_status(self, approval_id: str) -> str:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT status FROM campaign_approvals WHERE approval_id = ?",
-                (approval_id,),
-            ).fetchone()
-        if row is None:
-            raise LifecycleRejected("CAMPAIGN_APPROVAL_NOT_FOUND")
-        return str(row["status"])
+            try:
+                return CampaignApprovalRepository.status(connection, approval_id)
+            except ControlRejected as error:
+                raise LifecycleRejected(error.reason_code) from error
 
     def mark_compensated(
         self,
@@ -1020,6 +1014,7 @@ class CampaignLifecycleService:
         operation_key: str,
     ) -> None:
         del by_service, group
+        self.store.consume_first_write_authority(request, now)
         created = self.connector.campaigns_add(
             request.run_id,
             operation_key,

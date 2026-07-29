@@ -133,6 +133,110 @@ class MacOSLocalPrincipalAuthenticator:
         return principal
 
 
+class CampaignApprovalRepository:
+    """Own every persistence transition for campaign-creation approvals."""
+
+    @staticmethod
+    def reserve(
+        connection: sqlite3.Connection,
+        *,
+        approval_id: str,
+        proposal_id: str,
+        binding_hash: str,
+        approver: str,
+        authentication: str,
+        execution_key: str,
+        now_text: str,
+    ) -> None:
+        approval = connection.execute(
+            "SELECT * FROM campaign_approvals WHERE approval_id = ?",
+            (approval_id,),
+        ).fetchone()
+        if approval is None:
+            raise ControlRejected(
+                "CAMPAIGN_APPROVAL_NOT_FOUND",
+                "campaign approval does not exist.",
+            )
+        if (
+            approval["status"] != "AVAILABLE"
+            or approval["proposal_id"] != proposal_id
+            or approval["binding_hash"] != binding_hash
+            or approval["approver"] != approver
+            or approval["authentication"] != authentication
+            or approval["expires_at"] <= now_text
+        ):
+            raise ControlRejected(
+                "CAMPAIGN_APPROVAL_NOT_AUTHORIZED",
+                "campaign approval is not bound, current, and available.",
+            )
+        updated = connection.execute(
+            "UPDATE campaign_approvals SET status = 'RESERVED', "
+            "reserved_execution_key = ? WHERE approval_id = ? "
+            "AND status = 'AVAILABLE'",
+            (execution_key, approval_id),
+        ).rowcount
+        if updated != 1:
+            raise ControlRejected(
+                "CAMPAIGN_APPROVAL_ALREADY_USED",
+                "campaign approval could not be reserved.",
+            )
+
+    @staticmethod
+    def consume(
+        connection: sqlite3.Connection,
+        *,
+        approval_id: str,
+        execution_key: str,
+        now_text: str,
+    ) -> None:
+        updated = connection.execute(
+            "UPDATE campaign_approvals SET status = 'USED', used_at = ? "
+            "WHERE approval_id = ? AND status = 'RESERVED' "
+            "AND reserved_execution_key = ?",
+            (now_text, approval_id, execution_key),
+        ).rowcount
+        if updated != 1:
+            raise ControlRejected(
+                "CAMPAIGN_APPROVAL_USE_FAILED",
+                "campaign approval could not be consumed.",
+            )
+
+    @staticmethod
+    def authority_is_valid(
+        connection: sqlite3.Connection,
+        *,
+        approval_id: str,
+        proposal_id: str,
+        binding_hash: str,
+        execution_key: str,
+    ) -> bool:
+        row = connection.execute(
+            "SELECT proposal_id, binding_hash, status, reserved_execution_key "
+            "FROM campaign_approvals WHERE approval_id = ?",
+            (approval_id,),
+        ).fetchone()
+        return bool(
+            row is not None
+            and row["proposal_id"] == proposal_id
+            and row["binding_hash"] == binding_hash
+            and row["status"] in {"RESERVED", "USED"}
+            and row["reserved_execution_key"] == execution_key
+        )
+
+    @staticmethod
+    def status(connection: sqlite3.Connection, approval_id: str) -> str:
+        row = connection.execute(
+            "SELECT status FROM campaign_approvals WHERE approval_id = ?",
+            (approval_id,),
+        ).fetchone()
+        if row is None:
+            raise ControlRejected(
+                "CAMPAIGN_APPROVAL_NOT_FOUND",
+                "campaign approval does not exist.",
+            )
+        return str(row["status"])
+
+
 @dataclass(frozen=True)
 class TrustedScope:
     organization: str
