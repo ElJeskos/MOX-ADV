@@ -597,7 +597,8 @@ Approval предыдущего действия не может использ�
 - `get_change_impact`.
 
 LLM может запросить только эти команды.
-Команда модели всегда создаёт Proposal и не вызывает executor напрямую.
+Запрос LLM на команду с внешним side effect должен сначала сохраняться в Proposal и не должен вызывать executor напрямую.
+Read-only, compute-only и draft-only команды могут вернуть типизированный результат без создания write-Proposal.
 Каждая команда должна иметь строгие входную и выходную схемы, risk class, timeout, result limit и audit policy.
 Каждый tool call должен получить ровно один структурированный результат, включая denial, timeout или ошибку.
 
@@ -616,10 +617,11 @@ Dry-run должен создать точный canonical diff без внеш�
 Canonical plan должен заранее фиксировать порядок шагов, точки необратимости и допустимые компенсации.
 Approval должен считаться использованным сразу после отправки первого HTTP write независимо от итогового состояния многошаговой операции.
 Автоматическое продолжение после первого write разрешено только для неизменённых шагов того же canonical plan.
-Изменение target, бюджета, diff или шага после первого write требует нового Proposal и нового Approval.
+Изменение target, бюджета, diff или шага внутри исходной многошаговой операции после первого write требует нового Proposal и нового Approval.
 Первичное создание production-кампании всегда требует человеческого Approval.
 Один Approval может покрывать создание, отправку на модерацию и первый запуск только при наличии всех этих неизменяемых шагов в canonical plan.
 Если Approval не включает первый запуск, `create_campaign` должна завершиться в состоянии `READY_TO_LAUNCH` после успешной модерации.
+Отдельный `launch_campaign` после завершения `create_campaign` является новой бизнес-транзакцией и не изменяет canonical plan завершённой операции создания.
 В состоянии `READY_TO_LAUNCH` scheduler может выполнить отдельную команду `launch_campaign` без нового Approval только в режиме `BOUNDED_AUTONOMY` по активному Mandate, который явно разрешает `launch_campaign` для фактического `campaign_id`.
 Mandate для автономного первого запуска может быть активирован только после регистрации фактического `campaign_id` в ledger.
 Перед отдельным автономным запуском orchestrator должен получить текущий snapshot, вызвать LLM и сохранить новый immutable `OptimizationProposalV1` с `proposal_origin = CAMPAIGN_LIFECYCLE`, `decision_type = APPLY`, единственным действием `launch_campaign`, фактическим `campaign_id` из trusted context и parent-ссылками на Proposal и execution создания.
