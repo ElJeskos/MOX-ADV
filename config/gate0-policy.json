@@ -1,0 +1,946 @@
+{
+  "schema_version": "gate0-policy-v1",
+  "policy_id": "mox-adv-gate0-2026-07-29",
+  "record": {
+    "title": "MOX-ADV Gate 0 Record",
+    "language": "English",
+    "normative_requirements_source": "requirements-v2-prototype.md",
+    "policy_decisions_status": "APPROVED",
+    "simulation_status": "READY",
+    "controlled_pilot_status": "BLOCKED_UNTIL_TRUSTED_BINDINGS",
+    "production_write_authorized": false
+  },
+  "environment": {
+    "direct": "production_only",
+    "metrika": "production_api",
+    "simulation_write_egress": false
+  },
+  "conversion": {
+    "primary": {
+      "event": "lead_submitted",
+      "classification": "PRIMARY",
+      "business_meaning": "A visitor submitted the lead form."
+    },
+    "microconversions": [
+      {
+        "event": "form_started",
+        "classification": "MICRO",
+        "business_meaning": "A visitor started completing the lead form."
+      },
+      {
+        "event": "primary_cta_clicked",
+        "classification": "MICRO",
+        "business_meaning": "A visitor clicked the primary call to action."
+      }
+    ]
+  },
+  "attribution": {
+    "direct": "AUTO",
+    "metrika": "automatic"
+  },
+  "campaign": {
+    "type": "UNIFIED_CAMPAIGN",
+    "placement": "SEARCH",
+    "search_strategy": "HIGHEST_POSITION",
+    "network_strategy": "SERVING_OFF"
+  },
+  "principals": {
+    "owner": {
+      "identity": "sviridov",
+      "authentication": "authenticated_macos_user"
+    },
+    "approver": {
+      "identity": "sviridov",
+      "authentication": "authenticated_macos_user"
+    },
+    "mandate_issuer": {
+      "identity": "sviridov",
+      "authentication": "authenticated_macos_user"
+    },
+    "incident_principal": {
+      "identity": "sviridov",
+      "authentication": "authenticated_macos_user"
+    },
+    "product_signoff": {
+      "identity": "sviridov",
+      "authentication": "authenticated_macos_user"
+    },
+    "architecture_signoff": {
+      "identity": "sviridov",
+      "authentication": "authenticated_macos_user"
+    },
+    "security_signoff": {
+      "identity": "sviridov",
+      "authentication": "authenticated_macos_user"
+    }
+  },
+  "commands": {
+    "approval_grant": "mox-adv approval grant --proposal-id <PROPOSAL_ID> --expires-in 15m --reason <REASON>",
+    "mandate_issue": "mox-adv mandate issue --file <MANDATE_JSON>",
+    "mandate_activate": "mox-adv mandate activate --mandate-id <MANDATE_ID>",
+    "mandate_revoke": "mox-adv mandate revoke --mandate-id <MANDATE_ID> --reason <REASON>",
+    "kill_switch_engage": "mox-adv kill-switch engage --scope <SCOPE> --reason <REASON>",
+    "kill_switch_release": "mox-adv kill-switch release --scope <SCOPE> --reason <REASON> --reauth"
+  },
+  "credentials": {
+    "storage": "macos_keychain",
+    "forbidden_channels": [
+      "source",
+      "environment_variables",
+      "argv",
+      "logs",
+      "artifacts",
+      "exceptions",
+      "docker_metadata"
+    ],
+    "profiles": [
+      {
+        "name": "DIRECT_PROD_READ",
+        "principal": "sviridov:DIRECT_PROD_READ",
+        "access": "direct_reports_read_only",
+        "keychain_binding": "MOX_ADV_DIRECT_PROD_READ",
+        "rotation": "replace_keychain_credential_after_read_access_validation",
+        "revoke": "revoke_yandex_oauth_then_delete_keychain_credential",
+        "crash_behavior": "discard_ephemeral_secret_and_reacquire_on_next_run"
+      },
+      {
+        "name": "METRIKA_TEST_WRITE",
+        "principal": "sviridov:METRIKA_TEST_WRITE",
+        "access": "one_test_counter_read_write",
+        "keychain_binding": "MOX_ADV_METRIKA_TEST_WRITE",
+        "rotation": "replace_keychain_credential_after_counter_scope_validation",
+        "revoke": "revoke_yandex_oauth_then_delete_keychain_credential",
+        "crash_behavior": "discard_ephemeral_secret_and_reacquire_on_next_run"
+      },
+      {
+        "name": "TEST_SITE_PUBLISH",
+        "principal": "sviridov:TEST_SITE_PUBLISH",
+        "access": "test_page_only",
+        "keychain_binding": "MOX_ADV_TEST_SITE_PUBLISH",
+        "rotation": "replace_keychain_credential_after_site_scope_validation",
+        "revoke": "revoke_site_credential_then_delete_keychain_credential",
+        "crash_behavior": "discard_ephemeral_secret_and_reacquire_on_next_run"
+      },
+      {
+        "name": "DIRECT_PILOT_WRITE",
+        "principal": "sviridov:DIRECT_PILOT_WRITE",
+        "access": "one_allowlisted_account_write_disabled_by_default",
+        "keychain_binding": "MOX_ADV_DIRECT_PILOT_WRITE",
+        "rotation": "replace_keychain_credential_after_account_scope_validation",
+        "revoke": "revoke_yandex_oauth_then_delete_keychain_credential",
+        "crash_behavior": "discard_ephemeral_secret_and_reacquire_on_next_run"
+      },
+      {
+        "name": "METRIKA_PILOT_WRITE",
+        "principal": "sviridov:METRIKA_PILOT_WRITE",
+        "access": "one_pilot_counter_candidate_goal_write",
+        "keychain_binding": "MOX_ADV_METRIKA_PILOT_WRITE",
+        "rotation": "replace_keychain_credential_after_counter_scope_validation",
+        "revoke": "revoke_yandex_oauth_then_delete_keychain_credential",
+        "crash_behavior": "discard_ephemeral_secret_and_reacquire_on_next_run"
+      },
+      {
+        "name": "PILOT_SITE_PUBLISH",
+        "principal": "sviridov:PILOT_SITE_PUBLISH",
+        "access": "one_allowlisted_production_site_zone",
+        "keychain_binding": "MOX_ADV_PILOT_SITE_PUBLISH",
+        "rotation": "replace_keychain_credential_after_site_scope_validation",
+        "revoke": "revoke_site_credential_then_delete_keychain_credential",
+        "crash_behavior": "discard_ephemeral_secret_and_reacquire_on_next_run"
+      }
+    ]
+  },
+  "bindings": {
+    "source": "trusted_runtime_binding",
+    "manifest_verification": "READBACK_ATTESTED",
+    "trusted_manifest_max_age_minutes": 15,
+    "creation_reservation_contract": {
+      "required_fields": [
+        "status",
+        "scope_binding",
+        "object_type",
+        "proposal_id",
+        "credential_profile",
+        "expires_at"
+      ],
+      "bindings": {
+        "campaign_creation_reservation": {
+          "scope_binding": "direct_account",
+          "object_type": "UNIFIED_CAMPAIGN",
+          "credential_profile": "DIRECT_PILOT_WRITE"
+        },
+        "test_candidate_goal_reservation": {
+          "scope_binding": "test_counter",
+          "object_type": "METRIKA_GOAL",
+          "credential_profile": "METRIKA_TEST_WRITE"
+        },
+        "pilot_candidate_goal_reservation": {
+          "scope_binding": "pilot_counter",
+          "object_type": "METRIKA_GOAL",
+          "credential_profile": "METRIKA_PILOT_WRITE"
+        }
+      }
+    },
+    "simulation": {
+      "organization": "sim-organization",
+      "connection": "sim-connection",
+      "direct_account": "sim-direct-account",
+      "campaign_creation_reservation": "sim-campaign-creation-reservation",
+      "readonly_baseline_campaign": "sim-readonly-baseline",
+      "test_counter": "sim-test-counter",
+      "pilot_counter": "sim-pilot-counter",
+      "primary_goal": "sim-primary-goal",
+      "test_candidate_goal_reservation": "sim-test-goal-creation-reservation",
+      "pilot_candidate_goal_reservation": "sim-pilot-goal-creation-reservation",
+      "test_site_zone": "sim-test-site-zone",
+      "pilot_site_zone": "sim-pilot-site-zone",
+      "single_writer": "sim-executor"
+    },
+    "pilot": {
+      "organization": null,
+      "connection": null,
+      "direct_account": null,
+      "campaign_creation_reservation": null,
+      "readonly_baseline_campaign": null,
+      "test_counter": null,
+      "pilot_counter": null,
+      "primary_goal": null,
+      "test_candidate_goal_reservation": null,
+      "pilot_candidate_goal_reservation": null,
+      "test_site_zone": null,
+      "pilot_site_zone": null,
+      "single_writer": null
+    }
+  },
+  "limits": {
+    "platform_weekly_spend_rub": 3000,
+    "application_daily_spend_rub": 500,
+    "mandate_total_exposure_rub": 500,
+    "mandate_daily_exposure_rub": 500,
+    "no_conversion_stop_spend_rub": 2000,
+    "mandate_ttl_hours": 24,
+    "mandate_actions_per_24h": 1,
+    "maximum_step_percent": 10,
+    "maximum_daily_cumulative_change_percent": 10,
+    "llm_total_cost_rub": 2000,
+    "llm_warning_percent": 80
+  },
+  "timing": {
+    "read_poll_minutes": 15,
+    "direct_freshness_minutes": 30,
+    "metrika_freshness_hours": 6,
+    "maximum_watermark_skew_hours": 6,
+    "late_conversion_cutoff_hours": 72,
+    "observation_window_hours": 72,
+    "cooldown_hours": 72,
+    "goal_verification_timeout_minutes": 120,
+    "goal_verification_poll_minutes": 5,
+    "kill_switch_blocking_sla_seconds": 1
+  },
+  "monitoring": {
+    "poll_minutes": 15,
+    "anomaly_thresholds": {
+      "budget_pressure_usage_percent": 90,
+      "pacing_ahead_percent": 20,
+      "spend_growth_without_conversion_rub": 500,
+      "high_cpa_rub": 1000,
+      "cpc_deviation_from_baseline_percent": 30,
+      "low_ctr_percent": 1,
+      "ctr_deviation_from_baseline_percent": 30,
+      "low_ctr_minimum_impressions": 5000,
+      "conversion_rate_deviation_from_baseline_percent": 30,
+      "no_conversion_goal_visits": 0,
+      "no_conversion_spend_rub": 2000,
+      "goal_cessation_hours": 24,
+      "goal_cessation_minimum_visits": 50,
+      "source_mismatch_percent": 30,
+      "direct_freshness_minutes": 30,
+      "metrika_freshness_hours": 6
+    }
+  },
+  "actions": {
+    "controlled_pilot_reversible": [
+      "INCREASE_WEEKLY_BUDGET",
+      "DECREASE_WEEKLY_BUDGET",
+      "INCREASE_SEARCH_BID",
+      "DECREASE_SEARCH_BID",
+      "SET_AD_VARIANT",
+      "SUSPEND_CAMPAIGN",
+      "RESUME_CAMPAIGN"
+    ],
+    "bounded_autonomy": [
+      "DECREASE_SEARCH_BID",
+      "SUSPEND_CAMPAIGN"
+    ],
+    "always_require_approval": [
+      "CREATE_CAMPAIGN",
+      "INCREASE_WEEKLY_BUDGET",
+      "INCREASE_SEARCH_BID",
+      "RESUME_CAMPAIGN",
+      "SET_AD_VARIANT",
+      "SITE_PUBLISH",
+      "INTEGRATION_MATRIX_RUN"
+    ],
+    "readback_required": true,
+    "second_change_before_observation_window": false
+  },
+  "mandate": {
+    "object_type": "IMMUTABLE_CANONICAL_SERVER_SIDE",
+    "allowed_action_classes": [
+      "DECREASE_SEARCH_BID",
+      "SUSPEND_CAMPAIGN"
+    ],
+    "prohibited_action_classes": [
+      "CREATE_CAMPAIGN",
+      "INCREASE_WEEKLY_BUDGET",
+      "DECREASE_WEEKLY_BUDGET",
+      "INCREASE_SEARCH_BID",
+      "SET_AD_VARIANT",
+      "RESUME_CAMPAIGN",
+      "SITE_PUBLISH",
+      "INTEGRATION_MATRIX_RUN"
+    ],
+    "kpi": {
+      "name": "CPA_RUB",
+      "target_maximum": 1000
+    },
+    "minimum_sample": {
+      "clicks": 50,
+      "conversions": 3
+    },
+    "stop_conditions": [
+      "KILL_SWITCH_ACTIVE_OR_UNAVAILABLE",
+      "STALE_OR_INCOMPATIBLE_SNAPSHOT",
+      "UNKNOWN_EXTERNAL_CHANGE",
+      "INSUFFICIENT_SAMPLE",
+      "NO_CONVERSION_SPEND_THRESHOLD",
+      "MONETARY_CAP_REACHED",
+      "ACTION_QUOTA_REACHED",
+      "COOLDOWN_ACTIVE"
+    ],
+    "canonical_fields": [
+      "organization",
+      "connection",
+      "account",
+      "environment",
+      "credential_profile",
+      "targets",
+      "allowed_action_classes",
+      "prohibited_action_classes",
+      "total_monetary_limit",
+      "daily_monetary_limit",
+      "maximum_step_change",
+      "maximum_daily_change",
+      "kpi",
+      "minimum_sample",
+      "cooldown",
+      "stop_conditions",
+      "action_quotas",
+      "platform_side_spend_cap",
+      "issuer",
+      "policy_version",
+      "issued_at",
+      "expiry"
+    ],
+    "hash_algorithm": "SHA-256",
+    "signature": "ISSUER_KEYCHAIN_BACKED",
+    "activation_versioned": true,
+    "revocation_versioned": true,
+    "durable_after_restart": true,
+    "quota_reservation_atomic_with_execution_key": true
+  },
+  "kill_switch": {
+    "storage": "DURABLE_SERVER_SIDE",
+    "scopes": [
+      "global",
+      "organization",
+      "connection",
+      "campaign"
+    ],
+    "precedence_over": [
+      "Approval",
+      "Mandate"
+    ],
+    "unavailable_state": "BLOCKED",
+    "already_sent_request": "IN_FLIGHT_RECONCILIATION_WITHOUT_RETRY",
+    "engage_requires": [
+      "INCIDENT_PRINCIPAL"
+    ],
+    "release_requires": [
+      "INCIDENT_PRINCIPAL",
+      "ELEVATED_REAUTHENTICATION"
+    ],
+    "blocking_sla_seconds": 1
+  },
+  "impact": {
+    "decision_field": "next_decision",
+    "decision_values": [
+      "KEEP_CHANGE",
+      "ROLLBACK_CHANGE",
+      "ADJUST_CHANGE",
+      "ESCALATE_TO_HUMAN"
+    ],
+    "fixture": {
+      "name": "IMPACT_CPA_IMPROVED_KEEP",
+      "expected_next_decision": "KEEP_CHANGE"
+    }
+  },
+  "llm": {
+    "allowed_projection_fields": [
+      "schema_version",
+      "period_start",
+      "period_end",
+      "timezone",
+      "attribution",
+      "campaign_state",
+      "campaign_strategy",
+      "current_budget",
+      "current_bid",
+      "current_ad_variant",
+      "impressions",
+      "clicks",
+      "cost_micros",
+      "visits",
+      "goal_visits",
+      "ctr",
+      "cpc",
+      "conversion_rate",
+      "cpa",
+      "budget_utilization",
+      "freshness",
+      "comparability",
+      "observed_facts",
+      "business_goal",
+      "allowed_change_history",
+      "policy_limits"
+    ],
+    "retention_days": 30,
+    "reliability_fixtures": [
+      {
+        "name": "LLM_EFFECTIVE_BUDGET_PRESSURE",
+        "expected_schema": "OptimizationProposalV1",
+        "expected_status": "EFFECTIVE",
+        "required_evidence": true,
+        "ambiguity_outcome": "NOT_APPLICABLE",
+        "invocation_count": 5
+      },
+      {
+        "name": "LLM_INEFFECTIVE_NO_CONVERSION",
+        "expected_schema": "OptimizationProposalV1",
+        "expected_status": "INEFFECTIVE",
+        "required_evidence": true,
+        "ambiguity_outcome": "NOT_APPLICABLE",
+        "invocation_count": 5
+      },
+      {
+        "name": "LLM_INSUFFICIENT_SAMPLE",
+        "expected_schema": "OptimizationProposalV1",
+        "expected_status": "INSUFFICIENT_DATA",
+        "required_evidence": true,
+        "ambiguity_outcome": "REQUEST_MISSING_DATA_OR_NEEDS_HUMAN",
+        "invocation_count": 5
+      },
+      {
+        "name": "LLM_AMBIGUOUS_TRACKING",
+        "expected_schema": "OptimizationProposalV1",
+        "expected_status": "NEEDS_HUMAN",
+        "required_evidence": true,
+        "ambiguity_outcome": "REQUEST_MISSING_DATA_OR_NEEDS_HUMAN",
+        "invocation_count": 5
+      }
+    ]
+  },
+  "governance": {
+    "raci": {
+      "direct_access": "sviridov",
+      "test_counter": "sviridov",
+      "pilot_counter": "sviridov",
+      "test_site_zone": "sviridov",
+      "pilot_site_zone": "sviridov",
+      "secrets": "sviridov",
+      "cleanup": "sviridov",
+      "product_signoff": "sviridov",
+      "architecture_signoff": "sviridov",
+      "security_signoff": "sviridov"
+    },
+    "gates": [
+      {
+        "gate": 0,
+        "name": "Ready",
+        "evidence_owner": "sviridov"
+      },
+      {
+        "gate": 1,
+        "name": "Safe Core",
+        "evidence_owner": "sviridov"
+      },
+      {
+        "gate": 2,
+        "name": "Test Counter and Simulation",
+        "evidence_owner": "sviridov"
+      },
+      {
+        "gate": 3,
+        "name": "Production Read and Shadow",
+        "evidence_owner": "sviridov"
+      },
+      {
+        "gate": 4,
+        "name": "Controlled Pilot",
+        "evidence_owner": "sviridov"
+      }
+    ],
+    "preliminary_signoff": {
+      "product": "APPROVED",
+      "architecture": "APPROVED",
+      "security": "APPROVED"
+    },
+    "final_signoff": {
+      "product": "PENDING",
+      "architecture": "PENDING",
+      "security": "PENDING"
+    },
+    "residual_risk_owner": "sviridov",
+    "gate_order": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  "api_matrix": [
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/campaigns",
+      "version": "v501",
+      "service": "Campaigns",
+      "method": "add",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/campaigns",
+      "version": "v501",
+      "service": "Campaigns",
+      "method": "get",
+      "http_verb": "POST",
+      "access_class": "MANAGEMENT_READBACK",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/campaigns",
+      "version": "v501",
+      "service": "Campaigns",
+      "method": "update",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/campaigns",
+      "version": "v501",
+      "service": "Campaigns",
+      "method": "suspend",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/campaigns",
+      "version": "v501",
+      "service": "Campaigns",
+      "method": "resume",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/campaigns",
+      "version": "v501",
+      "service": "Campaigns",
+      "method": "archive",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/campaigns",
+      "version": "v501",
+      "service": "Campaigns",
+      "method": "unarchive",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/campaigns",
+      "version": "v501",
+      "service": "Campaigns",
+      "method": "delete",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/adgroups",
+      "version": "v501",
+      "service": "AdGroups",
+      "method": "add",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/adgroups",
+      "version": "v501",
+      "service": "AdGroups",
+      "method": "get",
+      "http_verb": "POST",
+      "access_class": "MANAGEMENT_READBACK",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/adgroups",
+      "version": "v501",
+      "service": "AdGroups",
+      "method": "update",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/adgroups",
+      "version": "v501",
+      "service": "AdGroups",
+      "method": "delete",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/ads",
+      "version": "v501",
+      "service": "Ads",
+      "method": "add",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/ads",
+      "version": "v501",
+      "service": "Ads",
+      "method": "get",
+      "http_verb": "POST",
+      "access_class": "MANAGEMENT_READBACK",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/ads",
+      "version": "v501",
+      "service": "Ads",
+      "method": "update",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/ads",
+      "version": "v501",
+      "service": "Ads",
+      "method": "suspend",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/ads",
+      "version": "v501",
+      "service": "Ads",
+      "method": "resume",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/ads",
+      "version": "v501",
+      "service": "Ads",
+      "method": "archive",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/ads",
+      "version": "v501",
+      "service": "Ads",
+      "method": "unarchive",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/ads",
+      "version": "v501",
+      "service": "Ads",
+      "method": "moderate",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/ads",
+      "version": "v501",
+      "service": "Ads",
+      "method": "delete",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/keywords",
+      "version": "v501",
+      "service": "Keywords",
+      "method": "add",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/keywords",
+      "version": "v501",
+      "service": "Keywords",
+      "method": "get",
+      "http_verb": "POST",
+      "access_class": "MANAGEMENT_READBACK",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/keywords",
+      "version": "v501",
+      "service": "Keywords",
+      "method": "update",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/keywords",
+      "version": "v501",
+      "service": "Keywords",
+      "method": "suspend",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/keywords",
+      "version": "v501",
+      "service": "Keywords",
+      "method": "resume",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/keywords",
+      "version": "v501",
+      "service": "Keywords",
+      "method": "delete",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/keywordbids",
+      "version": "v501",
+      "service": "KeywordBids",
+      "method": "get",
+      "http_verb": "POST",
+      "access_class": "MANAGEMENT_READBACK",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v501/keywordbids",
+      "version": "v501",
+      "service": "KeywordBids",
+      "method": "set",
+      "http_verb": "POST",
+      "access_class": "INTEGRATION_WRITE_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "DIRECT_REPORTS",
+      "environment": "production",
+      "host": "api.direct.yandex.com",
+      "path": "/json/v5/reports",
+      "version": "v5",
+      "service": "Reports",
+      "method": "get",
+      "http_verb": "POST",
+      "access_class": "READ_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "METRIKA",
+      "environment": "production",
+      "host": "api-metrika.yandex.net",
+      "path": "/stat/v1/data",
+      "version": "v1",
+      "service": "Statistics",
+      "method": "get",
+      "http_verb": "GET",
+      "access_class": "READ_ONLY",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "METRIKA",
+      "environment": "production",
+      "host": "api-metrika.yandex.net",
+      "path": "/management/v1/counter/{counter_id}/goals",
+      "version": "v1",
+      "service": "Goals",
+      "method": "getGoals",
+      "http_verb": "GET",
+      "access_class": "GOAL_READBACK",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "METRIKA",
+      "environment": "production",
+      "host": "api-metrika.yandex.net",
+      "path": "/management/v1/counter/{counter_id}/goals",
+      "version": "v1",
+      "service": "Goals",
+      "method": "addGoal",
+      "http_verb": "POST",
+      "access_class": "GOAL_LIFECYCLE_WRITE",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "METRIKA",
+      "environment": "production",
+      "host": "api-metrika.yandex.net",
+      "path": "/management/v1/counter/{counter_id}/goal/{goal_id}",
+      "version": "v1",
+      "service": "Goals",
+      "method": "getGoal",
+      "http_verb": "GET",
+      "access_class": "GOAL_READBACK",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "METRIKA",
+      "environment": "production",
+      "host": "api-metrika.yandex.net",
+      "path": "/management/v1/counter/{counter_id}/goal/{goal_id}",
+      "version": "v1",
+      "service": "Goals",
+      "method": "deleteGoal",
+      "http_verb": "DELETE",
+      "access_class": "GOAL_LIFECYCLE_WRITE",
+      "verification_status": "DOCUMENTED_NOT_EXECUTED"
+    },
+    {
+      "system": "METRIKA_BROWSER",
+      "environment": "production",
+      "host": "mc.yandex.ru",
+      "path": "/watch/{counter_id}",
+      "version": "tag-v1",
+      "service": "BrowserTag",
+      "method": "reachGoal",
+      "http_verb": "POST",
+      "access_class": "SITE_EVENT_WRITE",
+      "verification_status": "PLAYWRIGHT_REQUIRED"
+    }
+  ]
+}
