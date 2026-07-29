@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 import tempfile
@@ -10,6 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
+from unittest import mock
 
 from mox_adv.approval_execution import (
     ApprovalExecutionService,
@@ -21,6 +23,7 @@ from mox_adv.approval_execution import (
 from mox_adv.cli import build_parser, main
 from mox_adv.commands import (
     CommandRejected,
+    OptimizationAction,
     build_high_level_command,
     calculate_relative_target,
 )
@@ -28,6 +31,8 @@ from mox_adv.control_state import (
     AuthenticatedPrincipal,
     ControlRejected,
     DurableControlState,
+    ExecutionStatus,
+    MacOSLocalPrincipalAuthenticator,
 )
 from mox_adv.egress import EgressDenied, HttpEgressGuard
 from mox_adv.fake_write_adapter import FakeWriteAdapter
@@ -46,6 +51,16 @@ class FixedAuthenticator:
 
     def elevated_reauthenticate(self) -> AuthenticatedPrincipal:
         return self.authenticate()
+
+
+class RecordingElevatedVerifier:
+    def __init__(self, allowed: bool) -> None:
+        self.allowed = allowed
+        self.calls = 0
+
+    def verify(self, principal: AuthenticatedPrincipal) -> bool:
+        self.calls += 1
+        return self.allowed and principal.identity == "sviridov"
 
 
 def load_policy() -> dict[str, object]:
@@ -74,7 +89,7 @@ def make_prepared(
         proposal_id=proposal_id,
         proposal_hash="sha256:" + "1" * 64,
         scope=make_scope(),
-        action=action,
+        action=OptimizationAction(action),
         current_value=current_value,
         target_value=target_value,
         expected_diff=(
@@ -485,6 +500,40 @@ class ApprovalExecutionTests(unittest.TestCase):
             reopened.load_execution(self.prepared.execution_key()).status,
         )
 
+    def test_terminal_execution_state_cannot_be_rewritten(self) -> None:
+        adapter = FakeWriteAdapter(
+            initial_state={self.prepared.target_key(): self.prepared.current_value}
+        )
+        result = self.service(adapter).execute(make_request(self.prepared))
+        self.assertEqual("APPLIED", result.status)
+
+        with self.assertRaisesRegex(ControlRejected, "ILLEGAL_EXECUTION_TRANSITION"):
+            self.state.finish_execution(
+                self.prepared.execution_key(),
+                ExecutionStatus.FAILED,
+                "Attempted rewrite.",
+                NOW,
+            )
+        self.assertEqual(
+            "APPLIED",
+            self.state.load_execution(self.prepared.execution_key()).status,
+        )
+
+    def test_kill_switch_storage_failure_blocks_before_adapter_send(self) -> None:
+        adapter = FakeWriteAdapter(
+            initial_state={self.prepared.target_key(): self.prepared.current_value}
+        )
+        with mock.patch.object(
+            self.state,
+            "_kill_switch_active_in_connection",
+            side_effect=sqlite3.OperationalError("unavailable"),
+        ):
+            result = self.service(adapter).execute(make_request(self.prepared))
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual("CONTROL_STATE_UNAVAILABLE", result.reason_code)
+        self.assertEqual(0, adapter.write_calls)
+
 
 class KillSwitchAndCliTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -622,23 +671,160 @@ class KillSwitchAndCliTests(unittest.TestCase):
         self.assertEqual(0, adapter.write_calls)
         self.assertLess(elapsed, 1)
 
+    def test_elevated_reauthentication_uses_a_separate_fail_closed_verifier(
+        self,
+    ) -> None:
+        allowed = RecordingElevatedVerifier(True)
+        with mock.patch(
+            "mox_adv.control_state.getpass.getuser",
+            return_value="sviridov",
+        ):
+            principal = MacOSLocalPrincipalAuthenticator(
+                elevated_verifier=allowed
+            ).elevated_reauthenticate()
+        self.assertEqual("sviridov", principal.identity)
+        self.assertEqual(1, allowed.calls)
+
+        denied = RecordingElevatedVerifier(False)
+        with (
+            mock.patch(
+                "mox_adv.control_state.getpass.getuser",
+                return_value="sviridov",
+            ),
+            self.assertRaisesRegex(
+                ControlRejected,
+                "ELEVATED_REAUTHENTICATION_FAILED",
+            ),
+        ):
+            MacOSLocalPrincipalAuthenticator(
+                elevated_verifier=denied
+            ).elevated_reauthenticate()
+        self.assertEqual(1, denied.calls)
+
 
 class EgressGuardTests(unittest.TestCase):
-    def test_http_guard_allows_reads_and_denies_every_unarmed_write(self) -> None:
+    def test_http_guard_allows_only_exact_matrix_reads(self) -> None:
         guard = HttpEgressGuard(load_policy())
-        guard.authorize("GET", "https://api.direct.yandex.com/json/v5/campaigns")
-        guard.authorize("HEAD", "https://api-metrika.yandex.net/stat/v1/data")
         guard.authorize(
             "POST",
             "https://api.direct.yandex.com/json/v501/campaigns",
+            version="v501",
+            service="Campaigns",
             operation="get",
         )
-        for method in ("POST", "PUT", "PATCH", "DELETE"):
-            with self.subTest(method=method), self.assertRaises(EgressDenied):
+        guard.authorize(
+            "GET",
+            "https://api-metrika.yandex.net/stat/v1/data?ids=1",
+            version="v1",
+            service="Statistics",
+            operation="get",
+        )
+
+    def test_http_guard_rejects_path_host_version_method_and_redirect_changes(
+        self,
+    ) -> None:
+        policy = copy.deepcopy(load_policy())
+        record = policy["record"]
+        assert isinstance(record, dict)
+        record["production_write_authorized"] = True
+        guard = HttpEgressGuard(policy)
+        guard.authorize(
+            "POST",
+            "https://api.direct.yandex.com/json/v501/campaigns",
+            version="v501",
+            service="Campaigns",
+            operation="update",
+            pilot_armed=True,
+        )
+        cases = (
+            (
+                "DELETE",
+                "https://api.direct.yandex.com/json/v501/campaigns",
+                "v501",
+                "Campaigns",
+                "update",
+                False,
+            ),
+            (
+                "POST",
+                "https://api.direct.yandex.com/not-allowlisted",
+                "v501",
+                "Campaigns",
+                "update",
+                False,
+            ),
+            (
+                "POST",
+                "https://example.invalid/json/v501/campaigns",
+                "v501",
+                "Campaigns",
+                "update",
+                False,
+            ),
+            (
+                "POST",
+                "https://api.direct.yandex.com/json/v501/campaigns",
+                "v5",
+                "Campaigns",
+                "update",
+                False,
+            ),
+            (
+                "POST",
+                "https://api.direct.yandex.com/json/v501/campaigns",
+                "v501",
+                "Campaigns",
+                "update",
+                True,
+            ),
+        )
+        for method, url, version, service, operation, redirected in cases:
+            with self.subTest(url=url, method=method), self.assertRaises(EgressDenied):
                 guard.authorize(
                     method,
-                    "https://api.direct.yandex.com/json/v501/campaigns",
+                    url,
+                    version=version,
+                    service=service,
+                    operation=operation,
+                    redirected=redirected,
+                    pilot_armed=True,
                 )
+
+    def test_service_blocks_an_adapter_not_connected_to_the_guard(self) -> None:
+        class DisconnectedAdapter:
+            is_fake = False
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def readback(self, target_key: str) -> object:
+                self.calls += 1
+                return None
+
+            def apply(self, target_key: str, command: object) -> None:
+                self.calls += 1
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state = DurableControlState(Path(temporary_directory) / "control.sqlite3")
+            prepared = make_prepared()
+            state.register_prepared_change(prepared)
+            state.grant_approval(
+                prepared.proposal_id,
+                NOW + timedelta(minutes=15),
+                "Exact approval.",
+                FixedAuthenticator().authenticate(),
+                NOW,
+            )
+            adapter = DisconnectedAdapter()
+            result = ApprovalExecutionService(
+                load_policy(),
+                state,
+                adapter,
+                clock=lambda: NOW,
+            ).execute(make_request(prepared))
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual("EXTERNAL_WRITE_EGRESS_DENIED", result.reason_code)
+        self.assertEqual(0, adapter.calls)
 
 
 if __name__ == "__main__":

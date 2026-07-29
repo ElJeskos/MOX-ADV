@@ -6,14 +6,21 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional, Tuple
 
-from mox_adv.commands import CommandRejected, build_high_level_command
+from mox_adv.commands import (
+    ACTION_SPECS,
+    CommandRejected,
+    OptimizationAction,
+    build_high_level_command,
+)
 from mox_adv.control_state import (
     ControlRejected,
     DurableControlState,
+    ExecutionStatus,
     PreparedChange,
     TrustedScope,
 )
-from mox_adv.fake_write_adapter import AdapterTimeout, FakeWriteAdapter
+from mox_adv.egress import EgressDenied, HttpEgressGuard
+from mox_adv.fake_write_adapter import AdapterTimeout
 
 __all__ = [
     "ApprovalExecutionService",
@@ -61,7 +68,7 @@ class ExecutionRequest:
 
 @dataclass(frozen=True)
 class ExecutionOutcome:
-    status: str
+    status: ExecutionStatus
     reason_code: Optional[str]
     observed_value: Any
 
@@ -166,7 +173,7 @@ class ApprovalRequiredPolicy:
         return PolicyOutcome(True, None)
 
     def numeric_bounds(self, prepared: PreparedChange) -> Tuple[int, int]:
-        if "WEEKLY_BUDGET" in prepared.action:
+        if ACTION_SPECS[prepared.action].family == "weekly_budget":
             return (
                 1,
                 int(self.policy["limits"]["platform_weekly_spend_rub"]) * 1_000_000,
@@ -175,12 +182,7 @@ class ApprovalRequiredPolicy:
 
     @staticmethod
     def _step(prepared: PreparedChange) -> int:
-        if prepared.action in {
-            "INCREASE_WEEKLY_BUDGET",
-            "DECREASE_WEEKLY_BUDGET",
-            "INCREASE_SEARCH_BID",
-            "DECREASE_SEARCH_BID",
-        }:
+        if ACTION_SPECS[prepared.action].relative_percent is not None:
             return int(prepared.expected_diff.get("relative_step_percent", 101))
         return 0
 
@@ -192,26 +194,18 @@ class ApprovalRequiredPolicy:
             and scope.account == binding["direct_account"]
         )
 
-    def _api_method_allowed(self, action: str) -> bool:
-        operation = {
-            "INCREASE_WEEKLY_BUDGET": ("Campaigns", "update"),
-            "DECREASE_WEEKLY_BUDGET": ("Campaigns", "update"),
-            "INCREASE_SEARCH_BID": ("KeywordBids", "set"),
-            "DECREASE_SEARCH_BID": ("KeywordBids", "set"),
-            "SET_AD_VARIANT": ("Ads", "update"),
-            "SUSPEND_CAMPAIGN": ("Campaigns", "suspend"),
-            "RESUME_CAMPAIGN": ("Campaigns", "resume"),
-        }.get(action)
-        if operation is None:
+    def _api_method_allowed(self, action: OptimizationAction) -> bool:
+        try:
+            spec = ACTION_SPECS[OptimizationAction(action)]
+        except (KeyError, ValueError):
             return False
-        service, method = operation
         return any(
             item.get("system") == "DIRECT"
             and item.get("environment") == "production"
             and item.get("host") == "api.direct.yandex.com"
             and item.get("version") == "v501"
-            and item.get("service") == service
-            and item.get("method") == method
+            and item.get("service") == spec.service
+            and item.get("method") == spec.method
             and item.get("http_verb") == "POST"
             for item in self.policy["api_matrix"]
         )
@@ -221,44 +215,46 @@ class ApprovalRequiredPolicy:
         prepared: PreparedChange,
         facts: ExecutionFacts,
     ) -> bool:
-        action = prepared.action
         state_on = facts.campaign_state == "ON"
         sufficient = facts.clicks >= 50 and facts.conversions >= 3
         cpa = Decimal(facts.cpa_rub)
         utilization = Decimal(facts.budget_utilization_percent)
         ctr = Decimal(facts.ctr_percent)
-        if action == "INCREASE_WEEKLY_BUDGET":
-            return state_on and sufficient and cpa <= 1000 and utilization >= 90
-        if action == "DECREASE_WEEKLY_BUDGET":
-            return state_on and sufficient and cpa > 1000 and utilization >= 90
-        if action == "INCREASE_SEARCH_BID":
-            return (
+        checks = {
+            OptimizationAction.INCREASE_WEEKLY_BUDGET: (
+                state_on and sufficient and cpa <= 1000 and utilization >= 90
+            ),
+            OptimizationAction.DECREASE_WEEKLY_BUDGET: (
+                state_on and sufficient and cpa > 1000 and utilization >= 90
+            ),
+            OptimizationAction.INCREASE_SEARCH_BID: (
                 state_on
                 and facts.campaign_strategy == "HIGHEST_POSITION"
                 and sufficient
                 and cpa <= 1000
                 and utilization < 90
                 and 50 <= facts.clicks <= 99
-            )
-        if action == "DECREASE_SEARCH_BID":
-            return (
+            ),
+            OptimizationAction.DECREASE_SEARCH_BID: (
                 state_on
                 and facts.campaign_strategy == "HIGHEST_POSITION"
                 and sufficient
                 and cpa > 1000
                 and utilization < 90
-            )
-        if action == "SET_AD_VARIANT":
-            return state_on and sufficient and ctr < 1 and facts.impressions >= 5000
-        if action == "SUSPEND_CAMPAIGN":
-            return state_on and facts.conversions == 0 and facts.spend_rub >= 2000
-        if action == "RESUME_CAMPAIGN":
-            return (
+            ),
+            OptimizationAction.SET_AD_VARIANT: (
+                state_on and sufficient and ctr < 1 and facts.impressions >= 5000
+            ),
+            OptimizationAction.SUSPEND_CAMPAIGN: (
+                state_on and facts.conversions == 0 and facts.spend_rub >= 2000
+            ),
+            OptimizationAction.RESUME_CAMPAIGN: (
                 facts.campaign_state == "SUSPENDED"
                 and facts.conversions >= 3
                 and cpa <= 1000
-            )
-        return False
+            ),
+        }
+        return checks[prepared.action]
 
 
 class ApprovalExecutionService:
@@ -268,102 +264,86 @@ class ApprovalExecutionService:
         self,
         policy: Mapping[str, Any],
         state: DurableControlState,
-        adapter: FakeWriteAdapter,
+        adapter: Any,
         clock: Callable[[], Any],
     ) -> None:
         self.policy = ApprovalRequiredPolicy(policy)
         self.state = state
         self.adapter = adapter
         self.clock = clock
+        self.egress_guard = HttpEgressGuard(policy)
 
     def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
         try:
             prepared = self.state.load_prepared_change(request.proposal_id)
             decision = self.policy.evaluate(prepared, request)
             if not decision.allowed:
-                return ExecutionOutcome("BLOCKED", decision.reason_code, None)
+                return ExecutionOutcome(
+                    ExecutionStatus.BLOCKED,
+                    decision.reason_code,
+                    None,
+                )
             minimum, maximum = self.policy.numeric_bounds(prepared)
             command = build_high_level_command(prepared, minimum, maximum)
-            if getattr(self.adapter, "is_fake", False) is not True:
-                return ExecutionOutcome(
-                    "BLOCKED",
-                    "EXTERNAL_WRITE_EGRESS_DENIED",
-                    None,
-                )
+            self.egress_guard.enforce_adapter(self.adapter, command)
             before = self.adapter.readback(prepared.target_key())
             if before not in {prepared.current_value, prepared.target_value}:
-                return ExecutionOutcome("BLOCKED", "CURRENT_STATE_MISMATCH", before)
-            reservation_status, reservation = self.state.reserve_execution(
-                prepared,
-                self.clock(),
-            )
-            if reservation_status != "RESERVED":
                 return ExecutionOutcome(
-                    reservation_status,
-                    reservation.detail,
-                    self.adapter.readback(prepared.target_key()),
+                    ExecutionStatus.BLOCKED,
+                    "CURRENT_STATE_MISMATCH",
+                    before,
                 )
-            if self.state.any_kill_switch_active(prepared.scope):
-                self.state.finish_execution(
-                    prepared.execution_key(),
-                    "BLOCKED",
-                    "KILL_SWITCH_ACTIVE",
-                    self.clock(),
-                )
-                return ExecutionOutcome("BLOCKED", "KILL_SWITCH_ACTIVE", before)
-            approval = self.state.load_active_approval(
+            approval = self.state.load_bound_approval(
                 prepared.proposal_id,
                 prepared.binding_hash(),
-                self.clock(),
             )
-            self.state.begin_execution(prepared, approval, self.clock())
-            if self.state.any_kill_switch_active(prepared.scope):
-                self.state.release_approval_reservation(
-                    approval.approval_id,
-                    prepared.execution_key(),
-                )
-                self.state.finish_execution(
-                    prepared.execution_key(),
-                    "BLOCKED",
-                    "KILL_SWITCH_ACTIVE",
+            if before == prepared.target_value:
+                reservation_status, reservation = self.state.reserve_execution(
+                    prepared,
                     self.clock(),
                 )
-                return ExecutionOutcome("BLOCKED", "KILL_SWITCH_ACTIVE", before)
-            if before == prepared.target_value:
+                if reservation_status != ExecutionStatus.RESERVED:
+                    return ExecutionOutcome(
+                        reservation_status,
+                        reservation.detail,
+                        before,
+                    )
+                self.state.begin_execution(prepared, approval, self.clock())
                 self.state.release_approval_reservation(
                     approval.approval_id,
                     prepared.execution_key(),
                 )
                 self.state.finish_execution(
                     prepared.execution_key(),
-                    "NO_CHANGE",
+                    ExecutionStatus.NO_CHANGE,
                     None,
                     self.clock(),
                 )
-                return ExecutionOutcome("NO_CHANGE", None, before)
+                return ExecutionOutcome(ExecutionStatus.NO_CHANGE, None, before)
             try:
-                self.adapter.apply(prepared.target_key(), command)
-            except AdapterTimeout:
-                self.state.mark_approval_used(
-                    approval.approval_id,
-                    prepared.execution_key(),
+                send_status, execution = self.state.send_once(
+                    prepared,
+                    approval,
                     self.clock(),
+                    lambda: self.adapter.apply(prepared.target_key(), command),
                 )
+            except AdapterTimeout:
                 return self._reconcile_timeout(prepared)
-            self.state.mark_approval_used(
-                approval.approval_id,
-                prepared.execution_key(),
-                self.clock(),
-            )
+            if send_status != ExecutionStatus.IN_FLIGHT:
+                return ExecutionOutcome(
+                    send_status,
+                    execution.detail,
+                    self.adapter.readback(prepared.target_key()),
+                )
             observed = self.adapter.readback(prepared.target_key())
             if observed == prepared.target_value:
-                status = "APPLIED"
+                status = ExecutionStatus.APPLIED
                 reason = None
             elif observed == prepared.current_value:
-                status = "FAILED"
+                status = ExecutionStatus.FAILED
                 reason = "TARGET_STATE_NOT_APPLIED"
             else:
-                status = "UNKNOWN_RESULT"
+                status = ExecutionStatus.UNKNOWN_RESULT
                 reason = "READBACK_INDETERMINATE"
             self.state.finish_execution(
                 prepared.execution_key(),
@@ -376,9 +356,19 @@ class ApprovalExecutionService:
             reason = (
                 "OUT_OF_BOUNDS" if "OUT_OF_BOUNDS" in str(error) else "INVALID_INPUT"
             )
-            return ExecutionOutcome("BLOCKED", reason, None)
+            return ExecutionOutcome(ExecutionStatus.BLOCKED, reason, None)
+        except EgressDenied:
+            return ExecutionOutcome(
+                ExecutionStatus.BLOCKED,
+                "EXTERNAL_WRITE_EGRESS_DENIED",
+                None,
+            )
         except ControlRejected as error:
-            return ExecutionOutcome("BLOCKED", error.reason_code, None)
+            return ExecutionOutcome(
+                ExecutionStatus.BLOCKED,
+                error.reason_code,
+                None,
+            )
 
     def reconcile(self, execution_key: str) -> ExecutionOutcome:
         """Resolve a durable RESERVED or IN_FLIGHT operation without a retry."""
@@ -387,7 +377,7 @@ class ApprovalExecutionService:
             execution = self.state.load_execution(execution_key)
             if execution.status in {"APPLIED", "NO_CHANGE"}:
                 return ExecutionOutcome(
-                    "ALREADY_PROCESSED",
+                    ExecutionStatus.ALREADY_PROCESSED,
                     None,
                     self.adapter.readback(execution.target_key),
                 )
@@ -400,13 +390,13 @@ class ApprovalExecutionService:
             prepared = self.state.load_prepared_change(execution.proposal_id)
             observed = self.adapter.readback(prepared.target_key())
             if observed == prepared.target_value:
-                status = "APPLIED"
+                status = ExecutionStatus.APPLIED
                 reason = None
             elif observed == prepared.current_value:
-                status = "FAILED"
+                status = ExecutionStatus.FAILED
                 reason = "RESTART_SOURCE_STATE_CONFIRMED"
             else:
-                status = "UNKNOWN_RESULT"
+                status = ExecutionStatus.UNKNOWN_RESULT
                 reason = "RESTART_READBACK_INDETERMINATE"
             self.state.finish_execution(
                 execution_key,
@@ -416,18 +406,22 @@ class ApprovalExecutionService:
             )
             return ExecutionOutcome(status, reason, observed)
         except ControlRejected as error:
-            return ExecutionOutcome("BLOCKED", error.reason_code, None)
+            return ExecutionOutcome(
+                ExecutionStatus.BLOCKED,
+                error.reason_code,
+                None,
+            )
 
     def _reconcile_timeout(self, prepared: PreparedChange) -> ExecutionOutcome:
         observed = self.adapter.readback(prepared.target_key())
         if observed == prepared.target_value:
-            status = "APPLIED"
+            status = ExecutionStatus.APPLIED
             reason = None
         elif observed == prepared.current_value:
-            status = "FAILED"
+            status = ExecutionStatus.FAILED
             reason = "TIMEOUT_SOURCE_STATE_CONFIRMED"
         else:
-            status = "UNKNOWN_RESULT"
+            status = ExecutionStatus.UNKNOWN_RESULT
             reason = "TIMEOUT_READBACK_INDETERMINATE"
         self.state.finish_execution(
             prepared.execution_key(),

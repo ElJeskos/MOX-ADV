@@ -4,16 +4,92 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Mapping, Protocol, Union
+from enum import Enum
+from typing import Any, Mapping, Optional, Protocol, Union
 
 
 class CommandRejected(ValueError):
     """A high-level command cannot be built without changing the approved diff."""
 
 
+class OptimizationAction(str, Enum):
+    INCREASE_WEEKLY_BUDGET = "INCREASE_WEEKLY_BUDGET"
+    DECREASE_WEEKLY_BUDGET = "DECREASE_WEEKLY_BUDGET"
+    INCREASE_SEARCH_BID = "INCREASE_SEARCH_BID"
+    DECREASE_SEARCH_BID = "DECREASE_SEARCH_BID"
+    SET_AD_VARIANT = "SET_AD_VARIANT"
+    SUSPEND_CAMPAIGN = "SUSPEND_CAMPAIGN"
+    RESUME_CAMPAIGN = "RESUME_CAMPAIGN"
+
+
+@dataclass(frozen=True)
+class ActionSpec:
+    family: str
+    service: str
+    method: str
+    relative_percent: Optional[int] = None
+    source_state: Optional[str] = None
+    target_state: Optional[str] = None
+    rollback_action: Optional[OptimizationAction] = None
+
+
+ACTION_SPECS = {
+    OptimizationAction.INCREASE_WEEKLY_BUDGET: ActionSpec(
+        "weekly_budget",
+        "Campaigns",
+        "update",
+        10,
+        rollback_action=OptimizationAction.DECREASE_WEEKLY_BUDGET,
+    ),
+    OptimizationAction.DECREASE_WEEKLY_BUDGET: ActionSpec(
+        "weekly_budget",
+        "Campaigns",
+        "update",
+        -10,
+        rollback_action=OptimizationAction.INCREASE_WEEKLY_BUDGET,
+    ),
+    OptimizationAction.INCREASE_SEARCH_BID: ActionSpec(
+        "search_bid",
+        "KeywordBids",
+        "set",
+        10,
+        rollback_action=OptimizationAction.DECREASE_SEARCH_BID,
+    ),
+    OptimizationAction.DECREASE_SEARCH_BID: ActionSpec(
+        "search_bid",
+        "KeywordBids",
+        "set",
+        -10,
+        rollback_action=OptimizationAction.INCREASE_SEARCH_BID,
+    ),
+    OptimizationAction.SET_AD_VARIANT: ActionSpec(
+        "ad_variant",
+        "Ads",
+        "update",
+        rollback_action=OptimizationAction.SET_AD_VARIANT,
+    ),
+    OptimizationAction.SUSPEND_CAMPAIGN: ActionSpec(
+        "campaign_state",
+        "Campaigns",
+        "suspend",
+        source_state="ON",
+        target_state="SUSPENDED",
+        rollback_action=OptimizationAction.RESUME_CAMPAIGN,
+    ),
+    OptimizationAction.RESUME_CAMPAIGN: ActionSpec(
+        "campaign_state",
+        "Campaigns",
+        "resume",
+        source_state="SUSPENDED",
+        target_state="ON",
+        rollback_action=OptimizationAction.SUSPEND_CAMPAIGN,
+    ),
+}
+
+
 class PreparedCommandSource(Protocol):
     @property
-    def action(self) -> str: ...
+    def action(self) -> OptimizationAction: ...
 
     @property
     def current_value(self) -> Any: ...
@@ -113,23 +189,23 @@ def build_high_level_command(
 ) -> HighLevelCommand:
     """Build only the exact typed command represented by an approved proposal."""
 
-    action = prepared.action
+    try:
+        action = OptimizationAction(prepared.action)
+    except ValueError as error:
+        raise CommandRejected(
+            "UNSUPPORTED_ACTION: high-level command is not supported."
+        ) from error
+    spec = ACTION_SPECS[action]
     current = prepared.current_value
     target = prepared.target_value
     diff = dict(prepared.expected_diff)
     if diff.get("operation") != action:
         raise CommandRejected("INVALID_INPUT: expected diff operation is not exact.")
 
-    if action in {
-        "INCREASE_WEEKLY_BUDGET",
-        "DECREASE_WEEKLY_BUDGET",
-        "INCREASE_SEARCH_BID",
-        "DECREASE_SEARCH_BID",
-    }:
+    if spec.relative_percent is not None:
         if isinstance(current, bool) or not isinstance(current, int):
             raise CommandRejected("INVALID_INPUT: current numeric value is invalid.")
-        step = 10 if action.startswith("INCREASE") else -10
-        exact_target = calculate_relative_target(current, step)
+        exact_target = calculate_relative_target(current, spec.relative_percent)
         if target != exact_target or diff != {
             "operation": action,
             "relative_step_percent": 10,
@@ -137,16 +213,13 @@ def build_high_level_command(
             raise CommandRejected("INVALID_INPUT: numeric diff is not exact.")
         if exact_target < minimum_value or exact_target > maximum_value:
             raise CommandRejected("OUT_OF_BOUNDS: target value exceeds an exact limit.")
+        assert spec.rollback_action is not None
         rollback = RollbackCommand(
-            action=(
-                action.replace("INCREASE", "DECREASE")
-                if action.startswith("INCREASE")
-                else action.replace("DECREASE", "INCREASE")
-            ),
+            action=spec.rollback_action.value,
             target_value=current,
         )
         command_type = (
-            WeeklyBudgetCommand if "WEEKLY_BUDGET" in action else SearchBidCommand
+            WeeklyBudgetCommand if spec.family == "weekly_budget" else SearchBidCommand
         )
         return command_type(
             **_authority_fields(
@@ -161,7 +234,7 @@ def build_high_level_command(
             rollback=rollback,
         )
 
-    if action == "SET_AD_VARIANT":
+    if spec.family == "ad_variant":
         if current not in {"A", "B"} or target not in {"A", "B"} or current == target:
             raise CommandRejected("INVALID_INPUT: ad variant transition is invalid.")
         if diff != {"operation": action, "variant_id": target}:
@@ -176,24 +249,17 @@ def build_high_level_command(
                 minimum_value,
                 maximum_value,
             ),
-            rollback=RollbackCommand(action=action, target_value=current),
+            rollback=RollbackCommand(action=action.value, target_value=current),
         )
 
-    expected_states = {
-        "SUSPEND_CAMPAIGN": ("ON", "SUSPENDED"),
-        "RESUME_CAMPAIGN": ("SUSPENDED", "ON"),
-    }
-    if action in expected_states:
-        expected_current, expected_target = expected_states[action]
-        if current != expected_current or target != expected_target:
+    if spec.family == "campaign_state":
+        if current != spec.source_state or target != spec.target_state:
             raise CommandRejected(
                 "INVALID_INPUT: campaign state transition is invalid."
             )
         if diff != {"operation": action, "target_state": target}:
             raise CommandRejected("INVALID_INPUT: campaign state diff is not exact.")
-        inverse = (
-            "RESUME_CAMPAIGN" if action == "SUSPEND_CAMPAIGN" else "SUSPEND_CAMPAIGN"
-        )
+        assert spec.rollback_action is not None
         return CampaignStateCommand(
             **_authority_fields(
                 prepared,
@@ -204,7 +270,10 @@ def build_high_level_command(
                 minimum_value,
                 maximum_value,
             ),
-            rollback=RollbackCommand(action=inverse, target_value=current),
+            rollback=RollbackCommand(
+                action=spec.rollback_action.value,
+                target_value=current,
+            ),
         )
 
     raise CommandRejected("UNSUPPORTED_ACTION: high-level command is not supported.")

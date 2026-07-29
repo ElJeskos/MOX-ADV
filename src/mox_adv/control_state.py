@@ -7,11 +7,15 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple
+
+from mox_adv.commands import OptimizationAction
 
 
 class ControlRejected(RuntimeError):
@@ -20,6 +24,17 @@ class ControlRejected(RuntimeError):
     def __init__(self, reason_code: str, detail: str) -> None:
         super().__init__(reason_code + ": " + detail)
         self.reason_code = reason_code
+
+
+class ExecutionStatus(str, Enum):
+    RESERVED = "RESERVED"
+    IN_FLIGHT = "IN_FLIGHT"
+    APPLIED = "APPLIED"
+    NO_CHANGE = "NO_CHANGE"
+    BLOCKED = "BLOCKED"
+    ALREADY_PROCESSED = "ALREADY_PROCESSED"
+    UNKNOWN_RESULT = "UNKNOWN_RESULT"
+    FAILED = "FAILED"
 
 
 def _utc_text(value: datetime) -> str:
@@ -57,11 +72,44 @@ class AuthenticatedPrincipal:
     authentication: str
 
 
+class ElevatedReauthenticationVerifier(Protocol):
+    def verify(self, principal: AuthenticatedPrincipal) -> bool: ...
+
+
+class MacOSElevatedSecurityVerifier:
+    """Use the OS authorization cache without reading or accepting a secret."""
+
+    def verify(self, principal: AuthenticatedPrincipal) -> bool:
+        if principal.authentication != "authenticated_macos_user":
+            return False
+        try:
+            completed = subprocess.run(
+                ["/usr/bin/sudo", "-n", "-v"],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return completed.returncode == 0
+
+
 class MacOSLocalPrincipalAuthenticator:
     """Authenticate the Gate 0 control principal at the local OS seam."""
 
-    def __init__(self, expected_identity: str = "sviridov") -> None:
+    def __init__(
+        self,
+        expected_identity: str = "sviridov",
+        elevated_verifier: Optional[ElevatedReauthenticationVerifier] = None,
+    ) -> None:
         self.expected_identity = expected_identity
+        self.elevated_verifier = (
+            MacOSElevatedSecurityVerifier()
+            if elevated_verifier is None
+            else elevated_verifier
+        )
 
     def authenticate(self) -> AuthenticatedPrincipal:
         identity = getpass.getuser()
@@ -76,7 +124,13 @@ class MacOSLocalPrincipalAuthenticator:
         )
 
     def elevated_reauthenticate(self) -> AuthenticatedPrincipal:
-        return self.authenticate()
+        principal = self.authenticate()
+        if not self.elevated_verifier.verify(principal):
+            raise ControlRejected(
+                "ELEVATED_REAUTHENTICATION_FAILED",
+                "macOS elevated reauthentication did not succeed.",
+            )
+        return principal
 
 
 @dataclass(frozen=True)
@@ -93,7 +147,7 @@ class PreparedChange:
     proposal_id: str
     proposal_hash: str
     scope: TrustedScope
-    action: str
+    action: OptimizationAction
     current_value: Any
     target_value: Any
     expected_diff: Mapping[str, Any]
@@ -154,7 +208,7 @@ class PreparedChange:
                 campaign=str(scope["campaign"]),
                 writer=str(scope["writer"]),
             ),
-            action=str(value["action"]),
+            action=OptimizationAction(value["action"]),
             current_value=value["current_value"],
             target_value=value["target_value"],
             expected_diff=dict(value["expected_diff"]),
@@ -193,7 +247,7 @@ class ApprovalRecord:
 class ExecutionRecord:
     execution_key: str
     proposal_id: str
-    status: str
+    status: ExecutionStatus
     target_key: str
     current_value: Any
     target_value: Any
@@ -391,6 +445,20 @@ class DurableControlState:
         binding_hash: str,
         now: datetime,
     ) -> ApprovalRecord:
+        approval = self.load_bound_approval(proposal_id, binding_hash)
+        if approval.revoked_at is not None:
+            raise ControlRejected("APPROVAL_REVOKED", "approval was revoked.")
+        if approval.used:
+            raise ControlRejected("APPROVAL_ALREADY_USED", "approval is single-use.")
+        if _parse_utc(approval.expires_at) <= now.astimezone(timezone.utc):
+            raise ControlRejected("APPROVAL_EXPIRED", "approval has expired.")
+        return approval
+
+    def load_bound_approval(
+        self,
+        proposal_id: str,
+        binding_hash: str,
+    ) -> ApprovalRecord:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM approvals WHERE proposal_id = ? "
@@ -405,12 +473,6 @@ class DurableControlState:
                 "APPROVAL_SCOPE_MISMATCH",
                 "approval does not bind the current exact proposal.",
             )
-        if approval.revoked_at is not None:
-            raise ControlRejected("APPROVAL_REVOKED", "approval was revoked.")
-        if approval.used:
-            raise ControlRejected("APPROVAL_ALREADY_USED", "approval is single-use.")
-        if _parse_utc(approval.expires_at) <= now.astimezone(timezone.utc):
-            raise ControlRejected("APPROVAL_EXPIRED", "approval has expired.")
         return approval
 
     def revoke_approval(
@@ -445,7 +507,7 @@ class DurableControlState:
         self,
         prepared: PreparedChange,
         now: datetime,
-    ) -> Tuple[str, ExecutionRecord]:
+    ) -> Tuple[ExecutionStatus, ExecutionRecord]:
         now_text = _utc_text(now)
         connection = self._connect()
         try:
@@ -468,7 +530,7 @@ class DurableControlState:
                 record = self._execution_from_row(existing)
                 connection.rollback()
                 outcome = (
-                    "ALREADY_PROCESSED"
+                    ExecutionStatus.ALREADY_PROCESSED
                     if record.status in {"APPLIED", "NO_CHANGE"}
                     else record.status
                 )
@@ -480,7 +542,7 @@ class DurableControlState:
             if other is not None:
                 record = self._execution_from_row(other)
                 connection.rollback()
-                return "BLOCKED", record
+                return ExecutionStatus.BLOCKED, record
             connection.execute(
                 "INSERT INTO executions "
                 "(execution_key, proposal_id, status, target_key, "
@@ -501,7 +563,7 @@ class DurableControlState:
                 (prepared.execution_key(),),
             ).fetchone()
             connection.commit()
-            return "RESERVED", self._execution_from_row(row)
+            return ExecutionStatus.RESERVED, self._execution_from_row(row)
         except BaseException:
             if connection.in_transaction:
                 connection.rollback()
@@ -570,6 +632,163 @@ class DurableControlState:
         finally:
             connection.close()
 
+    def send_once(
+        self,
+        prepared: PreparedChange,
+        approval: ApprovalRecord,
+        now: datetime,
+        sender: Callable[[], None],
+    ) -> Tuple[ExecutionStatus, ExecutionRecord]:
+        """Serialize final authority checks and the first adapter send."""
+
+        now_text = _utc_text(now)
+        connection = self._connect()
+        sender_started = False
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            unresolved = connection.execute(
+                "SELECT execution_key FROM executions "
+                "WHERE status = 'UNKNOWN_RESULT' LIMIT 1"
+            ).fetchone()
+            if unresolved is not None:
+                raise ControlRejected(
+                    "UNKNOWN_RESULT",
+                    "an unresolved execution blocks the next write.",
+                )
+            existing = connection.execute(
+                "SELECT * FROM executions WHERE execution_key = ?",
+                (prepared.execution_key(),),
+            ).fetchone()
+            if existing is not None:
+                record = self._execution_from_row(existing)
+                connection.rollback()
+                outcome = (
+                    ExecutionStatus.ALREADY_PROCESSED
+                    if record.status
+                    in {ExecutionStatus.APPLIED, ExecutionStatus.NO_CHANGE}
+                    else record.status
+                )
+                return outcome, record
+            other = connection.execute(
+                "SELECT * FROM executions "
+                "WHERE status IN ('RESERVED', 'IN_FLIGHT') LIMIT 1"
+            ).fetchone()
+            if other is not None:
+                record = self._execution_from_row(other)
+                connection.rollback()
+                return ExecutionStatus.BLOCKED, record
+            if self._kill_switch_active_in_connection(connection, prepared.scope):
+                raise ControlRejected(
+                    "KILL_SWITCH_ACTIVE",
+                    "durable kill switch blocks the unsent command.",
+                )
+            approval_row = connection.execute(
+                "SELECT * FROM approvals WHERE approval_id = ?",
+                (approval.approval_id,),
+            ).fetchone()
+            current = (
+                self._approval_from_row(approval_row)
+                if approval_row is not None
+                else None
+            )
+            if (
+                current is None
+                or current.used
+                or current.revoked_at is not None
+                or current.reserved_at is not None
+                or current.binding_hash != prepared.binding_hash()
+                or _parse_utc(current.expires_at) <= now.astimezone(timezone.utc)
+            ):
+                raise ControlRejected(
+                    "APPROVAL_NOT_APPLICABLE",
+                    "approval changed, expired, or was already consumed.",
+                )
+            connection.execute(
+                "INSERT INTO executions "
+                "(execution_key, proposal_id, status, target_key, "
+                "current_value_json, target_value_json, created_at, updated_at) "
+                "VALUES (?, ?, 'RESERVED', ?, ?, ?, ?, ?)",
+                (
+                    prepared.execution_key(),
+                    prepared.proposal_id,
+                    prepared.target_key(),
+                    json.dumps(prepared.current_value),
+                    json.dumps(prepared.target_value),
+                    now_text,
+                    now_text,
+                ),
+            )
+            reserved = connection.execute(
+                "UPDATE approvals SET reserved_at = ?, reserved_execution_key = ? "
+                "WHERE approval_id = ? AND reserved_at IS NULL "
+                "AND used_at IS NULL AND revoked_at IS NULL",
+                (now_text, prepared.execution_key(), approval.approval_id),
+            )
+            if reserved.rowcount != 1:
+                raise ControlRejected(
+                    "APPROVAL_ALREADY_USED",
+                    "approval was reserved concurrently.",
+                )
+            connection.execute(
+                "UPDATE executions SET status = 'IN_FLIGHT', updated_at = ? "
+                "WHERE execution_key = ? AND status = 'RESERVED'",
+                (now_text, prepared.execution_key()),
+            )
+            if self._kill_switch_active_in_connection(connection, prepared.scope):
+                raise ControlRejected(
+                    "KILL_SWITCH_ACTIVE",
+                    "durable kill switch blocks the unsent command.",
+                )
+            try:
+                sender_started = True
+                sender()
+            except BaseException:
+                connection.execute(
+                    "UPDATE approvals SET used_at = ?, execution_key = ? "
+                    "WHERE approval_id = ? AND reserved_execution_key = ?",
+                    (
+                        now_text,
+                        prepared.execution_key(),
+                        approval.approval_id,
+                        prepared.execution_key(),
+                    ),
+                )
+                connection.commit()
+                raise
+            connection.execute(
+                "UPDATE approvals SET used_at = ?, execution_key = ? "
+                "WHERE approval_id = ? AND reserved_execution_key = ?",
+                (
+                    now_text,
+                    prepared.execution_key(),
+                    approval.approval_id,
+                    prepared.execution_key(),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM executions WHERE execution_key = ?",
+                (prepared.execution_key(),),
+            ).fetchone()
+            connection.commit()
+            return ExecutionStatus.IN_FLIGHT, self._execution_from_row(row)
+        except ControlRejected:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ControlRejected(
+                "CONTROL_STATE_UNAVAILABLE",
+                "durable authority state is unavailable.",
+            ) from error
+        except BaseException:
+            if connection.in_transaction and not sender_started:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def mark_approval_used(
         self,
         approval_id: str,
@@ -606,25 +825,47 @@ class DurableControlState:
     def finish_execution(
         self,
         execution_key: str,
-        status: str,
+        status: ExecutionStatus,
         detail: Optional[str],
         now: datetime,
     ) -> ExecutionRecord:
-        allowed = {
-            "APPLIED",
-            "NO_CHANGE",
-            "BLOCKED",
-            "UNKNOWN_RESULT",
-            "FAILED",
-        }
-        if status not in allowed:
-            raise ControlRejected("INVALID_INPUT", "execution status is invalid.")
+        try:
+            terminal_status = ExecutionStatus(status)
+        except ValueError as error:
+            raise ControlRejected(
+                "INVALID_INPUT",
+                "execution status is invalid.",
+            ) from error
+        if terminal_status not in {
+            ExecutionStatus.APPLIED,
+            ExecutionStatus.NO_CHANGE,
+            ExecutionStatus.BLOCKED,
+            ExecutionStatus.UNKNOWN_RESULT,
+            ExecutionStatus.FAILED,
+        }:
+            raise ControlRejected("INVALID_INPUT", "execution status is not terminal.")
         with self._connect() as connection:
-            connection.execute(
+            changed = connection.execute(
                 "UPDATE executions SET status = ?, detail = ?, updated_at = ? "
-                "WHERE execution_key = ?",
-                (status, detail, _utc_text(now), execution_key),
+                "WHERE execution_key = ? "
+                "AND status IN ('RESERVED', 'IN_FLIGHT')",
+                (
+                    terminal_status.value,
+                    detail,
+                    _utc_text(now),
+                    execution_key,
+                ),
             )
+            if changed.rowcount != 1:
+                existing = connection.execute(
+                    "SELECT status FROM executions WHERE execution_key = ?",
+                    (execution_key,),
+                ).fetchone()
+                if existing is None or existing["status"] != terminal_status.value:
+                    raise ControlRejected(
+                        "ILLEGAL_EXECUTION_TRANSITION",
+                        "terminal execution state is immutable.",
+                    )
         return self.load_execution(execution_key)
 
     def load_execution(self, execution_key: str) -> ExecutionRecord:
@@ -684,13 +925,33 @@ class DurableControlState:
         return row is not None and bool(row["active"])
 
     def any_kill_switch_active(self, scope: TrustedScope) -> bool:
+        try:
+            with self._connect() as connection:
+                return self._kill_switch_active_in_connection(connection, scope)
+        except sqlite3.Error as error:
+            raise ControlRejected(
+                "KILL_SWITCH_UNAVAILABLE",
+                "durable kill-switch state is unavailable.",
+            ) from error
+
+    @staticmethod
+    def _kill_switch_active_in_connection(
+        connection: sqlite3.Connection,
+        scope: TrustedScope,
+    ) -> bool:
         scopes = (
             "global",
             "organization:" + scope.organization,
             "connection:" + scope.connection,
             "campaign:" + scope.campaign,
         )
-        return any(self.kill_switch_active(item) for item in scopes)
+        placeholders = ",".join("?" for _ in scopes)
+        row = connection.execute(
+            "SELECT 1 FROM kill_switches "
+            f"WHERE active = 1 AND scope IN ({placeholders}) LIMIT 1",
+            scopes,
+        ).fetchone()
+        return row is not None
 
     @staticmethod
     def _validate_incident_control(
@@ -754,7 +1015,7 @@ class DurableControlState:
         return ExecutionRecord(
             execution_key=row["execution_key"],
             proposal_id=row["proposal_id"],
-            status=row["status"],
+            status=ExecutionStatus(row["status"]),
             target_key=row["target_key"],
             current_value=json.loads(row["current_value_json"]),
             target_value=json.loads(row["target_value_json"]),
