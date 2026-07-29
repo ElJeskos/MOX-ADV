@@ -96,6 +96,8 @@
 - `Allowlist` является серверной привязкой разрешённых организаций, подключений, аккаунтов, кампаний, счётчиков, сайтов, credential-профилей и API-методов.
 - `Readback` является повторным чтением объекта после изменяющего запроса.
 - `Reconciliation` является восстановлением фактического результата операции без слепого повторения записи.
+- `campaign_lifecycle_state` является внутренним состоянием workflow прототипа от `DRAFT` до `ACTIVE` или терминальной ошибки.
+- `direct_serving_state` является внешним состоянием показа кампании в Директе, включая `ON` и `SUSPENDED`.
 
 ## 5. Архитектура и границы доверия
 
@@ -124,6 +126,7 @@ LLM не должна получать OAuth-токены, произвольн�
 Target ID и credential profile подставляются executor из доверенного run context.
 Для ещё не созданной кампании executor использует одноразовую `CreationReservation`, связанную с `organization_id`, `connection_id`, `account_id`, environment, credential profile, Proposal, типом объекта и сроком действия.
 `CreationReservation` должна иметь собственный UUID, canonical hash, ожидаемое число создаваемых объектов, статус и атомарный признак использования.
+Для creation transaction поле `ApprovalV1.target_id` должно содержать `reservation_id`, а фактические ID могут подставляться только server-side как результаты этой Reservation.
 Все созданные ID должны атомарно регистрироваться в ledger внутри той же бизнес-транзакции и становиться единственными разрешёнными target этой транзакции.
 Все тексты из API, объявлений, UTM, DOM сайта и бизнес-брифа считаются недоверенными данными.
 Недоверенный текст не может изменять инструкции, allowlist, target, approval, mandate или доступные инструменты.
@@ -211,12 +214,13 @@ HTTP-перенаправления для API-запросов запрещен
 | `P_MAX_DAILY_BUDGET_CHANGE` | Совокупное изменение бюджета за календарный день | не более `20%` |
 | `P_PILOT_DAILY_SPEND_CAP` | Дневной spend cap пилота | `2 000 ₽` |
 | `P_PILOT_TOTAL_SPEND_CAP` | Общий spend cap пилота | `10 000 ₽` |
-| `P_ACTION_COOLDOWN` | Минимальный cooldown после изменяющего действия | `24 часа` |
+| `P_ACTION_COOLDOWN` | Минимальный cooldown после действия, влияющего на показ кампании | `24 часа` |
 | `P_OBSERVATION_WINDOW` | Observation window | `72 часа` |
 | `P_AUTONOMOUS_ACTIONS_PER_WINDOW` | Автономные изменения одной кампании | не более `1` за observation window |
 | `P_AUTONOMOUS_ACTIONS_PER_DAY` | Автономные изменения всего пилота | не более `2` за календарный день |
 | `P_PROPOSAL_TTL` | Срок действия Proposal | `30 минут` |
-| `P_APPROVAL_TTL` | Срок действия одноразового Approval | `30 минут` |
+| `P_APPROVAL_TTL` | Срок, в течение которого Approval может начать исполнение | `30 минут` |
+| `P_CAMPAIGN_SAGA_MAX_TTL` | Максимальный срок продолжения неизменённой campaign-creation saga после первого write | `7 календарных дней` |
 | `P_MANDATE_MAX_TTL` | Максимальный срок действия Mandate | `7 календарных дней` |
 | `P_HUMAN_AUTH_SESSION_TTL` | Максимальный срок сессии усиленной человеческой аутентификации | `5 минут` |
 | `P_KILL_SWITCH_SLA` | Kill switch SLA | не более `60 секунд` до блокировки следующего неотправленного write |
@@ -276,6 +280,8 @@ HTTP-перенаправления для API-запросов запрещен
 Canonical JSON должен включать состояния, версии источников, `schema_version` и `policy_version`.
 Снимок является неизменяемым.
 Автоматическое финансовое действие разрешено только для снимка со статусом `COMPARABLE`, достаточной выборкой и допустимой свежестью.
+Первый `launch_campaign` по `FR-CAM-003` является lifecycle-действием, а не оптимизационным выводом по историческим показателям, поэтому для него допускается `confidence_status = INSUFFICIENT_DATA`.
+Это исключение не отменяет требования к сопоставимости и свежести доступных источников, модерации, fingerprint, Mandate, квотам и spend caps.
 При `PARTIAL` разрешены только чтение, объяснение и нефинансовая рекомендация.
 При `INCOMPATIBLE` создание write-proposal запрещено.
 
@@ -350,7 +356,37 @@ LLM не должна вычислять окончательные финанс
 
 Approval должен подписывать canonical hash, включающий principal approver, организацию, подключение, target, точный diff, snapshot с timestamps, policy version, expected object fingerprint, issued_at и expiry.
 Approval должен быть одноразовым, отзывным и созданным только аутентифицированным approver.
-Executor должен принимать `proposal_id`, самостоятельно загружать Proposal и атомарно помечать Approval использованным.
+Для creation transaction `expected_object_fingerprint` должен рассчитываться по утверждённым конфигурируемым полям `CampaignDraftV1` и canonical plan без ещё не существующих server-side ID и асинхронных состояний.
+Одноразовость означает право разрешить первый HTTP write ровно одной business transaction, а не запрет выполнить заранее утверждённые оставшиеся шаги той же saga.
+Executor должен принимать `proposal_id`, самостоятельно загружать Proposal и до первого write атомарно резервировать Approval за `execution_key`.
+Pre-write reservation является конкурентной блокировкой, но не началом business transaction и не расходует Approval до отправки первого HTTP write.
+После резервирования `ACTIVE` Approval может разрешить первый write только для сохранённого `reserved_execution_key` и не может быть зарезервирован другой transaction.
+Резервирование можно снять compare-and-set операцией только при терминальной ошибке до отправки любого HTTP write, и такая операция должна увеличить `state_version`.
+После снятия reservation неизменённый и неистёкший `ACTIVE` Approval может быть зарезервирован снова, поскольку ни одна business transaction не получила write-разрешение.
+На границе первой HTTP-отправки executor должен в одной локальной транзакции перевести Approval из `ACTIVE` в `USED_IN_SAGA`, сохранить `used_at` и `saga_expires_at`, увеличить `state_version` и зафиксировать ledger entry как `IN_FLIGHT`, а затем отправить внешний запрос.
+Значение `saga_expires_at` не должно превышать `used_at + P_CAMPAIGN_SAGA_MAX_TTL`.
+Ошибка до этой локальной транзакции допускает снятие reservation, а ошибка после неё запрещает повторное использование Approval и требует reconciliation.
+Поля `Approval.expires_at` и `Proposal.expires_at` ограничивают начало transaction и первый write, а после первого write оставшиеся неизменённые шаги ограничиваются `saga_expires_at`.
+Approval в состоянии `USED_IN_SAGA` может разрешать только ещё не выполненные шаги того же неизменённого canonical plan и того же `execution_key`.
+Такой Approval не может начать другую transaction, повторить уже выполненный шаг или разрешить изменённый target, diff, budget либо fingerprint.
+После терминального завершения saga Approval должен перейти в `COMPLETED`.
+Истечение `saga_expires_at`, отзыв Approval, изменение canonical plan или терминальное завершение saga должны блокировать следующий шаг.
+Допустимы только переходы `ACTIVE -> USED_IN_SAGA | REVOKED | EXPIRED` и `USED_IN_SAGA -> COMPLETED | REVOKED | EXPIRED`.
+Состояния `COMPLETED`, `REVOKED` и `EXPIRED` являются терминальными.
+Reservation и её снятие не изменяют `state`, но атомарно изменяют `reserved_execution_key` и `state_version`.
+Каждый переход состояния должен выполняться compare-and-set по ожидаемому `state_version` и увеличивать `state_version` ровно на единицу.
+
+JSON Schema `ApprovalV1` должна применять state-conditioned `oneOf` со следующими инвариантами:
+
+- В `ACTIVE` поля `used_at`, `saga_expires_at`, `completed_at`, `revoked_at`, `revoked_by_principal_id`, `revocation_reason` и `expired_at` равны `null`, а `reserved_execution_key` может быть `null` или строкой.
+- В `USED_IN_SAGA` поля `reserved_execution_key`, `used_at` и `saga_expires_at` обязательны и не равны `null`, а все терминальные timestamps и revoke-поля равны `null`.
+- В `COMPLETED` поля `reserved_execution_key`, `used_at`, `saga_expires_at` и `completed_at` обязательны и не равны `null`, а revoke-поля и `expired_at` равны `null`.
+- В `REVOKED` поля `revoked_at`, `revoked_by_principal_id` и `revocation_reason` обязательны и не равны `null`, `completed_at` и `expired_at` равны `null`, а `used_at` и `saga_expires_at` либо оба равны `null`, либо оба не равны `null`.
+- В `EXPIRED` поле `expired_at` обязательно и не равно `null`, revoke-поля и `completed_at` равны `null`, а `used_at` и `saga_expires_at` либо оба равны `null` при истечении `Approval.expires_at` до первого write, либо оба не равны `null` при истечении `saga_expires_at`.
+
+Во всех состояниях `reserved_execution_key` должен быть не равен `null`, если `used_at` не равен `null`.
+Переход в `EXPIRED` до первого write должен происходить не ранее `Approval.expires_at`, а после первого write — не ранее `saga_expires_at`.
+Детерминированный валидатор должен проверять `issued_at < expires_at`, `used_at <= saga_expires_at`, `completed_at >= used_at` для `COMPLETED` и соответствие `revoked_at` или `expired_at` переходу из предыдущего состояния.
 
 ### 8.6 `MandateV1`
 
@@ -414,7 +450,7 @@ Machine-readable JSON Schemas должны храниться в `schemas/` и �
 | `AdGroupDraftV1` | `name: string`; ровно один из `keywords: KeywordDraftV1[1]` или `targeting: TargetingDraftV1`; `negative_keywords: string[]`; `ads: AdDraftV1[1..2]` |
 | `GoalCandidateV1` | `schema_version,candidate_id,name,event_id,goal_type,site_location,business_meaning: string`; `classification: enum[PRIMARY_CONVERSION,MICRO_CONVERSION]`; `priority: integer >= 0`; `duplicate_signals: string[]`; `counter_id: trusted string`; `created_by_principal_id: string`; `created_at: date-time`; `configuration_version: string` |
 | `OptimizationProposalV1` | `schema_version,proposal_id,snapshot_id: string`; `proposal_origin: enum[INITIAL_ANALYSIS,CAMPAIGN_LIFECYCLE,POST_CHANGE_ANALYSIS]`; `decision_type: enum[APPLY,KEEP,ROLLBACK,ADJUST,ESCALATE,REQUEST_DATA]`; `analysis_status: enum[PROPOSAL_READY,NO_ACTION,REQUEST_DATA,NEEDS_HUMAN]`; `parent_proposal_id,parent_impact_report_id,parent_execution_key: string\|null`; `diagnosis: string`; `hypotheses: HypothesisV1[0..3]`; `evidence_fields,requested_data: string[]`; `actions: AtomicActionV1[]`; `expected_effect,risk_summary,explanation_ru: string`; `minimum_observation_window_seconds: integer`; `issued_at,expires_at: date-time` |
-| `ApprovalV1` | `schema_version,approval_id,proposal_id,proposal_hash,approved_by_principal_id,auth_context_id,organization_id,connection_id,target_id,expected_object_fingerprint,policy_version,signature: string`; `exact_diff: closed object`; `snapshot_id: string`; `snapshot_created_at,issued_at,expires_at: date-time`; `revoked_at,used_at: date-time\|null`; `state: enum[ACTIVE,REVOKED,USED,EXPIRED]` |
+| `ApprovalV1` | `schema_version,approval_id,proposal_id,proposal_hash,approved_by_principal_id,auth_context_id,organization_id,connection_id,target_id,expected_object_fingerprint,policy_version,signature: string`; `state_version: integer > 0`; `exact_diff: closed object`; `snapshot_id: string`; `reserved_execution_key,revoked_by_principal_id,revocation_reason: string\|null`; `snapshot_created_at,issued_at,expires_at: date-time`; `revoked_at,used_at,saga_expires_at,completed_at,expired_at: date-time\|null`; `state: enum[ACTIVE,USED_IN_SAGA,COMPLETED,REVOKED,EXPIRED]`; state-conditioned `oneOf` из раздела 8.5 |
 | `MandateV1` | `schema_version,mandate_id,mandate_version,organization_id,connection_id,account_id,environment,credential_profile,issuer_principal_id,auth_context_id,policy_version,signature: string`; `targets,allowed_actions,forbidden_actions: string[]`; `limits,quotas,stop_conditions: closed object`; `target_kpi: closed object`; `minimum_sample: closed object`; `issued_at,activated_at,expires_at: date-time`; `revoked_at: date-time\|null`; `state: enum[DRAFT,ACTIVE,REVOKED,EXPIRED,EXHAUSTED]` |
 | `CreationReservationV1` | `schema_version,reservation_id,organization_id,connection_id,account_id,environment,credential_profile,proposal_id,object_type,canonical_hash: string`; `expected_object_count: integer > 0`; `issued_at,expires_at: date-time`; `state: enum[RESERVED,CONSUMED,EXPIRED,CANCELLED]` |
 | `ExecutionLedgerEntryV1` | `execution_key: string`; `sequence_number: integer > 0`; `proposal_id,action_type,expected_object_fingerprint,policy_version: string`; trusted scope ID: string; `state: ExecutionStatus`; `before_ref,after_ref,http_evidence_ref,readback_ref: string\|null`; `created_at,updated_at: date-time` |
@@ -552,7 +588,9 @@ Schema validation, evidence validation и policy check должны выполн
 
 ### `FR-MON-008`. Оценка результата
 
-После изменяющего действия модуль должен открыть observation window длительностью `P_OBSERVATION_WINDOW`.
+После успешного serving-impacting действия модуль должен открыть observation window длительностью `P_OBSERVATION_WINDOW`.
+Serving-impacting действиями считаются `launch_campaign`, `set_weekly_budget`, `set_search_bid`, `set_strategy_constraint`, `set_ad_variant`, `pause_campaign` и `resume_campaign`.
+Создание pre-launch структуры, отправка на модерацию и другие действия до первого запуска не должны открывать performance observation window или блокировать отдельный первый запуск.
 До завершения окна новое автономное изменение той же кампании запрещено.
 По завершении окна модуль должен пересчитать поздние конверсии, учесть сезонность, известные вмешательства и confounders, создать новый снимок и сформировать `ImpactReportV1`.
 Модуль мониторинга не должен самостоятельно выбирать `KEEP`, `ROLLBACK`, `ADJUST` или `ESCALATE`.
@@ -565,6 +603,7 @@ Orchestrator должен вызвать LLM через `propose_post_change_pla
 LLM должна вернуть новый `OptimizationProposalV1` с `proposal_origin = POST_CHANGE_ANALYSIS`, заполненными parent-ссылками и одним из решений `KEEP`, `ROLLBACK`, `ADJUST`, `ESCALATE` или `REQUEST_DATA`.
 Детерминированный слой должен валидировать схему, evidence references, соответствие решения и списка действий, свежесть нового снимка и применимую policy version.
 Каждое post-change решение должно сохраняться как новый immutable Proposal с новым `proposal_id`.
+Повтор обработки с тем же `run_id` должен возвращать сохранённый Proposal или продолжать тот же run и не должен создавать второй Proposal.
 `KEEP` должен завершать observation cycle без write.
 `ESCALATE` и `REQUEST_DATA` не должны создавать write и должны уведомлять человека.
 `ROLLBACK` и `ADJUST` должны получать новый expected fingerprint и новый policy decision.
@@ -615,22 +654,23 @@ Dry-run должен создать точный canonical diff без внеш�
 Транзакция может последовательно создать кампанию, группу, объявление `ResponsiveAd` и ключевую фразу.
 Перед первым write executor должен зарезервировать `CreationReservation`, `execution_key` и Approval.
 Canonical plan должен заранее фиксировать порядок шагов, точки необратимости и допустимые компенсации.
-Approval должен считаться использованным сразу после отправки первого HTTP write независимо от итогового состояния многошаговой операции.
+Approval должен переходить в `USED_IN_SAGA` на границе отправки первого HTTP write в одной локальной транзакции с переводом ledger entry в `IN_FLIGHT` независимо от последующего результата многошаговой операции.
 Автоматическое продолжение после первого write разрешено только для неизменённых шагов того же canonical plan.
 Изменение target, бюджета, diff или шага внутри исходной многошаговой операции после первого write требует нового Proposal и нового Approval.
 Первичное создание production-кампании всегда требует человеческого Approval.
-Один Approval может покрывать создание, отправку на модерацию и первый запуск только при наличии всех этих неизменяемых шагов в canonical plan.
+Один Approval в состоянии `USED_IN_SAGA` может покрывать создание, отправку на модерацию и первый запуск только при наличии всех этих неизменяемых шагов в canonical plan, совпадении `execution_key` и незавершённом `saga_expires_at`.
 Если Approval не включает первый запуск, `create_campaign` должна завершиться в состоянии `READY_TO_LAUNCH` после успешной модерации.
 Отдельный `launch_campaign` после завершения `create_campaign` является новой бизнес-транзакцией и не изменяет canonical plan завершённой операции создания.
-В состоянии `READY_TO_LAUNCH` scheduler может выполнить отдельную команду `launch_campaign` без нового Approval только в режиме `BOUNDED_AUTONOMY` по активному Mandate, который явно разрешает `launch_campaign` для фактического `campaign_id`.
+В состоянии `READY_TO_LAUNCH` отдельная команда `launch_campaign` разрешена только в режиме `BOUNDED_AUTONOMY` по активному Mandate, который явно разрешает `launch_campaign` для фактического `campaign_id`.
 Mandate для автономного первого запуска может быть активирован только после регистрации фактического `campaign_id` в ledger.
 Перед отдельным автономным запуском orchestrator должен получить текущий snapshot, вызвать LLM и сохранить новый immutable `OptimizationProposalV1` с `proposal_origin = CAMPAIGN_LIFECYCLE`, `decision_type = APPLY`, единственным действием `launch_campaign`, фактическим `campaign_id` из trusted context и parent-ссылками на Proposal и execution создания.
 Перед автономным первым запуском executor должен подтвердить, что кампания создана прототипом, принадлежит исходной CreationReservation, прошла модерацию, не запускалась ранее и сохранила canonical fingerprint конфигурации, утверждённой при создании.
-Изменение конфигурации между Approval на создание и первым запуском должно блокировать `launch_campaign` с `STATE_CONFLICT` и требовать нового Proposal и Approval.
-Автономный первый запуск должен атомарно расходовать квоту Mandate, завершаться readback состояния `ACTIVE` и открывать observation window.
+Изменение конфигурации между Approval на создание и первым запуском должно блокировать `launch_campaign` с `STATE_CONFLICT`.
+Исправление конфигурации требует нового Proposal и Approval, а последующий отдельный запуск по-прежнему требует нового `CAMPAIGN_LIFECYCLE` Proposal и применимого launch Mandate.
+Автономный первый запуск должен атомарно расходовать квоту Mandate, завершаться readback значений `campaign_lifecycle_state = ACTIVE` и `direct_serving_state = ON` и открывать observation window.
 Успех требует полного readback созданной структуры и регистрации всех ID в ledger.
 Повтор с тем же `execution_key` не должен создавать вторую структуру.
-Жизненный цикл должен иметь состояния `DRAFT`, `CREATING`, `CREATED`, `MODERATION_PENDING`, `MODERATION_ACCEPTED`, `MODERATION_REJECTED`, `READY_TO_LAUNCH`, `ACTIVE`, `PARTIALLY_APPLIED`, `COMPENSATION_REQUIRED` и `FAILED`.
+Внутренний `campaign_lifecycle_state` должен иметь значения `DRAFT`, `CREATING`, `CREATED`, `MODERATION_PENDING`, `MODERATION_ACCEPTED`, `MODERATION_REJECTED`, `READY_TO_LAUNCH`, `ACTIVE`, `PARTIALLY_APPLIED`, `COMPENSATION_REQUIRED` и `FAILED`.
 После отправки на модерацию executor должен polling-чтением отслеживать асинхронный статус до терминального результата или timeout.
 Запуск разрешён только после `MODERATION_ACCEPTED` и повторной проверки неизменности canonical plan, применимого Approval или launch Mandate и object fingerprints.
 `MODERATION_REJECTED` должен завершать запуск без старта кампании и сохранять warnings, reason и evidence.
@@ -652,6 +692,7 @@ Mandate для автономного первого запуска может �
 `set_ad_variant` должна передавать выбранную пару через `Ads.update` как одноэлементные массивы `ResponsiveAd.Titles` и `ResponsiveAd.Texts`.
 Добавление нового `TextAd` в ЕПК запрещено.
 При неподдерживаемой стратегии команда должна возвращать `UNSUPPORTED_ACTION`.
+Значения `ON` и `SUSPENDED` в правилах управления кампанией относятся к `direct_serving_state`, а не к внутреннему `campaign_lifecycle_state`.
 `pause_campaign` разрешена только для состояния `ON`.
 `resume_campaign` разрешена только для состояния `SUSPENDED`.
 Целевое денежное значение должно рассчитываться детерминированно и округляться до целого микрозначения по правилу `ROUND_HALF_UP`.
@@ -669,7 +710,8 @@ Mandate для автономного первого запуска может �
 - Возобновление по эффективности разрешено только для состояния `SUSPENDED`, конверсий не меньше `P_MIN_CONVERSIONS` и `cpa_micros <= P_TARGET_CPA`.
 
 Эти условия ограничивают допустимость write, но не задают LLM единственный правильный ответ.
-LLM может предложить любой разрешённый план, `KEEP`, `REQUEST_DATA` или `NEEDS_HUMAN`.
+LLM может предложить любой разрешённый план либо `decision_type` со значением `KEEP`, `REQUEST_DATA` или `ESCALATE`.
+Для `ESCALATE` должен использоваться `analysis_status = NEEDS_HUMAN`.
 Контрольный тест не должен подменять решение модели заранее рассчитанным действием.
 
 ### `FR-CAM-005`. Предусловия write
@@ -678,14 +720,17 @@ LLM может предложить любой разрешённый план, 
 
 - Схему, хост, путь, API-версию и сервис.
 - Server-side scope организации, подключения, аккаунта, среды, credential profile и target.
-- Активный Approval или Mandate.
+- Активный Mandate, `ACTIVE` Approval для первого write либо `USED_IN_SAGA` Approval для ещё не выполненного шага той же неизменённой saga.
 - Kill switch.
-- Свежесть и сопоставимость snapshot.
+- Свежесть и сопоставимость аналитического snapshot для нового Proposal либо свежий current-state read для ожидаемого асинхронного шага уже начатой campaign-creation saga.
 - Cooldown, квоты и денежные лимиты.
 - Expected fingerprint релевантных полей объекта.
 - Отсутствие другого `IN_FLIGHT` действия по кампании.
 - Reservation `execution_key`.
 
+Current-state read для продолжения saga должен быть получен из Direct не ранее `P_DIRECT_MAX_AGE` до write и проверить фактические ID, модерацию, serving state и canonical fingerprint.
+Такой current-state read является дополнительным pre-write evidence, не заменяет `snapshot_id` внутри утверждённого Proposal и не изменяет canonical plan.
+Отклонение current-state read от ожидаемого перехода или утверждённой конфигурации должно блокировать write с `STATE_CONFLICT`.
 Ошибка любой проверки должна блокировать HTTP write.
 LLM, prompt или клиентский payload не могут отменить эту блокировку.
 
@@ -798,7 +843,13 @@ Reporting API не должен использоваться как доказа
 
 Approval должен создаваться только через аутентифицированную CLI-команду или внутренний API approver.
 Approval должен относиться к одной canonical версии Proposal.
-Изменение Proposal, diff, snapshot, target или fingerprint после Approval должно аннулировать разрешение.
+Изменение Proposal, diff, подписанного `snapshot_id`, target binding или ожидаемого canonical fingerprint после Approval должно аннулировать разрешение.
+Fresh current-state read ожидаемого асинхронного шага не изменяет подписанный snapshot, но любое расхождение с утверждённым canonical plan блокирует write.
+Approver может отозвать `ACTIVE` или `USED_IN_SAGA` Approval через аутентифицированную CLI-команду или внутренний API.
+Отзыв должен подписывать canonical tuple `approval_id + state_version + revoked_by_principal_id + revoked_at + reason` и атомарно применять compare-and-set по ожидаемому `state_version`.
+Успешный отзыв должен перевести Approval в `REVOKED`, увеличить `state_version` и немедленно блокировать каждый ещё не отправленный HTTP write этой saga.
+Уже отправленный write должен остаться `IN_FLIGHT`, завершить readback и reconciliation и не должен считаться отменённым.
+После отзыва оставшиеся шаги и компенсационные write запрещены до нового человеческого решения, а незавершимая saga должна получить `COMPENSATION_REQUIRED`, если безопасное завершение требует write.
 LLM не может создавать, подменять или использовать Approval.
 
 ### `FR-CTL-003`. Mandate
@@ -830,9 +881,10 @@ Executor должен проверять kill switch непосредствен�
 | Создание кандидатной цели | Только goal-authoring Mandate |
 | Публикация события на сайте | Approval или site-publish Mandate |
 | Создание production-кампании и отправка на модерацию | Только Approval |
-| Первый запуск в составе утверждённого canonical plan | Тот же неизменённый Approval |
-| Отдельный первый запуск после модерации | Approval или `BOUNDED_AUTONOMY` по Mandate с явным действием `launch_campaign` |
+| Первый запуск в составе утверждённого canonical plan | Тот же Approval в `USED_IN_SAGA` до `saga_expires_at` |
+| Отдельный первый запуск после модерации | Только `BOUNDED_AUTONOMY` по Mandate с явным действием `launch_campaign` |
 | Изменение бюджета, ставки, варианта или состояния | Approval или `BOUNDED_AUTONOMY` |
+| Отзыв `ACTIVE` или `USED_IN_SAGA` Approval | Только approver с усиленной аутентификацией и ожидаемой `state_version` |
 | Удаление отклонённой кандидатной цели текущего прототипа | Только отдельный Approval и ledger ownership |
 | Изменение синтетического объекта локального контрактного теста | Разрешено test runner без внешнего HTTP |
 | Удаление production-кампании, pre-existing или `APPROVED` цели | Запрещено |
@@ -850,7 +902,9 @@ Write, approval consumption и многошаговые транзакции д�
 
 Orchestrator должен связывать snapshot, Proposal, policy decision, Approval или Mandate, execution result и ImpactReport с одной и той же кампанией.
 После ImpactReport orchestrator должен выполнить `FR-MON-009` и связать новый post-change Proposal с предыдущим действием и данными observation window.
-Замкнутый цикл считается завершённым только после сохранения post-change Proposal с новым policy decision либо с валидным терминальным решением `KEEP`, `ESCALATE` или `REQUEST_DATA`.
+Замкнутый цикл считается завершённым только после сохранения и детерминированной проверки ровно одного нового post-change Proposal.
+Этот Proposal должен получить новый policy decision, а его `decision_type` должен иметь значение `KEEP`, `ROLLBACK`, `ADJUST`, `ESCALATE` или `REQUEST_DATA`.
+Терминальные решения `KEEP`, `ESCALATE` и `REQUEST_DATA` должны существовать только внутри этого Proposal и не могут возвращаться вместо него как отдельный результат.
 Замена кампании, счётчика или цели внутри активного цикла должна блокироваться с `OUT_OF_SCOPE`.
 
 ### `FR-CTL-008`. Аутентификация человеческих ролей
@@ -864,6 +918,10 @@ Host launcher должен перед каждой подписью выполн
 Точная команда подтверждения Proposal:
 
 `adsctl approval create --proposal-id <UUID> --expected-hash <SHA256>`.
+
+Точная команда отзыва Approval:
+
+`adsctl approval revoke --approval-id <UUID> --expected-version <VERSION> --reason <TEXT>`.
 
 Точная команда выдачи Mandate:
 
@@ -917,7 +975,7 @@ Trace должен позволять определить:
 - Какие инструменты были доступны LLM.
 - Что предложила LLM.
 - Какие проверки разрешили или заблокировали действие.
-- Кто и что утвердил.
+- Кто и что утвердил или отозвал, с какой `state_version` и причиной.
 - Какой credential profile и executor выполнили команду.
 - Какое состояние было до и после write.
 - Какие ошибки, retries, reconciliation и stop conditions возникли.
@@ -1171,6 +1229,9 @@ Capability result должен содержать `capability_id`, status, evide
 | `AC-044` | `fixtures/acceptance/ac-044-mandate-budget-cap.json` | `PASSED / BLOCKED` | `OUT_OF_BOUNDS` | `P_ANALYSIS_TIMEOUT` | `runs/<run_id>/acceptance/AC-044/` |
 | `AC-045` | `fixtures/acceptance/ac-045-autonomous-first-launch.json` | `PASSED / APPLIED` | `NONE` | `P_WRITE_READBACK_TIMEOUT` | `runs/<run_id>/acceptance/AC-045/` |
 | `AC-046` | `fixtures/acceptance/ac-046-post-change-llm.json` | `PASSED / POST_CHANGE_PROPOSAL_READY` | `NONE` | `P_ANALYSIS_TIMEOUT` | `runs/<run_id>/acceptance/AC-046/` |
+| `AC-047` | `fixtures/acceptance/ac-047-approval-reservation-race.json` | `PASSED / ONE_RESERVATION` | `APPROVAL_INVALID` для проигравшего | `P_LOCAL_ANALYSIS_TIMEOUT` | `runs/<run_id>/acceptance/AC-047/` |
+| `AC-048` | `fixtures/acceptance/ac-048-approval-saga-time.json` | `PASSED / SAGA_CONTINUED` | `NONE` | `P_LOCAL_ANALYSIS_TIMEOUT` | `runs/<run_id>/acceptance/AC-048/` |
+| `AC-049` | `fixtures/acceptance/ac-049-approval-revocation.json` | `PASSED / RECONCILED_THEN_BLOCKED` | `STATE_CONFLICT` для stale revoke; `APPROVAL_INVALID` для следующего шага | `P_INTEGRATION_TIMEOUT` | `runs/<run_id>/acceptance/AC-049/` |
 
 ### 18.2 Исходные regression fixtures
 
@@ -1235,9 +1296,10 @@ Then: запросы создания выполнены против синте
 
 Трассировка: `FR-CAM-003`, `FR-CAM-005`, `FR-CAM-007`.
 
-Given: Gate 4 открыт, spend caps активны и canonical plan утверждён.
+Given: Gate 4 открыт, spend caps активны, а `ACTIVE` Approval утверждает один canonical plan с созданием, модерацией и первым запуском кампании.
 When: executor создаёт и запускает allowlisted production-кампанию.
-Then: все ID зарегистрированы в ledger, фактические типы сохранены и расход ограничен platform-side cap.
+Then: перед первым write Approval резервируется за одним `execution_key`, на границе первой HTTP-отправки переходит в `USED_IN_SAGA` вместе с ledger entry `IN_FLIGHT`, запуск выполняется как неизменённый шаг той же saga до `saga_expires_at`, а после терминального завершения Approval переходит в `COMPLETED`.
+Then: все ID зарегистрированы в ledger, фактические типы сохранены, readback подтверждает `campaign_lifecycle_state = ACTIVE` и `direct_serving_state = ON`, а расход ограничен platform-side cap.
 
 ### `AC-007`. Кандидатная цель
 
@@ -1269,15 +1331,16 @@ Then: цель получает `APPROVED` и становится доступ�
 
 Given: четыре фиксированных сценария `EFFECTIVE`, `OVERSPEND_WITHOUT_CONVERSIONS`, `LOW_CTR` и `AMBIGUOUS_DATA`.
 When: каждый сценарий передаётся модели пять раз.
-Then: `20/20` ответов проходят schema validation, не содержат неподтверждённых фактов и не отправляют запрещённую команду executor, а `AMBIGUOUS_DATA` всегда возвращает `NEEDS_HUMAN` либо `REQUEST_DATA`.
+Then: `20/20` ответов проходят schema validation, не содержат неподтверждённых фактов и не отправляют запрещённую команду executor.
+Then: `AMBIGUOUS_DATA` всегда возвращает `decision_type = ESCALATE` с `analysis_status = NEEDS_HUMAN` либо `decision_type = REQUEST_DATA` с одноимённым `analysis_status`.
 
 ### `AC-011`. Одноразовый Approval
 
 Трассировка: `FR-CTL-002`.
 
 Given: Approval подписывает точный Proposal и diff.
-When: executor успешно использует Approval, а затем получает повторный запрос.
-Then: первый запрос выполняется, а второй блокируется с `APPROVAL_INVALID`.
+When: executor начинает transaction, а затем получает повтор того же уже выполненного шага с тем же Approval.
+Then: Approval переходит в `USED_IN_SAGA`, заранее утверждённый следующий шаг той же saga остаётся допустимым, а повтор выполненного шага блокируется с `APPROVAL_INVALID`.
 
 ### `AC-012`. Изменённый Proposal
 
@@ -1405,7 +1468,8 @@ Then: каждый метод имеет отдельные проверки req
 
 Given: одна allowlisted пилотная кампания, утверждённая цель и открытый Gate 4.
 When: система выполняет анализ, Proposal, policy check, Approval или Mandate, write, readback, observation, ImpactReport и повторный LLM-анализ.
-Then: новый post-change Proposal либо терминальное решение сформированы по данным той же кампании, связаны с предыдущим execution, имеют полный audit trail, а `report.md` перечисляет все capabilities, statuses, evidence types, artifacts и limitations.
+Then: ровно один новый post-change Proposal сформирован по данным той же кампании, связан с предыдущим execution, получил новый policy decision и содержит `decision_type` со значением `KEEP`, `ROLLBACK`, `ADJUST`, `ESCALATE` или `REQUEST_DATA`.
+Then: Proposal имеет полный audit trail, а `report.md` перечисляет все capabilities, statuses, evidence types, artifacts и limitations.
 
 ### `AC-028`. Временные ограничения
 
@@ -1547,9 +1611,10 @@ Then: write блокируется с `OUT_OF_BOUNDS`.
 
 Трассировка: `FR-CAM-001`, `FR-CAM-003`, `FR-CAM-005`, `FR-CTL-001`, `FR-CTL-003`, `FR-CTL-005`.
 
-Given: кампания создана по Approval, зарегистрирована в ledger, имеет состояние `READY_TO_LAUNCH`, прошла модерацию, не менялась после создания, новый Proposal имеет `proposal_origin = CAMPAIGN_LIFECYCLE` и содержит единственное действие `launch_campaign`, а активный Mandate явно разрешает это действие для её фактического ID.
-When: scheduler в режиме `BOUNDED_AUTONOMY` выполняет `launch_campaign`.
-Then: Approval на отдельный шаг не запрашивается, квота Mandate расходуется атомарно, readback подтверждает `ACTIVE`, а для кампании открывается observation window.
+Given: кампания создана по Approval, зарегистрирована в ledger, имеет состояние `READY_TO_LAUNCH`, прошла модерацию, не менялась после создания, а активный Mandate явно разрешает `launch_campaign` для её фактического ID.
+When: scheduler в режиме `BOUNDED_AUTONOMY` получает текущий snapshot, вызывает LLM, сохраняет и валидирует новый Proposal и выполняет `launch_campaign`.
+Then: Proposal имеет `proposal_origin = CAMPAIGN_LIFECYCLE`, `decision_type = APPLY`, единственное действие `launch_campaign`, валидные `parent_proposal_id` и `parent_execution_key` и `parent_impact_report_id = null`.
+Then: Approval на отдельный шаг не запрашивается, квота Mandate расходуется атомарно, readback подтверждает `campaign_lifecycle_state = ACTIVE` и `direct_serving_state = ON`, а для кампании открывается observation window.
 
 ### `AC-046`. Повторный LLM-анализ
 
@@ -1557,7 +1622,35 @@ Then: Approval на отдельный шаг не запрашивается, �
 
 Given: observation window завершено, детерминированный `ImpactReportV1` сохранён, а model fixture возвращает валидный `ADJUST`.
 When: orchestrator запускает post-change analysis run.
-Then: LLM вызывается с ImpactReport, снимками до и после изменения и предыдущим execution, а новый immutable `OptimizationProposalV1` содержит `proposal_origin = POST_CHANGE_ANALYSIS`, parent references и новый policy decision без повторного использования прежнего Approval.
+Then: LLM вызывается с ImpactReport, снимками до и после изменения и предыдущим execution.
+Then: новый immutable `OptimizationProposalV1` содержит `proposal_origin = POST_CHANGE_ANALYSIS`, `decision_type = ADJUST`, непустой список атомарных действий и все три валидные parent-ссылки.
+Then: детерминированный слой рассчитывает новый expected fingerprint по post-change snapshot и сохраняет новый policy decision.
+Then: исполнение Proposal блокируется до нового Approval или применимого Mandate, а Approval предыдущего действия отклоняется с `APPROVAL_INVALID`.
+
+### `AC-047`. Конкурентное резервирование Approval
+
+Трассировка: `FR-CAM-005`, `FR-CTL-002`.
+
+Given: один неизменённый и неистёкший `ACTIVE` Approval одновременно получают два executor с разными `execution_key` и одинаковой ожидаемой `state_version`.
+When: оба executor выполняют атомарное резервирование до первого HTTP write.
+Then: ровно один executor сохраняет свой `reserved_execution_key` и увеличивает `state_version`, проигравший блокируется с `APPROVAL_INVALID`, а до продолжения победителя не отправляется ни одного HTTP write.
+
+### `AC-048`. Продолжение Approval saga после истечения исходной свежести
+
+Трассировка: `FR-CAM-003`, `FR-CAM-005`, `FR-CTL-002`.
+
+Given: управляемые часы показывают, что первый write был отправлен до `Approval.expires_at` и `Proposal.expires_at`, исходный Direct block и оба TTL уже истекли, Approval находится в `USED_IN_SAGA`, а `saga_expires_at` ещё не наступил.
+When: executor получает fresh current-state read и пытается выполнить следующий неизменённый шаг того же canonical plan с тем же `execution_key`.
+Then: подписанный `snapshot_id` не изменяется, current-state read не старше `P_DIRECT_MAX_AGE` подтверждает ожидаемый переход и fingerprint, а следующий шаг разрешается тем же Approval.
+
+### `AC-049`. Отзыв Approval во время saga
+
+Трассировка: `FR-CAM-005`, `FR-CAM-007`, `FR-CTL-002`, `FR-CTL-008`.
+
+Given: Approval находится в `USED_IN_SAGA`, один HTTP write уже имеет состояние `IN_FLIGHT`, а следующий шаг canonical plan ещё не отправлен.
+When: approver с усиленной аутентификацией отзывает Approval по актуальной `state_version`, после чего повторяет revoke с предыдущей версией.
+Then: Approval атомарно переходит в `REVOKED`, а `state_version` увеличивается ровно на единицу.
+Then: stale revoke блокируется с `STATE_CONFLICT` без изменения Approval, уже отправленный write завершает readback и reconciliation без повтора, а следующий шаг блокируется с `APPROVAL_INVALID`.
 
 ## 19. Негативная матрица
 
@@ -1566,14 +1659,17 @@ Then: LLM вызывается с ImpactReport, снимками до и пос�
 | Неизвестное поле в LLM-ответе | `BLOCKED / INVALID_INPUT` |
 | Отсутствующее evidence field | `BLOCKED / INVALID_INPUT` |
 | `NaN`, бесконечность, строковое число или неположительный недельный бюджет | `BLOCKED / INVALID_INPUT` |
-| Неоднозначные или противоречивые факты | `NEEDS_HUMAN` либо `REQUEST_DATA`, без write |
+| Неоднозначные или противоречивые факты | `decision_type = ESCALATE` с `analysis_status = NEEDS_HUMAN` либо `decision_type = REQUEST_DATA`, без write |
 | Устаревший Direct или Metrika block | `BLOCKED / STALE_DATA` |
 | Несовместимые периоды или атрибуция | `BLOCKED / INCOMPATIBLE_DATA` |
-| Недостаточная выборка для финансового действия | `BLOCKED / INSUFFICIENT_DATA` |
+| Недостаточная выборка для performance-derived финансового действия, кроме первого lifecycle launch | `BLOCKED / INSUFFICIENT_DATA` |
 | Неподдерживаемая стратегия для `SearchBid` | `BLOCKED / UNSUPPORTED_ACTION` |
 | Target отсутствует в server-side allowlist | `BLOCKED / OUT_OF_SCOPE` |
 | Production write без Approval или Mandate | `BLOCKED / APPROVAL_REQUIRED` |
-| Изменённый или использованный Approval | `BLOCKED / APPROVAL_INVALID` |
+| Изменённый Approval либо `USED_IN_SAGA` Approval для новой transaction или уже выполненного шага | `BLOCKED / APPROVAL_INVALID` |
+| `REVOKED`, `COMPLETED` или `EXPIRED` Approval перед новым write | `BLOCKED / APPROVAL_INVALID` |
+| Изменение Approval с устаревшей ожидаемой `state_version` | `BLOCKED / STATE_CONFLICT`, без мутации |
+| Истёкший `saga_expires_at` перед следующим шагом canonical plan | `BLOCKED / APPROVAL_INVALID` |
 | Истёкший Mandate | `BLOCKED / MANDATE_EXPIRED` |
 | Исчерпанные квоты Mandate | `BLOCKED / MANDATE_EXHAUSTED` |
 | Незавершённый cooldown | `BLOCKED / COOLDOWN_ACTIVE` |
@@ -1589,7 +1685,8 @@ Then: LLM вызывается с ImpactReport, снимками до и пос�
 | Timeout write с подтверждённым исходным состоянием | `FAILED` без автоматического повтора |
 | Timeout write с неопределимым состоянием | `UNKNOWN_RESULT` и ручное согласование |
 | Модерация кампании отклонена | `MODERATION_REJECTED`, запуск не выполняется |
-| Автономный первый запуск без launch Mandate либо вне его target/action scope | `BLOCKED / APPROVAL_REQUIRED` или `BLOCKED / OUT_OF_SCOPE` |
+| Автономный первый запуск без применимого launch Mandate | `BLOCKED / APPROVAL_REQUIRED` |
+| Launch Mandate не включает фактический `campaign_id` или действие `launch_campaign` | `BLOCKED / OUT_OF_SCOPE` |
 | Fingerprint кампании изменился между Approval на создание и первым запуском | `BLOCKED / STATE_CONFLICT` |
 | `ImpactReportV1` содержит `next_decision`, действия или рекомендацию | `BLOCKED / INVALID_INPUT` |
 | Post-change Proposal не ссылается на ImpactReport и предыдущее execution | `BLOCKED / INVALID_INPUT` |
