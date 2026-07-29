@@ -589,7 +589,12 @@ class ObserveRunTests(unittest.TestCase):
             self.assertEqual(0, outcome.exit_code)
             run_directory = runs_root / "observe-success"
             self.assertEqual(
-                {"events.jsonl", "report.md", "result.json"},
+                {
+                    "capability-evidence.json",
+                    "events.jsonl",
+                    "report.md",
+                    "result.json",
+                },
                 {
                     path.name
                     for path in run_directory.iterdir()
@@ -603,6 +608,23 @@ class ObserveRunTests(unittest.TestCase):
             self.assertEqual("NOT_STARTED", result["execution_status"])
             self.assertFalse(result["external_write_sent"])
             self.assertEqual(
+                "capability-evidence.json",
+                result["capability_evidence_path"],
+            )
+            capability_evidence = json.loads(
+                (run_directory / "capability-evidence.json").read_text(encoding="utf-8")
+            )
+            observe_capability = next(
+                item
+                for item in capability_evidence["capabilities"]
+                if item["capability"] == "INTEGRATED_ANALYTICS"
+            )
+            self.assertEqual("NOT_PROVEN", observe_capability["status"])
+            self.assertEqual(
+                ["08", "09", "27"],
+                observe_capability["acceptance_cases"],
+            )
+            self.assertEqual(
                 "COMPARABLE",
                 result["snapshot"]["comparability_status"],
             )
@@ -610,6 +632,10 @@ class ObserveRunTests(unittest.TestCase):
             self.assertIn("Наблюдение", report)
             self.assertIn("CTR: `2.00%`", report)
             self.assertIn("изменяющие запросы не отправлялись", report)
+            self.assertIn(
+                "INTEGRATED_ANALYTICS: status=NOT_PROVEN",
+                report,
+            )
 
     def test_cli_command_has_no_traceback_and_never_executes_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

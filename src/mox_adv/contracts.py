@@ -433,6 +433,7 @@ class RunResult:
     duration_ms: int
     stages: Sequence[str]
     technical_command: Optional[str]
+    capability_evidence_path: str
     error: Optional[RunError]
     audit: AuditVerification
 
@@ -454,6 +455,7 @@ class RunResult:
             "duration_ms": self.duration_ms,
             "stages": list(self.stages),
             "technical_command": self.technical_command,
+            "capability_evidence_path": self.capability_evidence_path,
             "provider": None,
             "model_id": None,
             "tokens": 0,

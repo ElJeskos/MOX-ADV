@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
+from mox_adv.canonical import canonical_json
 from mox_adv.contracts import AuditVerification, PersistedEvent
 
 GENESIS_HASH = "0" * 64
@@ -55,7 +56,7 @@ class SignedAuditAnchor:
     signature: str
 
     def signing_payload(self) -> bytes:
-        return _canonical_json(
+        return canonical_json(
             {
                 "anchored_at": self.anchored_at,
                 "final_hash": self.final_hash,
@@ -82,18 +83,47 @@ class SignedAuditAnchor:
     def with_signature(self, signature: str) -> "SignedAuditAnchor":
         return replace(self, signature=signature)
 
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "SignedAuditAnchor":
+        fields = {
+            "schema_version",
+            "run_id",
+            "policy_version",
+            "final_sequence",
+            "final_hash",
+            "anchored_at",
+            "key_id",
+            "signature",
+        }
+        if set(value) != fields:
+            raise AuditAnchorVerificationError(
+                "The signed audit anchor schema is invalid."
+            )
+        if (
+            not isinstance(value["final_sequence"], int)
+            or isinstance(value["final_sequence"], bool)
+            or any(
+                not isinstance(value[name], str) or not value[name]
+                for name in fields - {"final_sequence"}
+            )
+        ):
+            raise AuditAnchorVerificationError(
+                "The signed audit anchor fields are invalid."
+            )
+        return cls(
+            schema_version=value["schema_version"],
+            run_id=value["run_id"],
+            policy_version=value["policy_version"],
+            final_sequence=value["final_sequence"],
+            final_hash=value["final_hash"],
+            anchored_at=value["anchored_at"],
+            key_id=value["key_id"],
+            signature=value["signature"],
+        )
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
 
 
 def _event_hash(
@@ -116,7 +146,7 @@ def _event_hash(
         "payload": dict(payload),
         "previous_hash": previous_hash,
     }
-    return hashlib.sha256(_canonical_json(canonical).encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical_json(canonical).encode("utf-8")).hexdigest()
 
 
 class SQLiteAuditJournal:
@@ -214,7 +244,7 @@ class SQLiteAuditJournal:
     ) -> PersistedEvent:
         if not event_type or len(event_type) > 128:
             raise ValueError("The audit event type is invalid.")
-        payload_json = _canonical_json(dict(payload))
+        payload_json = canonical_json(dict(payload))
         occurred_at = _utc_now()
         try:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -566,7 +596,7 @@ class SQLiteAuditJournal:
                         previous_hash=row["previous_hash"],
                         event_hash=row["event_hash"],
                     )
-                    stream.write(_canonical_json(event.as_dict()) + "\n")
+                    stream.write(canonical_json(event.as_dict()) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_name, path)

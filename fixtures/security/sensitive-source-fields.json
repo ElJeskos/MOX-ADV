@@ -1,0 +1,9 @@
+{
+  "fixture_id": "SENSITIVE_SOURCE_FIELDS",
+  "surface": "sensitive_source",
+  "untrusted_payload": {
+    "contact_email": "person@example.invalid",
+    "customer_name": "Synthetic Customer",
+    "commercial_margin": "42"
+  }
+}

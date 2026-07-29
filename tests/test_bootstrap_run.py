@@ -25,7 +25,6 @@ from mox_adv.internal_api.v1 import (
 )
 from mox_adv.pipeline import run_fixture
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 POLICY = ROOT / "config" / "gate0-policy.json"
@@ -171,7 +170,12 @@ class FixtureRunTests(unittest.TestCase):
             self.assertLess(elapsed, 300)
             run_directory = runs_root / "safe-success"
             self.assertEqual(
-                {"events.jsonl", "report.md", "result.json"},
+                {
+                    "capability-evidence.json",
+                    "events.jsonl",
+                    "report.md",
+                    "result.json",
+                },
                 {
                     path.name
                     for path in run_directory.iterdir()
@@ -187,6 +191,25 @@ class FixtureRunTests(unittest.TestCase):
             self.assertEqual("NO_CHANGE", result["execution_status"])
             self.assertFalse(result["external_write_sent"])
             self.assertEqual("SIMULATED", result["evidence_type"])
+            self.assertEqual(
+                "capability-evidence.json",
+                result["capability_evidence_path"],
+            )
+            capability_evidence = json.loads(
+                (run_directory / "capability-evidence.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(14, len(capability_evidence["capabilities"]))
+            safety = next(
+                item
+                for item in capability_evidence["capabilities"]
+                if item["capability"] == "SAFETY_CORE"
+            )
+            self.assertEqual("NOT_PROVEN", safety["status"])
+            self.assertIn("23.1", safety["acceptance_cases"])
+            self.assertIn("27", safety["acceptance_cases"])
+            report = (run_directory / "report.md").read_text(encoding="utf-8")
+            self.assertIn("SAFETY_CORE: status=NOT_PROVEN", report)
+            self.assertIn("CLOSED_LOOP_CONTROL: status=NOT_TESTED", report)
             events = [
                 json.loads(line)
                 for line in (run_directory / "events.jsonl")

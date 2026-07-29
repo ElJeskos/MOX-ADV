@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
+import sqlite3
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence, Tuple
 
-from mox_adv.audit import AuditAnchorSigner, SignedAuditAnchor, SQLiteAuditJournal
+from mox_adv.audit import (
+    AuditAnchorSigner,
+    AuditWriteBlocked,
+    SignedAuditAnchor,
+    SQLiteAuditJournal,
+)
+from mox_adv.canonical import canonical_json
 from mox_adv.recommend_projection import build_sanitized_projection
 
 _CONTROL_FIELDS = frozenset(
@@ -26,7 +35,64 @@ _CONTROL_FIELDS = frozenset(
         "mandate",
     }
 )
-_CAPABILITY_STATUSES = frozenset({"PROVEN", "PARTIAL", "NOT_PROVEN", "INCONCLUSIVE"})
+_CAPABILITY_STATUSES = frozenset({"PROVEN", "NOT_PROVEN", "INCONCLUSIVE", "NOT_TESTED"})
+_EVIDENCE_TYPES = frozenset(
+    {"TEST_COUNTER", "REAL_READ_ONLY", "SIMULATED", "CONTROLLED_PILOT"}
+)
+_REQUIRED_CAPABILITIES = (
+    "CAMPAIGN_LIFECYCLE",
+    "GOAL_LIFECYCLE",
+    "SOURCE_INTEGRATION",
+    "INTEGRATED_ANALYTICS",
+    "LLM_ANALYSIS",
+    "APPROVAL_REQUIRED",
+    "BOUNDED_AUTONOMY",
+    "MONITORING_AND_ALERTING",
+    "IMPACT_EVALUATION",
+    "OPERATIONAL_MODES",
+    "TOOL_CONTRACT",
+    "ORIGINAL_INTEGRATION_COVERAGE",
+    "SAFETY_CORE",
+    "CLOSED_LOOP_CONTROL",
+)
+_CAPABILITY_ACCEPTANCE_CASES = {
+    "CAMPAIGN_LIFECYCLE": ("02", "11", "27"),
+    "GOAL_LIFECYCLE": ("03", "12", "12.1", "12.2", "27"),
+    "SOURCE_INTEGRATION": ("08", "09", "27"),
+    "INTEGRATED_ANALYTICS": ("08", "09", "27"),
+    "LLM_ANALYSIS": ("07", "10", "22", "22.1", "25", "27"),
+    "APPROVAL_REQUIRED": ("15", "27"),
+    "BOUNDED_AUTONOMY": ("15.1", "15.2", "27"),
+    "MONITORING_AND_ALERTING": ("20", "27"),
+    "IMPACT_EVALUATION": ("21", "21.2", "27"),
+    "OPERATIONAL_MODES": ("13", "14", "15", "15.1", "27"),
+    "TOOL_CONTRACT": ("01", "02", "16", "16.2", "27"),
+    "ORIGINAL_INTEGRATION_COVERAGE": ("02", "03", "27"),
+    "SAFETY_CORE": (
+        "00",
+        "05",
+        "06",
+        "16",
+        "16.1",
+        "16.2",
+        "17",
+        "17.1",
+        "17.2",
+        "18",
+        "19",
+        "19.1",
+        "19.2",
+        "22",
+        "22.1",
+        "23",
+        "23.1",
+        "24",
+        "25",
+        "26",
+        "27",
+    ),
+    "CLOSED_LOOP_CONTROL": ("21.1", "27"),
+}
 _SECRET_SCAN_CHANNELS = frozenset(
     {
         "source",
@@ -39,15 +105,6 @@ _SECRET_SCAN_CHANNELS = frozenset(
         "docker_metadata",
     }
 )
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
 
 
 def _flatten_strings(value: Any) -> Tuple[str, ...]:
@@ -72,7 +129,7 @@ class InjectionVerification:
     surface: str
     injection_text: str
     projection: Mapping[str, Any]
-    instruction_remained_data: bool
+    untrusted_text_excluded: bool
     authority_unchanged: bool
     policy_unchanged: bool
 
@@ -98,18 +155,18 @@ def verify_injection_fixture(
     strings = _flatten_strings(untrusted_payload)
     if not strings:
         raise ValueError("Injection fixture must contain untrusted text.")
-    policy_before = hashlib.sha256(_canonical_json(policy).encode("utf-8")).hexdigest()
+    policy_before = hashlib.sha256(canonical_json(policy).encode("utf-8")).hexdigest()
     source = dict(trusted_snapshot)
     source.update(untrusted_payload)
-    projection = dict(build_sanitized_projection(source, policy))
-    policy_after = hashlib.sha256(_canonical_json(policy).encode("utf-8")).hexdigest()
-    serialized_projection = _canonical_json(projection)
+    projection = build_sanitized_projection(source, policy)
+    policy_after = hashlib.sha256(canonical_json(policy).encode("utf-8")).hexdigest()
+    serialized_projection = canonical_json(dict(projection))
     return InjectionVerification(
         fixture_id=fixture_id,
         surface=surface,
-        injection_text=_canonical_json(untrusted_payload),
+        injection_text=canonical_json(untrusted_payload),
         projection=projection,
-        instruction_remained_data=all(
+        untrusted_text_excluded=all(
             text not in serialized_projection for text in strings
         ),
         authority_unchanged=_CONTROL_FIELDS.isdisjoint(projection),
@@ -152,6 +209,196 @@ class AuditGuardedFakeWriteAdapter:
         self.delegate.apply(target_key, command)
 
 
+class PreWriteAudit(Protocol):
+    def authorize(
+        self,
+        execution_key: str,
+        target_key: str,
+        occurred_at: datetime,
+    ) -> None: ...
+
+
+class WriteWindow(Protocol):
+    def reserve(self, execution_key: str) -> None: ...
+
+
+class GuardedDispatchBoundary:
+    """Order durable pre-write evidence before write-window reservation."""
+
+    def __init__(
+        self,
+        pre_write_audit: PreWriteAudit,
+        write_window: WriteWindow,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self.pre_write_audit = pre_write_audit
+        self.write_window = write_window
+        self.clock = clock
+
+    def authorize(self, execution_key: str, target_key: str) -> None:
+        self.pre_write_audit.authorize(
+            execution_key,
+            target_key,
+            self.clock(),
+        )
+        self.write_window.reserve(execution_key)
+
+
+class SimulationAuditAnchorSigner:
+    """Reproducible non-secret signer used only by fake-adapter simulation."""
+
+    key_id = "simulation-audit-anchor-v1"
+    _key = b"MOX-ADV-NON-SECRET-SIMULATION-ANCHOR-V1"
+
+    def sign(self, payload: bytes) -> str:
+        return hmac.new(self._key, payload, hashlib.sha256).hexdigest()
+
+    def verify(self, payload: bytes, signature: str) -> bool:
+        return hmac.compare_digest(self.sign(payload), signature)
+
+
+class MacOSKeychainAuditAnchorSigner:
+    """Load trusted audit signing material from macOS Keychain per operation."""
+
+    def __init__(
+        self,
+        *,
+        service: str = "MOX_ADV_AUDIT_ANCHOR_SIGNING_KEY",
+        account: str = "sviridov",
+    ) -> None:
+        self.service = service
+        self.account = account
+        self.key_id = "macos-keychain:" + service + ":" + account
+
+    def _key(self) -> bytes:
+        try:
+            completed = subprocess.run(
+                [
+                    "/usr/bin/security",
+                    "find-generic-password",
+                    "-w",
+                    "-s",
+                    self.service,
+                    "-a",
+                    self.account,
+                ],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AuditWriteBlocked("AUDIT_SIGNING_UNAVAILABLE") from error
+        key = completed.stdout.rstrip(b"\r\n")
+        if completed.returncode != 0 or not key:
+            raise AuditWriteBlocked("AUDIT_SIGNING_UNAVAILABLE")
+        return key
+
+    def sign(self, payload: bytes) -> str:
+        return hmac.new(self._key(), payload, hashlib.sha256).hexdigest()
+
+    def verify(self, payload: bytes, signature: str) -> bool:
+        expected = hmac.new(self._key(), payload, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, signature)
+
+
+class DurablePreWriteAudit:
+    """Persist and verify one signed intent immediately before dispatch."""
+
+    def __init__(
+        self,
+        control_state_path: Path,
+        policy_version: str,
+        signer: AuditAnchorSigner,
+    ) -> None:
+        self.root = control_state_path.parent / (
+            "." + control_state_path.name + ".pre-write-audit"
+        )
+        self.policy_version = policy_version
+        self.signer = signer
+
+    def authorize(
+        self,
+        execution_key: str,
+        target_key: str,
+        occurred_at: datetime,
+    ) -> None:
+        digest = hashlib.sha256(execution_key.encode("utf-8")).hexdigest()
+        self.root.mkdir(parents=True, exist_ok=True)
+        journal_path = self.root / (digest + ".sqlite3")
+        anchor_path = self.root / (digest + ".anchor.json")
+        if journal_path.exists() or anchor_path.exists():
+            raise AuditWriteBlocked("PRE_WRITE_AUDIT_ALREADY_EXISTS")
+        journal: Optional[SQLiteAuditJournal] = None
+        try:
+            journal = SQLiteAuditJournal(
+                journal_path,
+                execution_key,
+                "pre-write-audit-v1",
+                self.policy_version,
+            )
+            event = journal.append(
+                "write.intent.recorded",
+                {
+                    "execution_key": execution_key,
+                    "target_key": target_key,
+                },
+            )
+            anchor = journal.create_signed_anchor(self.signer, occurred_at)
+            journal.verify_pre_write_anchor(
+                anchor,
+                self.signer,
+                event.event_hash,
+                now=occurred_at,
+                maximum_age=timedelta(microseconds=1),
+            )
+            _atomic_json(anchor_path, anchor.as_dict())
+        except AuditWriteBlocked:
+            raise
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            raise AuditWriteBlocked("AUDIT_EVIDENCE_UNAVAILABLE") from error
+        finally:
+            if journal is not None:
+                journal.close()
+
+    def verify_persisted(
+        self,
+        execution_key: str,
+        *,
+        now: datetime,
+        maximum_age: timedelta,
+    ) -> SignedAuditAnchor:
+        digest = hashlib.sha256(execution_key.encode("utf-8")).hexdigest()
+        journal_path = self.root / (digest + ".sqlite3")
+        anchor_path = self.root / (digest + ".anchor.json")
+        try:
+            value = json.loads(anchor_path.read_text(encoding="utf-8"))
+            if not isinstance(value, Mapping):
+                raise AuditWriteBlocked("AUDIT_ANCHOR_INVALID")
+            anchor = SignedAuditAnchor.from_mapping(value)
+            if (
+                anchor.run_id != execution_key
+                or anchor.policy_version != self.policy_version
+            ):
+                raise AuditWriteBlocked("AUDIT_ANCHOR_INVALID")
+            journal = SQLiteAuditJournal.open(journal_path)
+            try:
+                journal.verify_signed_anchor(
+                    anchor,
+                    self.signer,
+                    now=now,
+                    maximum_age=maximum_age,
+                )
+            finally:
+                journal.close()
+            return anchor
+        except AuditWriteBlocked:
+            raise
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+            raise AuditWriteBlocked("AUDIT_ANCHOR_INVALID") from error
+
+
 class SecretCanaryScanner:
     """Scan every prohibited runtime surface without persisting the canary."""
 
@@ -192,13 +439,17 @@ class CapabilityEvidence:
     limitations: Tuple[str, ...]
 
     def as_dict(self) -> Mapping[str, Any]:
+        if self.capability not in _REQUIRED_CAPABILITIES:
+            raise ValueError("Capability evidence capability is invalid.")
         if self.status not in _CAPABILITY_STATUSES:
             raise ValueError("Capability evidence status is invalid.")
+        if self.evidence_type not in _EVIDENCE_TYPES:
+            raise ValueError("Capability evidence type is invalid.")
         if (
             not self.capability
             or not self.evidence_type
             or not self.acceptance_cases
-            or not self.evidence_paths
+            or (self.status != "NOT_TESTED" and not self.evidence_paths)
         ):
             raise ValueError("Capability evidence is incomplete.")
         return {
@@ -209,6 +460,26 @@ class CapabilityEvidence:
             "evidence_paths": list(self.evidence_paths),
             "limitations": list(self.limitations),
         }
+
+
+def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix="." + path.name + ".",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
 
 
 def write_capability_evidence_summary(
@@ -228,20 +499,86 @@ def write_capability_evidence_summary(
         "policy_version": policy_version,
         "capabilities": [item.as_dict() for item in capabilities],
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix="." + path.name + ".",
-        dir=str(path.parent),
+    _atomic_json(path, value)
+
+
+def emit_run_capability_evidence(
+    run_directory: Path,
+    *,
+    run_id: str,
+    policy_version: str,
+    mode: str,
+    status: str,
+) -> str:
+    """Emit the capability contract from an actual bootstrap or OBSERVE run."""
+
+    capabilities = build_run_capability_evidence(mode=mode, status=status)
+    name = "capability-evidence.json"
+    write_capability_evidence_summary(
+        run_directory / name,
+        run_id=run_id,
+        policy_version=policy_version,
+        capabilities=capabilities,
     )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(
-                json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    return name
+
+
+def build_run_capability_evidence(
+    *,
+    mode: str,
+    status: str,
+) -> Tuple[CapabilityEvidence, ...]:
+    """Describe every normative capability without overclaiming local evidence."""
+
+    exercised = (
+        {"SOURCE_INTEGRATION", "INTEGRATED_ANALYTICS", "OPERATIONAL_MODES"}
+        if mode == "OBSERVE"
+        else {"SAFETY_CORE", "TOOL_CONTRACT"}
+    )
+    evidence_paths = ("result.json", "report.md", "events.jsonl")
+    capabilities = []
+    for name in _REQUIRED_CAPABILITIES:
+        was_exercised = name in exercised
+        limitations = (
+            (
+                "Локальные evidence типа SIMULATED не заменяют обязательные "
+                "REAL_READ_ONLY или CONTROLLED_PILOT."
             )
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_name, path)
-    finally:
-        if os.path.exists(temporary_name):
-            os.unlink(temporary_name)
+            if was_exercised
+            else "Эта способность не проверялась в данном запуске."
+        )
+        if status != "SUCCEEDED" and was_exercised:
+            limitations = "Локальная проверка способности завершилась неуспешно."
+        capabilities.append(
+            CapabilityEvidence(
+                capability=name,
+                status="NOT_PROVEN" if was_exercised else "NOT_TESTED",
+                evidence_type="SIMULATED",
+                acceptance_cases=_CAPABILITY_ACCEPTANCE_CASES[name],
+                evidence_paths=evidence_paths if was_exercised else (),
+                limitations=(limitations,),
+            )
+        )
+    return tuple(capabilities)
+
+
+def capability_report_section(*, mode: str, status: str) -> str:
+    """Render every normative capability directly into the human report."""
+
+    lines = ["", "## Способности", ""]
+    for item in build_run_capability_evidence(mode=mode, status=status):
+        paths = ", ".join(item.evidence_paths) if item.evidence_paths else "нет"
+        limitations = " ".join(item.limitations)
+        lines.append(
+            "- "
+            + item.capability
+            + ": status="
+            + item.status
+            + "; evidence_type="
+            + item.evidence_type
+            + "; evidence_paths="
+            + paths
+            + "; limitations="
+            + limitations
+        )
+    return "\n".join(lines) + "\n"

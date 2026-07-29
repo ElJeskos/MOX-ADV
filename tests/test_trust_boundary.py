@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -11,17 +12,35 @@ import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
+from mox_adv.approval_execution import (
+    ApprovalRequiredPolicy,
+    ExecutionFacts,
+    ExecutionRequest,
+)
 from mox_adv.audit import (
     AuditAnchorVerificationError,
     AuditIntegrityError,
     AuditWriteBlocked,
     SQLiteAuditJournal,
 )
-from mox_adv.egress import EgressDenied, HttpEgressGuard
+from mox_adv.commands import OptimizationAction, calculate_relative_target
+from mox_adv.control_state import PreparedChange, TrustedScope
+from mox_adv.egress import (
+    CredentialProfile,
+    EgressAuthority,
+    EgressDenied,
+    HttpEgressGuard,
+)
+from mox_adv.model_provider import DeterministicFakeModelProvider
+from mox_adv.proposal_store import ImmutableProposalStore
+from mox_adv.recommend_service import RecommendationService
 from mox_adv.trust_boundary import (
     AuditGuardedFakeWriteAdapter,
     CapabilityEvidence,
+    DurablePreWriteAudit,
+    MacOSKeychainAuditAnchorSigner,
     SecretCanaryScanner,
     verify_injection_fixture,
     write_capability_evidence_summary,
@@ -88,12 +107,12 @@ class InjectionBoundaryTests(unittest.TestCase):
                     projection,
                     policy,
                 )
-                self.assertTrue(result.instruction_remained_data)
+                self.assertTrue(result.untrusted_text_excluded)
                 self.assertTrue(result.authority_unchanged)
                 self.assertTrue(result.policy_unchanged)
                 self.assertNotIn(
                     result.injection_text,
-                    json.dumps(result.projection, sort_keys=True),
+                    json.dumps(dict(result.projection), sort_keys=True),
                 )
                 self.assertTrue(
                     {
@@ -108,10 +127,153 @@ class InjectionBoundaryTests(unittest.TestCase):
                     }.isdisjoint(result.projection),
                 )
 
+    def test_each_surface_passes_actual_proposal_and_policy_without_authority_change(
+        self,
+    ) -> None:
+        policy = load_json(POLICY)
+        projection_fixture = load_json(PROJECTION)
+        paths = sorted(SECURITY_FIXTURES.glob("injection-*.json"))
+        with tempfile.TemporaryDirectory() as directory:
+            provider = DeterministicFakeModelProvider()
+            service = RecommendationService(
+                provider,
+                ImmutableProposalStore(Path(directory)),
+            )
+            for path in paths:
+                fixture = load_json(path)
+                verification = verify_injection_fixture(
+                    fixture,
+                    projection_fixture,
+                    policy,
+                )
+                outcome = service.recommend(
+                    projection=verification.projection,
+                    run_id="run-" + str(fixture["surface"]),
+                    snapshot_id="sha256:" + "a" * 64,
+                    expected_fingerprint="sha256:" + "b" * 64,
+                    created_at="2026-07-30T12:00:00+00:00",
+                    expires_at="2026-07-30T12:30:00+00:00",
+                )
+                with self.subTest(fixture=path.name):
+                    self.assertEqual("READY", outcome.status)
+                    self.assertEqual("NOT_STARTED", outcome.execution_status)
+                    self.assertIsNotNone(outcome.proposal)
+                    proposal = outcome.proposal
+                    assert proposal is not None
+                    serialized = json.dumps(proposal.as_dict(), sort_keys=True)
+                    for text in fixture["untrusted_payload"].values():
+                        if isinstance(text, str):
+                            self.assertNotIn(text, serialized)
+                    self.assertTrue(
+                        {
+                            "target",
+                            "method",
+                            "tool",
+                            "credential_profile",
+                            "authority",
+                            "approval",
+                            "mandate",
+                        }.isdisjoint(proposal.as_dict()),
+                    )
+                    prepared = self._prepared_change(proposal.proposal_id)
+                    request = self._execution_request(prepared)
+                    decision = ApprovalRequiredPolicy(policy).evaluate(
+                        prepared,
+                        request,
+                    )
+                    self.assertTrue(decision.allowed, decision.reason_code)
+            self.assertEqual(5, provider.invocation_count)
+
+    def test_personal_and_commercial_source_fields_are_removed(self) -> None:
+        fixture = load_json(SECURITY_FIXTURES / "sensitive-source-fields.json")
+
+        result = verify_injection_fixture(
+            fixture,
+            load_json(PROJECTION),
+            load_json(POLICY),
+        )
+
+        serialized = json.dumps(dict(result.projection), sort_keys=True)
+        self.assertNotIn("person@example.invalid", serialized)
+        self.assertNotIn("Synthetic Customer", serialized)
+        self.assertNotIn("commercial_margin", result.projection)
+
+    @staticmethod
+    def _prepared_change(proposal_id: str) -> PreparedChange:
+        current = 2_000_000_000
+        return PreparedChange(
+            proposal_id=proposal_id,
+            proposal_hash="sha256:" + "1" * 64,
+            scope=TrustedScope(
+                organization="sim-organization",
+                connection="sim-connection",
+                account="sim-direct-account",
+                campaign="sim-campaign",
+                writer="sim-executor",
+            ),
+            action=OptimizationAction.INCREASE_WEEKLY_BUDGET,
+            current_value=current,
+            target_value=calculate_relative_target(current, 10),
+            expected_diff={
+                "operation": "INCREASE_WEEKLY_BUDGET",
+                "relative_step_percent": 10,
+            },
+            snapshot_id="sha256:" + "a" * 64,
+            snapshot_generated_at="2026-07-30T11:55:00+00:00",
+            direct_watermark="2026-07-30T11:55:00+00:00",
+            metrika_watermark="2026-07-30T11:55:00+00:00",
+            policy_version="mox-adv-gate0-2026-07-29",
+            expected_fingerprint="sha256:" + "b" * 64,
+            risk="WEEKLY_BUDGET_INCREASE",
+        )
+
+    @staticmethod
+    def _execution_request(prepared: PreparedChange) -> ExecutionRequest:
+        return ExecutionRequest(
+            proposal_id=prepared.proposal_id,
+            execution_key=prepared.execution_key(),
+            scope=prepared.scope,
+            facts=ExecutionFacts(
+                mode="APPROVAL_REQUIRED",
+                automation_enabled=True,
+                comparability_status="COMPARABLE",
+                confidence_status="READY",
+                financial_recommendations_allowed=True,
+                direct_age_minutes=5,
+                metrika_age_minutes=5,
+                watermark_skew_minutes=1,
+                clicks=100,
+                conversions=12,
+                impressions=10_000,
+                spend_rub=1_900,
+                cpa_rub="791.67",
+                budget_utilization_percent="95",
+                ctr_percent="1",
+                campaign_state="ON",
+                campaign_strategy="HIGHEST_POSITION",
+                current_fingerprint="sha256:" + "b" * 64,
+                cooldown_active=False,
+                actions_in_last_24h=0,
+                cumulative_daily_change_percent=0,
+                monetary_exposure_rub=200,
+                kill_switch_available=True,
+            ),
+        )
+
 
 class ExactEgressBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.guard = HttpEgressGuard(load_json(POLICY))
+        policy = load_json(POLICY)
+        bindings = policy["bindings"]
+        assert isinstance(bindings, dict)
+        pilot = bindings["pilot"]
+        assert isinstance(pilot, dict)
+        pilot["direct_account"] = "pilot-account"
+        pilot["test_counter"] = "test-counter"
+        pilot["pilot_counter"] = "pilot-counter"
+        pilot["test_site_zone"] = "test-site-zone"
+        pilot["pilot_site_zone"] = "pilot-site-zone"
+        self.guard = HttpEgressGuard(policy)
 
     def test_exact_read_and_write_profiles_are_bound_to_matrix_entries(self) -> None:
         self.guard.authorize(
@@ -120,15 +282,21 @@ class ExactEgressBoundaryTests(unittest.TestCase):
             version="v5",
             service="Reports",
             operation="get",
-            credential_profile="DIRECT_PROD_READ",
+            authority=EgressAuthority(
+                CredentialProfile.DIRECT_PROD_READ,
+                "pilot-account",
+            ),
         )
         self.guard.authorize(
             "GET",
-            "https://api-metrika.yandex.net/stat/v1/data?ids=1",
+            "https://api-metrika.yandex.net/stat/v1/data?ids=test-counter",
             version="v1",
             service="Statistics",
             operation="get",
-            credential_profile="METRIKA_TEST_WRITE",
+            authority=EgressAuthority(
+                CredentialProfile.METRIKA_TEST_WRITE,
+                "test-counter",
+            ),
         )
 
     def test_every_egress_mutation_fails_closed(self) -> None:
@@ -139,7 +307,10 @@ class ExactEgressBoundaryTests(unittest.TestCase):
                 "version": "v5",
                 "service": "Reports",
                 "operation": "get",
-                "credential_profile": "DIRECT_PROD_READ",
+                "authority": EgressAuthority(
+                    CredentialProfile.DIRECT_PROD_READ,
+                    "pilot-account",
+                ),
             },
             {
                 "http_method": "POST",
@@ -147,7 +318,10 @@ class ExactEgressBoundaryTests(unittest.TestCase):
                 "version": "v5",
                 "service": "Reports",
                 "operation": "get",
-                "credential_profile": "DIRECT_PROD_READ",
+                "authority": EgressAuthority(
+                    CredentialProfile.DIRECT_PROD_READ,
+                    "pilot-account",
+                ),
             },
             {
                 "http_method": "GET",
@@ -155,7 +329,10 @@ class ExactEgressBoundaryTests(unittest.TestCase):
                 "version": "v5",
                 "service": "Reports",
                 "operation": "get",
-                "credential_profile": "DIRECT_PROD_READ",
+                "authority": EgressAuthority(
+                    CredentialProfile.DIRECT_PROD_READ,
+                    "pilot-account",
+                ),
             },
             {
                 "http_method": "POST",
@@ -163,7 +340,10 @@ class ExactEgressBoundaryTests(unittest.TestCase):
                 "version": "v5",
                 "service": "Reports",
                 "operation": "unknown",
-                "credential_profile": "DIRECT_PROD_READ",
+                "authority": EgressAuthority(
+                    CredentialProfile.DIRECT_PROD_READ,
+                    "pilot-account",
+                ),
             },
             {
                 "http_method": "POST",
@@ -171,7 +351,10 @@ class ExactEgressBoundaryTests(unittest.TestCase):
                 "version": "v5",
                 "service": "Reports",
                 "operation": "get",
-                "credential_profile": "DIRECT_PILOT_WRITE",
+                "authority": EgressAuthority(
+                    CredentialProfile.DIRECT_PILOT_WRITE,
+                    "pilot-account",
+                ),
             },
         )
         for case in cases:
@@ -185,12 +368,214 @@ class ExactEgressBoundaryTests(unittest.TestCase):
                 version="v5",
                 service="Reports",
                 operation="get",
-                credential_profile="DIRECT_PROD_READ",
+                authority=EgressAuthority(
+                    CredentialProfile.DIRECT_PROD_READ,
+                    "pilot-account",
+                ),
                 redirected=True,
             )
 
+    def test_metrika_profile_and_counter_must_match_exact_binding(self) -> None:
+        cases = (
+            (
+                CredentialProfile.METRIKA_TEST_WRITE,
+                "pilot-counter",
+                "pilot-counter",
+            ),
+            (
+                CredentialProfile.METRIKA_PILOT_WRITE,
+                "test-counter",
+                "test-counter",
+            ),
+            (
+                CredentialProfile.METRIKA_TEST_WRITE,
+                "test-counter",
+                "pilot-counter",
+            ),
+        )
+        for profile, trusted_target, url_counter in cases:
+            with self.subTest(profile=profile), self.assertRaises(EgressDenied):
+                self.guard.authorize(
+                    "GET",
+                    "https://api-metrika.yandex.net/stat/v1/data?ids=" + url_counter,
+                    version="v1",
+                    service="Statistics",
+                    operation="get",
+                    authority=EgressAuthority(profile, trusted_target),
+                )
+
+    def test_browser_profile_site_zone_and_counter_must_match_exact_binding(
+        self,
+    ) -> None:
+        policy = load_json(POLICY)
+        record = policy["record"]
+        assert isinstance(record, dict)
+        record["production_write_authorized"] = True
+        bindings = policy["bindings"]
+        assert isinstance(bindings, dict)
+        pilot = bindings["pilot"]
+        assert isinstance(pilot, dict)
+        pilot["test_counter"] = "test-counter"
+        pilot["pilot_counter"] = "pilot-counter"
+        pilot["test_site_zone"] = "test-site-zone"
+        pilot["pilot_site_zone"] = "pilot-site-zone"
+        guard = HttpEgressGuard(policy)
+
+        guard.authorize(
+            "POST",
+            "https://mc.yandex.ru/watch/test-counter",
+            version="tag-v1",
+            service="BrowserTag",
+            operation="reachGoal",
+            authority=EgressAuthority(
+                CredentialProfile.TEST_SITE_PUBLISH,
+                "test-site-zone",
+                counter_id="test-counter",
+            ),
+            pilot_armed=True,
+        )
+
+        cases = (
+            EgressAuthority(
+                CredentialProfile.TEST_SITE_PUBLISH,
+                "test-site-zone",
+                counter_id="pilot-counter",
+            ),
+            EgressAuthority(
+                CredentialProfile.TEST_SITE_PUBLISH,
+                "pilot-site-zone",
+                counter_id="test-counter",
+            ),
+            EgressAuthority(
+                CredentialProfile.PILOT_SITE_PUBLISH,
+                "pilot-site-zone",
+                counter_id="test-counter",
+            ),
+        )
+        for authority in cases:
+            with self.subTest(authority=authority), self.assertRaises(EgressDenied):
+                guard.authorize(
+                    "POST",
+                    "https://mc.yandex.ru/watch/test-counter",
+                    version="tag-v1",
+                    service="BrowserTag",
+                    operation="reachGoal",
+                    authority=authority,
+                    pilot_armed=True,
+                )
+
 
 class SignedAuditGateTests(unittest.TestCase):
+    @mock.patch("mox_adv.trust_boundary.subprocess.run")
+    def test_persisted_anchor_is_verified_by_new_keychain_signer_instance(
+        self,
+        run: mock.Mock,
+    ) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            args=["security"],
+            returncode=0,
+            stdout=b"fake-keychain-audit-key\n",
+            stderr=b"",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            control_state = Path(directory) / "control.sqlite3"
+            authorizer = DurablePreWriteAudit(
+                control_state,
+                "policy-v1",
+                MacOSKeychainAuditAnchorSigner(
+                    service="MOX_ADV_TEST_AUDIT_KEY",
+                    account="test-principal",
+                ),
+            )
+            authorizer.authorize("execution-1", "campaign-1", NOW)
+
+            verifier = DurablePreWriteAudit(
+                control_state,
+                "policy-v1",
+                MacOSKeychainAuditAnchorSigner(
+                    service="MOX_ADV_TEST_AUDIT_KEY",
+                    account="test-principal",
+                ),
+            )
+            anchor = verifier.verify_persisted(
+                "execution-1",
+                now=NOW + timedelta(minutes=1),
+                maximum_age=timedelta(minutes=15),
+            )
+
+            self.assertEqual(
+                "macos-keychain:MOX_ADV_TEST_AUDIT_KEY:test-principal",
+                anchor.key_id,
+            )
+            self.assertGreaterEqual(run.call_count, 3)
+            for call in run.call_args_list:
+                self.assertNotIn(
+                    "fake-keychain-audit-key",
+                    " ".join(call.args[0]),
+                )
+
+    @mock.patch("mox_adv.trust_boundary.subprocess.run")
+    def test_persisted_anchor_rejects_execution_and_policy_replay(
+        self,
+        run: mock.Mock,
+    ) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            args=["security"],
+            returncode=0,
+            stdout=b"fake-keychain-audit-key\n",
+            stderr=b"",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            control_state = Path(directory) / "control.sqlite3"
+            signer = MacOSKeychainAuditAnchorSigner(
+                service="MOX_ADV_TEST_AUDIT_KEY",
+                account="test-principal",
+            )
+            authorizer = DurablePreWriteAudit(
+                control_state,
+                "policy-v1",
+                signer,
+            )
+            authorizer.authorize("execution-1", "campaign-1", NOW)
+
+            source_digest = hashlib.sha256(b"execution-1").hexdigest()
+            replay_digest = hashlib.sha256(b"execution-2").hexdigest()
+            for suffix in (".sqlite3", ".anchor.json"):
+                shutil.copy2(
+                    authorizer.root / (source_digest + suffix),
+                    authorizer.root / (replay_digest + suffix),
+                )
+
+            replay_verifier = DurablePreWriteAudit(
+                control_state,
+                "policy-v1",
+                MacOSKeychainAuditAnchorSigner(
+                    service="MOX_ADV_TEST_AUDIT_KEY",
+                    account="test-principal",
+                ),
+            )
+            with self.assertRaisesRegex(AuditWriteBlocked, "AUDIT_ANCHOR_INVALID"):
+                replay_verifier.verify_persisted(
+                    "execution-2",
+                    now=NOW + timedelta(minutes=1),
+                    maximum_age=timedelta(minutes=15),
+                )
+
+            wrong_policy_verifier = DurablePreWriteAudit(
+                control_state,
+                "policy-v2",
+                MacOSKeychainAuditAnchorSigner(
+                    service="MOX_ADV_TEST_AUDIT_KEY",
+                    account="test-principal",
+                ),
+            )
+            with self.assertRaisesRegex(AuditWriteBlocked, "AUDIT_ANCHOR_INVALID"):
+                wrong_policy_verifier.verify_persisted(
+                    "execution-1",
+                    now=NOW + timedelta(minutes=1),
+                    maximum_age=timedelta(minutes=15),
+                )
+
     def test_signed_current_pre_write_anchor_allows_one_fake_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             journal = SQLiteAuditJournal(
@@ -397,9 +782,11 @@ class HostLauncherAndCanaryTests(unittest.TestCase):
                     channels={
                         "source": "\n".join(
                             path.read_text(encoding="utf-8", errors="ignore")
-                            for path in (ROOT / "src").rglob("*.py")
+                            for source_root in (ROOT / "src", ROOT / "scripts")
+                            for path in source_root.rglob("*")
+                            if path.is_file()
                         ),
-                        "prompt": json.dumps(projection, sort_keys=True),
+                        "prompt": json.dumps(dict(projection), sort_keys=True),
                         "environment_variables": json.dumps(
                             environment, sort_keys=True
                         ),
@@ -460,6 +847,49 @@ class HostLauncherAndCanaryTests(unittest.TestCase):
                 self.assertEqual(2, completed.returncode)
                 self.assertFalse(marker.exists())
 
+    def test_container_failure_does_not_expose_ephemeral_credential(self) -> None:
+        canary = "FAILURE-CANARY-" + uuid.uuid4().hex
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            fake_keychain = temporary / "fake-security"
+            fake_keychain.write_text(
+                f"#!/bin/sh\nprintf '%s\\n' '{canary}'\n",
+                encoding="utf-8",
+            )
+            fake_keychain.chmod(0o700)
+            fake_docker = temporary / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                "/bin/cat >/dev/null\n"
+                "printf '%s\\n' 'Container failed safely.' >&2\n"
+                "exit 42\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o700)
+            environment = dict(os.environ)
+            environment["PATH"] = str(temporary) + os.pathsep + environment["PATH"]
+            environment["MOX_ADV_KEYCHAIN_COMMAND"] = str(fake_keychain)
+
+            completed = subprocess.run(
+                [
+                    str(LAUNCHER),
+                    "run-fixture",
+                    "--run-id",
+                    "safe-failure",
+                    "--credential-profile",
+                    "DIRECT_PROD_READ",
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(42, completed.returncode)
+            self.assertNotIn(canary, completed.stdout)
+            self.assertNotIn(canary, completed.stderr)
+
 
 class CapabilityEvidenceTests(unittest.TestCase):
     def test_summary_is_case_aligned_and_uses_honest_statuses(self) -> None:
@@ -474,36 +904,20 @@ class CapabilityEvidenceTests(unittest.TestCase):
                 policy_version="mox-adv-gate0-2026-07-29",
                 capabilities=(
                     CapabilityEvidence(
-                        capability="PROMPT_INJECTION_RESISTANCE",
-                        status="PROVEN",
+                        capability="SAFETY_CORE",
+                        status="NOT_PROVEN",
                         evidence_type="SIMULATED",
-                        acceptance_cases=("22", "22.1"),
+                        acceptance_cases=("22", "22.1", "23", "23.1"),
                         evidence_paths=(str(evidence_file),),
-                        limitations=("Local fixtures only.",),
+                        limitations=("Local security fixtures only.",),
                     ),
                     CapabilityEvidence(
-                        capability="SECRET_ISOLATION",
-                        status="PROVEN",
+                        capability="TOOL_CONTRACT",
+                        status="NOT_TESTED",
                         evidence_type="SIMULATED",
-                        acceptance_cases=("23",),
-                        evidence_paths=(str(evidence_file),),
-                        limitations=("Fake Keychain only.",),
-                    ),
-                    CapabilityEvidence(
-                        capability="TAMPER_EVIDENT_AUDIT",
-                        status="PROVEN",
-                        evidence_type="SIMULATED",
-                        acceptance_cases=("23.1",),
-                        evidence_paths=(str(evidence_file),),
-                        limitations=("Fake signer only.",),
-                    ),
-                    CapabilityEvidence(
-                        capability="HOST_DOCKER_BOUNDARY",
-                        status="PARTIAL",
-                        evidence_type="SIMULATED",
-                        acceptance_cases=("24",),
-                        evidence_paths=(str(evidence_file),),
-                        limitations=("Real Docker smoke is reported separately.",),
+                        acceptance_cases=("24", "27"),
+                        evidence_paths=(),
+                        limitations=("This capability was not exercised.",),
                     ),
                 ),
             )
@@ -512,7 +926,7 @@ class CapabilityEvidenceTests(unittest.TestCase):
 
             self.assertEqual("trust-boundary-evidence", summary["run_id"])
             self.assertEqual(
-                {"22", "22.1", "23", "23.1", "24"},
+                {"22", "22.1", "23", "23.1", "24", "27"},
                 {
                     case
                     for capability in summary["capabilities"]
@@ -522,7 +936,12 @@ class CapabilityEvidenceTests(unittest.TestCase):
             self.assertTrue(
                 all(
                     capability["status"]
-                    in {"PROVEN", "PARTIAL", "NOT_PROVEN", "INCONCLUSIVE"}
+                    in {
+                        "PROVEN",
+                        "NOT_PROVEN",
+                        "INCONCLUSIVE",
+                        "NOT_TESTED",
+                    }
                     for capability in summary["capabilities"]
                 )
             )

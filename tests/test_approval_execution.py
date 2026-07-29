@@ -20,6 +20,7 @@ from mox_adv.approval_execution import (
     PreparedChange,
     TrustedScope,
 )
+from mox_adv.audit import AuditWriteBlocked
 from mox_adv.cli import build_parser, main
 from mox_adv.commands import (
     CommandRejected,
@@ -34,9 +35,19 @@ from mox_adv.control_state import (
     ExecutionStatus,
     MacOSLocalPrincipalAuthenticator,
 )
-from mox_adv.egress import EgressDenied, HttpEgressGuard
+from mox_adv.egress import (
+    CredentialProfile,
+    EgressAuthority,
+    EgressDenied,
+    HttpEgressGuard,
+)
 from mox_adv.fake_write_adapter import FakeWriteAdapter
 from mox_adv.monitoring import DurableWriteWindowGate
+from mox_adv.trust_boundary import (
+    DurablePreWriteAudit,
+    PreWriteAudit,
+    SimulationAuditAnchorSigner,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "config" / "gate0-policy.json"
@@ -62,6 +73,19 @@ class RecordingElevatedVerifier:
     def verify(self, principal: AuthenticatedPrincipal) -> bool:
         self.calls += 1
         return self.allowed and principal.identity == "sviridov"
+
+
+class RejectingPreWriteAudit:
+    def __init__(self, reason: str = "AUDIT_ANCHOR_INVALID") -> None:
+        self.reason = reason
+
+    def authorize(
+        self,
+        _execution_key: str,
+        _target_key: str,
+        _occurred_at: datetime,
+    ) -> None:
+        raise AuditWriteBlocked(self.reason)
 
 
 def load_policy() -> dict[str, object]:
@@ -224,19 +248,22 @@ class ApprovalExecutionTests(unittest.TestCase):
         self,
         adapter: FakeWriteAdapter,
         now: datetime = NOW,
+        pre_write_audit: Optional[PreWriteAudit] = None,
     ) -> ApprovalExecutionService:
         return ApprovalExecutionService(
             policy=load_policy(),
             state=self.state,
             adapter=adapter,
             clock=lambda: now,
+            pre_write_audit=pre_write_audit,
         )
 
     def test_happy_path_is_applied_only_after_exact_fake_readback(self) -> None:
         adapter = FakeWriteAdapter(
             initial_state={self.prepared.target_key(): self.prepared.current_value}
         )
-        result = self.service(adapter).execute(make_request(self.prepared))
+        service = self.service(adapter)
+        result = service.execute(make_request(self.prepared))
 
         self.assertEqual("APPLIED", result.status)
         self.assertEqual(1, adapter.write_calls)
@@ -248,6 +275,73 @@ class ApprovalExecutionTests(unittest.TestCase):
             .load_execution(self.prepared.execution_key())
             .status,
         )
+        audit_root = self.database.parent / (
+            "." + self.database.name + ".pre-write-audit"
+        )
+        self.assertEqual(1, len(list(audit_root.glob("*.sqlite3"))))
+        anchors = list(audit_root.glob("*.anchor.json"))
+        self.assertEqual(1, len(anchors))
+        anchor = json.loads(anchors[0].read_text(encoding="utf-8"))
+        self.assertEqual(
+            "simulation-audit-anchor-v1",
+            anchor["key_id"],
+        )
+        self.assertTrue(anchor["signature"])
+        verifier = DurablePreWriteAudit(
+            self.database,
+            str(load_policy()["policy_id"]),
+            SimulationAuditAnchorSigner(),
+        )
+        persisted = verifier.verify_persisted(
+            self.prepared.execution_key(),
+            now=NOW + timedelta(minutes=1),
+            maximum_age=timedelta(minutes=15),
+        )
+        self.assertEqual(anchor, persisted.as_dict())
+
+    def test_missing_or_stale_pre_write_anchor_blocks_actual_approval_dispatch(
+        self,
+    ) -> None:
+        for reason in (
+            "PRE_WRITE_AUDIT_MISSING",
+            "AUDIT_ANCHOR_INVALID",
+            "AUDIT_EVIDENCE_UNAVAILABLE",
+        ):
+            with self.subTest(reason=reason):
+                state = DurableControlState(
+                    Path(self.temporary_directory.name) / (reason + ".sqlite3")
+                )
+                prepared = make_prepared(proposal_id="proposal-" + reason.lower())
+                state.register_prepared_change(prepared)
+                state.grant_approval(
+                    prepared.proposal_id,
+                    NOW + timedelta(minutes=15),
+                    "Exact approval.",
+                    self.principal,
+                    NOW,
+                )
+                adapter = FakeWriteAdapter(
+                    initial_state={prepared.target_key(): prepared.current_value}
+                )
+
+                result = ApprovalExecutionService(
+                    load_policy(),
+                    state,
+                    adapter,
+                    clock=lambda: NOW,
+                    pre_write_audit=RejectingPreWriteAudit(reason),
+                ).execute(make_request(prepared))
+
+                self.assertEqual("BLOCKED", result.status)
+                self.assertEqual(
+                    "AUDIT_EVIDENCE_UNAVAILABLE",
+                    result.reason_code,
+                )
+                self.assertEqual(0, adapter.write_calls)
+                self.assertEqual(
+                    "BLOCKED",
+                    state.load_execution(prepared.execution_key()).status,
+                )
 
     def test_durable_write_window_blocks_until_exact_72_hour_boundary(
         self,
@@ -808,22 +902,33 @@ class KillSwitchAndCliTests(unittest.TestCase):
 
 class EgressGuardTests(unittest.TestCase):
     def test_http_guard_allows_only_exact_matrix_reads(self) -> None:
-        guard = HttpEgressGuard(load_policy())
+        policy = load_policy()
+        pilot = policy["bindings"]["pilot"]
+        assert isinstance(pilot, dict)
+        pilot["direct_account"] = "pilot-account"
+        pilot["test_counter"] = "test-counter"
+        guard = HttpEgressGuard(policy)
         guard.authorize(
             "POST",
             "https://api.direct.yandex.com/json/v501/campaigns",
             version="v501",
             service="Campaigns",
             operation="get",
-            credential_profile="DIRECT_PILOT_WRITE",
+            authority=EgressAuthority(
+                CredentialProfile.DIRECT_PILOT_WRITE,
+                "pilot-account",
+            ),
         )
         guard.authorize(
             "GET",
-            "https://api-metrika.yandex.net/stat/v1/data?ids=1",
+            "https://api-metrika.yandex.net/stat/v1/data?ids=test-counter",
             version="v1",
             service="Statistics",
             operation="get",
-            credential_profile="METRIKA_TEST_WRITE",
+            authority=EgressAuthority(
+                CredentialProfile.METRIKA_TEST_WRITE,
+                "test-counter",
+            ),
         )
 
     def test_http_guard_rejects_path_host_version_method_and_redirect_changes(
@@ -833,6 +938,9 @@ class EgressGuardTests(unittest.TestCase):
         record = policy["record"]
         assert isinstance(record, dict)
         record["production_write_authorized"] = True
+        pilot = policy["bindings"]["pilot"]
+        assert isinstance(pilot, dict)
+        pilot["direct_account"] = "pilot-account"
         guard = HttpEgressGuard(policy)
         guard.authorize(
             "POST",
@@ -840,7 +948,10 @@ class EgressGuardTests(unittest.TestCase):
             version="v501",
             service="Campaigns",
             operation="update",
-            credential_profile="DIRECT_PILOT_WRITE",
+            authority=EgressAuthority(
+                CredentialProfile.DIRECT_PILOT_WRITE,
+                "pilot-account",
+            ),
             pilot_armed=True,
         )
         cases = (
@@ -893,7 +1004,10 @@ class EgressGuardTests(unittest.TestCase):
                     version=version,
                     service=service,
                     operation=operation,
-                    credential_profile="DIRECT_PILOT_WRITE",
+                    authority=EgressAuthority(
+                        CredentialProfile.DIRECT_PILOT_WRITE,
+                        "pilot-account",
+                    ),
                     redirected=redirected,
                     pilot_armed=True,
                 )
@@ -933,6 +1047,39 @@ class EgressGuardTests(unittest.TestCase):
         self.assertEqual("BLOCKED", result.status)
         self.assertEqual("EXTERNAL_WRITE_EGRESS_DENIED", result.reason_code)
         self.assertEqual(0, adapter.calls)
+
+    def test_fake_marker_and_subclass_cannot_bypass_the_sealed_boundary(self) -> None:
+        class SpoofedFakeAdapter(FakeWriteAdapter):
+            network_calls = 0
+
+            def apply(self, target_key: str, command: object) -> None:
+                self.network_calls += 1
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state = DurableControlState(Path(temporary_directory) / "control.sqlite3")
+            prepared = make_prepared(proposal_id="proposal-spoofed-fake")
+            state.register_prepared_change(prepared)
+            state.grant_approval(
+                prepared.proposal_id,
+                NOW + timedelta(minutes=15),
+                "Exact approval.",
+                FixedAuthenticator().authenticate(),
+                NOW,
+            )
+            adapter = SpoofedFakeAdapter(
+                initial_state={prepared.target_key(): prepared.current_value}
+            )
+
+            result = ApprovalExecutionService(
+                load_policy(),
+                state,
+                adapter,
+                clock=lambda: NOW,
+            ).execute(make_request(prepared))
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual("EXTERNAL_WRITE_EGRESS_DENIED", result.reason_code)
+        self.assertEqual(0, adapter.network_calls)
 
 
 if __name__ == "__main__":

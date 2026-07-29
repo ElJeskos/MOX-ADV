@@ -38,6 +38,10 @@ from mox_adv.internal_api.v1 import (
     MetrikaReportReadAPI,
 )
 from mox_adv.normalization import IntegratedSnapshotNormalizerV1
+from mox_adv.trust_boundary import (
+    capability_report_section,
+    emit_run_capability_evidence,
+)
 
 LOCAL_FIXTURE_CAMPAIGNS = {"linked-observe": "sim-campaign"}
 
@@ -235,6 +239,7 @@ def _report(
                 f"Pacing: `{snapshot.display_metrics['pacing_percent']}%`.",
                 "Write-proposal не создавался, executor не вызывался.",
                 "Внешние изменяющие запросы не отправлялись.",
+                "Сводка capabilities: `capability-evidence.json`.",
             ]
         )
     else:
@@ -245,9 +250,17 @@ def _report(
                 f"Код ошибки: `{error_code or 'INTERNAL_FAILURE'}`.",
                 "Write-proposal не создавался, executor не вызывался.",
                 "Внешние изменяющие запросы не отправлялись.",
+                "Сводка capabilities: `capability-evidence.json`.",
             ]
         )
-    return "\n".join(lines) + "\n"
+    return (
+        "\n".join(lines)
+        + "\n"
+        + capability_report_section(
+            mode="OBSERVE",
+            status=status,
+        )
+    )
 
 
 def _result(
@@ -276,6 +289,7 @@ def _result(
         "external_write_sent": False,
         "snapshot_id": None if snapshot is None else snapshot.snapshot_id,
         "snapshot": None if snapshot is None else snapshot.as_dict(),
+        "capability_evidence_path": "capability-evidence.json",
         "started_at": started_at,
         "finished_at": _utc_now(),
         "duration_ms": max(
@@ -444,6 +458,13 @@ def run_observe_fixture(
             _report(run_id, "SUCCEEDED", snapshot, None),
         )
         journal.export_jsonl(workspace.path / "events.jsonl")
+        emit_run_capability_evidence(
+            workspace.path,
+            run_id=run_id,
+            policy_version=policy_version,
+            mode="OBSERVE",
+            status="SUCCEEDED",
+        )
         return RunOutcome(
             exit_code=0,
             run_id=run_id,
@@ -526,6 +547,13 @@ def _complete_rejection(
             _report(run_id, "REJECTED", None, error.code),
         )
         journal.export_jsonl(workspace.path / "events.jsonl")
+        emit_run_capability_evidence(
+            workspace.path,
+            run_id=run_id,
+            policy_version=policy_version,
+            mode="OBSERVE",
+            status="REJECTED",
+        )
         return RunOutcome(
             exit_code=2,
             run_id=run_id,

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional, Tuple
 
+from mox_adv.audit import AuditWriteBlocked
 from mox_adv.commands import (
     ACTION_SPECS,
     ActionFamily,
@@ -22,7 +23,14 @@ from mox_adv.control_state import (
     TrustedScope,
 )
 from mox_adv.egress import EgressDenied, HttpEgressGuard
-from mox_adv.fake_write_adapter import AdapterTimeout
+from mox_adv.fake_write_adapter import AdapterTimeout, FakeWriteAdapter
+from mox_adv.trust_boundary import (
+    DurablePreWriteAudit,
+    GuardedDispatchBoundary,
+    MacOSKeychainAuditAnchorSigner,
+    PreWriteAudit,
+    SimulationAuditAnchorSigner,
+)
 from mox_adv.write_window import DurableWriteWindowCoordinator
 
 __all__ = [
@@ -269,6 +277,7 @@ class ApprovalExecutionService:
         state: DurableControlState,
         adapter: Any,
         clock: Callable[[], Any],
+        pre_write_audit: Optional[PreWriteAudit] = None,
     ) -> None:
         self.policy = ApprovalRequiredPolicy(policy)
         self.state = state
@@ -279,6 +288,20 @@ class ApprovalExecutionService:
             state.path,
             policy,
             clock,
+        )
+        self.pre_write_audit = pre_write_audit or DurablePreWriteAudit(
+            state.path,
+            str(policy["policy_id"]),
+            (
+                SimulationAuditAnchorSigner()
+                if type(adapter) is FakeWriteAdapter
+                else MacOSKeychainAuditAnchorSigner()
+            ),
+        )
+        self.dispatch_boundary = GuardedDispatchBoundary(
+            self.pre_write_audit,
+            self.write_window,
+            self.clock,
         )
 
     def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
@@ -334,12 +357,20 @@ class ApprovalExecutionService:
                     approval,
                     self.clock(),
                     lambda: self.adapter.apply(prepared.target_key(), command),
-                    at_dispatch_boundary=lambda: self.write_window.reserve(
-                        prepared.execution_key()
+                    at_dispatch_boundary=lambda: self.dispatch_boundary.authorize(
+                        prepared.execution_key(),
+                        prepared.target_key(),
                     ),
                 )
             except AdapterTimeout:
                 return self._reconcile_timeout(prepared)
+            except AuditWriteBlocked:
+                self._finish_audit_block(prepared.execution_key())
+                return ExecutionOutcome(
+                    ExecutionStatus.BLOCKED,
+                    "AUDIT_EVIDENCE_UNAVAILABLE",
+                    None,
+                )
             if send_status != ExecutionStatus.IN_FLIGHT:
                 return ExecutionOutcome(
                     send_status,
@@ -397,6 +428,17 @@ class ApprovalExecutionService:
                 "CONTROL_STATE_UNAVAILABLE",
                 None,
             )
+
+    def _finish_audit_block(self, execution_key: str) -> None:
+        try:
+            self.state.finish_execution(
+                execution_key,
+                ExecutionStatus.BLOCKED,
+                "AUDIT_EVIDENCE_UNAVAILABLE",
+                self.clock(),
+            )
+        except (ControlRejected, sqlite3.Error):
+            pass
 
     def reconcile(self, execution_key: str) -> ExecutionOutcome:
         """Resolve a durable RESERVED or IN_FLIGHT operation without a retry."""

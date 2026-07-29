@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 from unittest import mock
 
+from mox_adv.audit import AuditWriteBlocked
 from mox_adv.autonomy import (
     BoundedAutonomyRequest,
     BoundedAutonomyService,
@@ -30,6 +31,7 @@ from mox_adv.control_state import (
 )
 from mox_adv.fake_write_adapter import FakeWriteAdapter
 from mox_adv.monitoring import DurableWriteWindowGate
+from mox_adv.trust_boundary import PreWriteAudit
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "config" / "gate0-policy.json"
@@ -45,6 +47,19 @@ class FixedAuthenticator:
 
     def elevated_reauthenticate(self) -> AuthenticatedPrincipal:
         return self.authenticate()
+
+
+class RejectingPreWriteAudit:
+    def __init__(self, reason: str = "AUDIT_ANCHOR_INVALID") -> None:
+        self.reason = reason
+
+    def authorize(
+        self,
+        _execution_key: str,
+        _target_key: str,
+        _occurred_at: datetime,
+    ) -> None:
+        raise AuditWriteBlocked(self.reason)
 
 
 def load_policy() -> dict[str, object]:
@@ -335,6 +350,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
         adapter: FakeWriteAdapter | object | None = None,
         now: datetime = NOW,
         request: BoundedAutonomyRequest | None = None,
+        pre_write_audit: PreWriteAudit | None = None,
     ):
         self.control.register_prepared_change(prepared)
         write_adapter = (
@@ -350,6 +366,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             write_adapter,
             clock=lambda: now,
+            pre_write_audit=pre_write_audit,
         )
         return service.execute(
             make_request(prepared, self.mandate) if request is None else request
@@ -373,6 +390,26 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
         self.assertEqual(1, usage.action_count)
         self.assertEqual(10, usage.total_monetary_exposure_rub)
         self.assertEqual(10, usage.daily_cumulative_change_percent)
+
+    def test_missing_or_stale_anchor_blocks_actual_mandate_dispatch(self) -> None:
+        prepared = make_prepared()
+        adapter = FakeWriteAdapter(
+            initial_state={prepared.target_key(): prepared.current_value}
+        )
+
+        result, _ = self.execute(
+            prepared,
+            adapter=adapter,
+            pre_write_audit=RejectingPreWriteAudit(),
+        )
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual("AUDIT_EVIDENCE_UNAVAILABLE", result.reason_code)
+        self.assertEqual(0, adapter.write_calls)
+        self.assertEqual(
+            "BLOCKED",
+            self.control.load_execution(prepared.execution_key()).status,
+        )
 
     def test_durable_write_window_blocks_until_exact_72_hour_boundary(
         self,

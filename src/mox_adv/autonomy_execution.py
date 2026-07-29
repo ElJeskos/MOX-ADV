@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import InvalidOperation
 from typing import Any, Callable, Mapping, Optional
 
+from mox_adv.audit import AuditWriteBlocked
 from mox_adv.autonomy_contracts import (
     BoundedAutonomyOutcome,
     BoundedAutonomyRequest,
@@ -24,6 +25,13 @@ from mox_adv.control_state import (
 from mox_adv.egress import EgressDenied, HttpEgressGuard
 from mox_adv.fake_write_adapter import AdapterTimeout, FakeWriteAdapter
 from mox_adv.mandate_store import DurableMandateAuthority
+from mox_adv.trust_boundary import (
+    DurablePreWriteAudit,
+    GuardedDispatchBoundary,
+    MacOSKeychainAuditAnchorSigner,
+    PreWriteAudit,
+    SimulationAuditAnchorSigner,
+)
 from mox_adv.write_window import DurableWriteWindowCoordinator
 
 
@@ -38,6 +46,7 @@ class BoundedAutonomyService:
         adapter: Any,
         clock: Callable[[], datetime],
         before_dispatch: Optional[Callable[[], None]] = None,
+        pre_write_audit: Optional[PreWriteAudit] = None,
     ) -> None:
         self.policy = BoundedAutonomyPolicy(policy)
         self.control_state = control_state
@@ -50,6 +59,20 @@ class BoundedAutonomyService:
             control_state.path,
             policy,
             clock,
+        )
+        self.pre_write_audit = pre_write_audit or DurablePreWriteAudit(
+            control_state.path,
+            str(policy["policy_id"]),
+            (
+                SimulationAuditAnchorSigner()
+                if type(adapter) is FakeWriteAdapter
+                else MacOSKeychainAuditAnchorSigner()
+            ),
+        )
+        self.dispatch_boundary = GuardedDispatchBoundary(
+            self.pre_write_audit,
+            self.write_window,
+            self.clock,
         )
 
     def execute(
@@ -106,6 +129,16 @@ class BoundedAutonomyService:
             return BoundedAutonomyOutcome(
                 ExecutionStatus.BLOCKED,
                 "EXTERNAL_WRITE_EGRESS_DENIED",
+                None,
+            )
+        except AuditWriteBlocked:
+            self._finish_active_as_blocked(
+                request.execution_key,
+                "AUDIT_EVIDENCE_UNAVAILABLE",
+            )
+            return BoundedAutonomyOutcome(
+                ExecutionStatus.BLOCKED,
+                "AUDIT_EVIDENCE_UNAVAILABLE",
                 None,
             )
         except ControlRejected as error:
@@ -278,8 +311,9 @@ class BoundedAutonomyService:
             self.clock(),
             lambda: self.adapter.apply(prepared.target_key(), command),
             before_dispatch=self.before_dispatch,
-            at_dispatch_boundary=lambda: self.write_window.reserve(
-                prepared.execution_key()
+            at_dispatch_boundary=lambda: self.dispatch_boundary.authorize(
+                prepared.execution_key(),
+                prepared.target_key(),
             ),
         )
         if send_status != ExecutionStatus.IN_FLIGHT:

@@ -41,6 +41,10 @@ from mox_adv.internal_api.v1 import (
 )
 from mox_adv.normalization import NormalizerV1
 from mox_adv.policy import SimulationPolicyV1
+from mox_adv.trust_boundary import (
+    capability_report_section,
+    emit_run_capability_evidence,
+)
 
 
 def _utc_now() -> str:
@@ -103,7 +107,7 @@ def _report(result: RunResult) -> str:
         )
     else:
         outcome = "Локальный simulation-run завершён контролируемой ошибкой."
-    return (
+    summary = (
         "# Отчёт MOX-ADV\n\n"
         f"{outcome}\n"
         f"Идентификатор запуска: `{result.run_id}`.\n"
@@ -113,6 +117,11 @@ def _report(result: RunResult) -> str:
         "Внешние изменяющие запросы не отправлялись.\n"
         f"Финальный номер audit-события: `{result.audit.final_sequence}`.\n"
         f"Финальный SHA-256 hash: `{result.audit.final_hash}`.\n"
+        f"Сводка capabilities: `{result.capability_evidence_path}`.\n"
+    )
+    return summary + capability_report_section(
+        mode=result.mode,
+        status=result.status,
     )
 
 
@@ -161,6 +170,7 @@ def _finalize(
         duration_ms=max(0, int((time.monotonic() - started_monotonic) * 1000)),
         stages=tuple(stages),
         technical_command=technical_command,
+        capability_evidence_path="capability-evidence.json",
         error=error,
         audit=AuditVerification(
             final_sequence=verification.final_sequence,
@@ -170,6 +180,13 @@ def _finalize(
     workspace.write_result(result)
     workspace.write_text("report.md", _report(result))
     journal.export_jsonl(workspace.path / "events.jsonl")
+    emit_run_capability_evidence(
+        workspace.path,
+        run_id=context.run_id,
+        policy_version=context.policy_version,
+        mode=context.mode,
+        status=result.status,
+    )
     return result
 
 
