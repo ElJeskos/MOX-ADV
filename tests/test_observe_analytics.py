@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from mox_adv.analytics import IntegratedAnalyticsEngineV1
 from mox_adv.connectors import (
     DirectCampaignStateReadConnectorV1,
     DirectReportsReadConnectorV1,
@@ -21,6 +22,9 @@ from mox_adv.connectors import (
     MetrikaReportReadConnectorV1,
 )
 from mox_adv.contracts import (
+    AnalyticsPeriod,
+    AnalyticsScope,
+    ConnectedAnalytics,
     DirectCampaignStateReadQuery,
     DirectReportsReadQuery,
     MetrikaReportReadQuery,
@@ -31,7 +35,6 @@ from mox_adv.normalization import IntegratedSnapshotNormalizerV1
 from mox_adv.observe import (
     load_linked_fixture,
     load_observe_policy,
-    read_observe_snapshot,
     run_observe_fixture,
     trusted_fixture_scope,
 )
@@ -56,7 +59,7 @@ def build_snapshot(
     connected = connector.read_linked(fixture)
     trusted_scope = trusted_fixture_scope(policy, connected.observation_id)
     fixture_reads = FixtureAnalyticsReadConnectorsV1(connected)
-    return read_observe_snapshot(
+    return normalize_typed_reads(
         policy=policy,
         observation_id=connected.observation_id,
         generated_at=connected.generated_at,
@@ -68,6 +71,74 @@ def build_snapshot(
         metrika_report=fixture_reads,
         baseline=connected.baseline,
     )
+
+
+def normalize_typed_reads(
+    *,
+    policy,
+    observation_id,
+    generated_at,
+    period_start,
+    period_end,
+    trusted_scope,
+    direct_reports,
+    direct_state,
+    metrika_report,
+    baseline,
+):
+    """Exercise the normalizer seam without creating a runtime fallback."""
+
+    direct_block = direct_reports.read_report(
+        DirectReportsReadQuery(
+            account=trusted_scope.account,
+            campaign=trusted_scope.campaign,
+            period_start=period_start,
+            period_end=period_end,
+            attribution=str(policy["attribution"]["direct"]),
+        )
+    )
+    state_block = direct_state.read_campaign_state(
+        DirectCampaignStateReadQuery(
+            account=trusted_scope.account,
+            campaign=trusted_scope.campaign,
+        )
+    )
+    metrika_block = metrika_report.read_metrika_report(
+        MetrikaReportReadQuery(
+            counter=trusted_scope.counter,
+            campaign=trusted_scope.campaign,
+            goal=trusted_scope.goal,
+            period_start=period_start,
+            period_end=period_end,
+            attribution=str(policy["attribution"]["metrika"]),
+        )
+    )
+    connected = ConnectedAnalytics(
+        observation_id=observation_id,
+        generated_at=generated_at,
+        scope=AnalyticsScope(
+            organization=trusted_scope.organization,
+            connection=trusted_scope.connection,
+            account=trusted_scope.account,
+            campaign=trusted_scope.campaign,
+            counter=trusted_scope.counter,
+            goal=trusted_scope.goal,
+        ),
+        requested_period=AnalyticsPeriod(
+            period_start=period_start,
+            period_end=period_end,
+        ),
+        direct_report=direct_block,
+        direct_state=state_block,
+        metrika_report=metrika_block,
+        baseline=baseline,
+    )
+    draft = IntegratedSnapshotNormalizerV1().normalize(
+        connected,
+        policy,
+        trusted_scope,
+    )
+    return IntegratedAnalyticsEngineV1().calculate(draft)
 
 
 class IntegratedAnalyticsTests(unittest.TestCase):
@@ -446,7 +517,7 @@ class ReadConnectorContractTests(unittest.TestCase):
         transport = RecordingReadTransport(fixture)
         trusted_scope = trusted_fixture_scope(policy, "linked-observe")
 
-        snapshot = read_observe_snapshot(
+        snapshot = normalize_typed_reads(
             policy=policy,
             observation_id="stubbed-production-read",
             generated_at=fixture["generated_at"],
@@ -493,7 +564,7 @@ class ReadConnectorContractTests(unittest.TestCase):
         transport = RecordingReadTransport(fixture)
         trusted_scope = trusted_fixture_scope(policy, "linked-observe")
 
-        snapshot = read_observe_snapshot(
+        snapshot = normalize_typed_reads(
             policy=policy,
             observation_id="wrong-period-response",
             generated_at=fixture["generated_at"],
@@ -519,7 +590,7 @@ class ReadConnectorContractTests(unittest.TestCase):
         )
         trusted_scope = trusted_fixture_scope(policy, "linked-observe")
 
-        snapshot = read_observe_snapshot(
+        snapshot = normalize_typed_reads(
             policy=policy,
             observation_id="wrong-attribution-response",
             generated_at=fixture["generated_at"],
@@ -545,7 +616,7 @@ class ReadConnectorContractTests(unittest.TestCase):
         )
         trusted_scope = trusted_fixture_scope(policy, "linked-observe")
 
-        snapshot = read_observe_snapshot(
+        snapshot = normalize_typed_reads(
             policy=policy,
             observation_id="wrong-timezone-response",
             generated_at=fixture["generated_at"],

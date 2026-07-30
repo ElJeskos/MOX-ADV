@@ -11,8 +11,8 @@ from playwright.sync_api import sync_playwright
 
 from mox_adv.ui_server import build_server
 from mox_adv.ui_service import UiRunService
-from mox_adv.yandex_read import HttpResponse
-from tests.test_yandex_read import (
+from mox_adv.yandex_transport import HttpResponse
+from tests.test_paired_production import (
     DIRECT_TOKEN,
     METRIKA_TOKEN,
     RecordingHttpClient,
@@ -41,11 +41,18 @@ class UiBrowserTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            configuration_path, environment_path = prepare_production_read_inputs(root)
+            (
+                paired_path,
+                direct_path,
+                metrika_path,
+                environment_path,
+            ) = prepare_production_read_inputs(root)
             http_client = RecordingHttpClient()
             reader = build_test_production_reader(
                 root,
-                configuration_path=configuration_path,
+                paired_configuration_path=paired_path,
+                direct_configuration_path=direct_path,
+                metrika_configuration_path=metrika_path,
                 environment_path=environment_path,
                 http_client=http_client,
             )
@@ -142,10 +149,17 @@ class UiBrowserTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            configuration_path, environment_path = prepare_production_read_inputs(root)
+            (
+                paired_path,
+                direct_path,
+                metrika_path,
+                environment_path,
+            ) = prepare_production_read_inputs(root)
             reader = build_test_production_reader(
                 root,
-                configuration_path=configuration_path,
+                paired_configuration_path=paired_path,
+                direct_configuration_path=direct_path,
+                metrika_configuration_path=metrika_path,
                 environment_path=environment_path,
                 http_client=ZeroConversionHttpClient(),
             )
@@ -185,7 +199,12 @@ class UiBrowserTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            configuration_path, environment_path = prepare_production_read_inputs(root)
+            (
+                paired_path,
+                direct_path,
+                metrika_path,
+                environment_path,
+            ) = prepare_production_read_inputs(root)
             content = environment_path.read_text(encoding="utf-8")
             environment_path.write_text(
                 content.replace(
@@ -198,7 +217,9 @@ class UiBrowserTests(unittest.TestCase):
             http_client = RecordingHttpClient()
             reader = build_test_production_reader(
                 root,
-                configuration_path=configuration_path,
+                paired_configuration_path=paired_path,
+                direct_configuration_path=direct_path,
+                metrika_configuration_path=metrika_path,
                 environment_path=environment_path,
                 http_client=http_client,
             )
@@ -247,11 +268,18 @@ class UiBrowserTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            configuration_path, environment_path = prepare_production_read_inputs(root)
+            (
+                paired_path,
+                direct_path,
+                metrika_path,
+                environment_path,
+            ) = prepare_production_read_inputs(root)
             http_client = RecordingHttpClient()
             reader = build_test_production_reader(
                 root,
-                configuration_path=configuration_path,
+                paired_configuration_path=paired_path,
+                direct_configuration_path=direct_path,
+                metrika_configuration_path=metrika_path,
                 environment_path=environment_path,
                 http_client=http_client,
             )
@@ -394,10 +422,17 @@ class UiBrowserTests(unittest.TestCase):
     def test_operator_sees_each_confirmed_read_only_stage_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            configuration_path, environment_path = prepare_production_read_inputs(root)
+            (
+                paired_path,
+                direct_path,
+                metrika_path,
+                environment_path,
+            ) = prepare_production_read_inputs(root)
             reader = build_test_production_reader(
                 root,
-                configuration_path=configuration_path,
+                paired_configuration_path=paired_path,
+                direct_configuration_path=direct_path,
+                metrika_configuration_path=metrika_path,
                 environment_path=environment_path,
                 http_client=RecordingHttpClient(),
             )

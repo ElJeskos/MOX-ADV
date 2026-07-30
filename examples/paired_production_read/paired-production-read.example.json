@@ -1,0 +1,13 @@
+{
+  "baseline": {
+    "clicks": 180,
+    "cost_micros": 4000000000,
+    "goal_visits": 4,
+    "impressions": 8000,
+    "source_campaign": "stored-baseline-campaign-id",
+    "visits": 260
+  },
+  "organization_id": "stored-organization-id",
+  "paired_connection_id": "stored-paired-connection-id",
+  "period_days": 7
+}

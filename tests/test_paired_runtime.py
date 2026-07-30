@@ -22,7 +22,6 @@ from mox_adv.modules.metrika import BoundMetrikaReadProviderV1, MetrikaModuleV1
 from mox_adv.observe import (
     load_linked_fixture,
     load_observe_policy,
-    read_observe_snapshot,
     trusted_fixture_scope,
 )
 from mox_adv.paired_runtime import (
@@ -92,27 +91,13 @@ def failed_result(module_id: str) -> ModuleResultV1:
 
 
 class PairedModuleRuntimeTests(unittest.TestCase):
-    def test_module_results_reconstruct_the_legacy_snapshot_byte_for_byte(
+    def test_module_results_reconstruct_the_approved_snapshot_exactly(
         self,
     ) -> None:
         policy = load_observe_policy(POLICY)
         fixture = load_linked_fixture(FIXTURE)
         connected = FixtureAnalyticsConnectorV1().read_linked(fixture)
         trusted_scope = trusted_fixture_scope(policy, connected.observation_id)
-        legacy_reads = FixtureAnalyticsReadConnectorsV1(connected)
-        legacy = read_observe_snapshot(
-            policy=policy,
-            observation_id=connected.observation_id,
-            generated_at=connected.generated_at,
-            period_start=connected.direct_report.period_start,
-            period_end=connected.direct_report.period_end,
-            trusted_scope=trusted_scope,
-            direct_reports=legacy_reads,
-            direct_state=legacy_reads,
-            metrika_report=legacy_reads,
-            baseline=connected.baseline,
-        )
-
         reads = CountingFixtureReads(connected)
         observed_at = datetime.fromisoformat(connected.generated_at)
         direct = DirectModuleV1(
@@ -163,16 +148,13 @@ class PairedModuleRuntimeTests(unittest.TestCase):
             baseline=connected.baseline,
         )
 
-        def canonical(value: object) -> str:
-            return json.dumps(
-                value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-
-        self.assertEqual(canonical(legacy.as_dict()), canonical(migrated.as_dict()))
-        self.assertEqual(legacy.snapshot_id, migrated.snapshot_id)
+        self.assertEqual(
+            (
+                "sha256:"
+                "ae97465bcf3f2bb45cae25898336f3e037dfd7ae12e5d45613335be72c2c4a28"
+            ),
+            migrated.snapshot_id,
+        )
         self.assertEqual(1, reads.direct_report_reads)
         self.assertEqual(1, reads.direct_state_reads)
         self.assertEqual(1, reads.metrika_report_reads)

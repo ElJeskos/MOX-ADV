@@ -31,7 +31,6 @@ from mox_adv.campaign_lifecycle import (
 from mox_adv.commands import OptimizationAction, calculate_relative_target
 from mox_adv.connectors import (
     FixtureAnalyticsConnectorV1,
-    FixtureAnalyticsReadConnectorsV1,
 )
 from mox_adv.control_state import (
     AuthenticatedPrincipal,
@@ -69,9 +68,9 @@ from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.monitoring import MonitoringRead, MonitoringScheduler, MonitoringStore
 from mox_adv.normalization import IntegratedSnapshotNormalizerV1
 from mox_adv.observe import (
+    collect_paired_fixture_snapshot_via_modules,
     load_linked_fixture,
     load_observe_policy,
-    read_observe_snapshot,
     run_observe_fixture,
     trusted_fixture_scope,
 )
@@ -424,18 +423,10 @@ def _build_snapshot():
         observe_policy,
         connected.observation_id,
     )
-    reads = FixtureAnalyticsReadConnectorsV1(connected)
-    return read_observe_snapshot(
+    return collect_paired_fixture_snapshot_via_modules(
         policy=observe_policy,
-        observation_id=connected.observation_id,
-        generated_at=connected.generated_at,
-        period_start=connected.direct_report.period_start,
-        period_end=connected.direct_report.period_end,
+        connected=connected,
         trusted_scope=trusted_scope,
-        direct_reports=reads,
-        direct_state=reads,
-        metrika_report=reads,
-        baseline=connected.baseline,
     )
 
 

@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any
 
-from mox_adv.analytics import IntegratedAnalyticsEngineV1
 from mox_adv.artifacts import RunWorkspace
 from mox_adv.audit import SQLiteAuditJournal
 from mox_adv.connectors import (
@@ -19,29 +19,17 @@ from mox_adv.connectors import (
 from mox_adv.contracts import (
     ARTIFACT_SCHEMA_VERSION,
     INTERNAL_API_VERSION,
-    AnalyticsPeriod,
-    AnalyticsScope,
     AuditVerification,
-    BaselineAggregate,
     ConnectedAnalytics,
-    DirectCampaignStateReadQuery,
-    DirectReportsReadQuery,
     IntegratedPerformanceSnapshot,
-    MetrikaReportReadQuery,
     RunOutcome,
     TrustedAnalyticsScope,
 )
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.errors import RunAlreadyExistsError, RunRejectedError
-from mox_adv.internal_api.v1 import (
-    DirectCampaignStateReadAPI,
-    DirectReportsReadAPI,
-    MetrikaReportReadAPI,
-)
 from mox_adv.module_api.v1 import InProcessModuleAdapterV1
 from mox_adv.modules.direct import BoundDirectReadProviderV1, DirectModuleV1
 from mox_adv.modules.metrika import BoundMetrikaReadProviderV1, MetrikaModuleV1
-from mox_adv.normalization import IntegratedSnapshotNormalizerV1
 from mox_adv.paired_runtime import PairedConnectionRefsV1, PairedModuleRuntimeV1
 from mox_adv.trust_boundary import (
     capability_report_section,
@@ -138,79 +126,61 @@ def trusted_fixture_scope(
         ) from error
 
 
-def read_observe_snapshot(
+def collect_paired_fixture_snapshot_via_modules(
     *,
     policy: Mapping[str, Any],
-    observation_id: str,
-    generated_at: str,
-    period_start: str,
-    period_end: str,
+    connected: ConnectedAnalytics,
     trusted_scope: TrustedAnalyticsScope,
-    direct_reports: DirectReportsReadAPI,
-    direct_state: DirectCampaignStateReadAPI,
-    metrika_report: MetrikaReportReadAPI,
-    baseline: Optional[BaselineAggregate] = None,
 ) -> IntegratedPerformanceSnapshot:
-    """Collect three typed read blocks and build one linked snapshot."""
+    """Collect a local paired fixture exclusively through both module seams."""
 
-    direct_block = direct_reports.read_report(
-        DirectReportsReadQuery(
-            account=trusted_scope.account,
-            campaign=trusted_scope.campaign,
-            period_start=period_start,
-            period_end=period_end,
-            attribution=str(policy["attribution"]["direct"]),
-        )
-    )
-    state_block = direct_state.read_campaign_state(
-        DirectCampaignStateReadQuery(
-            account=trusted_scope.account,
-            campaign=trusted_scope.campaign,
-        )
-    )
-    metrika_block = metrika_report.read_metrika_report(
-        MetrikaReportReadQuery(
-            counter=trusted_scope.counter,
-            campaign=trusted_scope.campaign,
-            goal=trusted_scope.goal,
-            period_start=period_start,
-            period_end=period_end,
-            attribution=str(policy["attribution"]["metrika"]),
-        )
-    )
-    connected = ConnectedAnalytics(
-        observation_id=observation_id,
-        generated_at=generated_at,
-        scope=AnalyticsScope(
-            organization=trusted_scope.organization,
-            connection=trusted_scope.connection,
-            account=trusted_scope.account,
-            campaign=trusted_scope.campaign,
-            counter=trusted_scope.counter,
-            goal=trusted_scope.goal,
+    fixture_reads = FixtureAnalyticsReadConnectorsV1(connected)
+    observed_at = datetime.fromisoformat(connected.generated_at)
+    direct_module = DirectModuleV1(
+        clock=lambda: observed_at,
+        provider_reader=BoundDirectReadProviderV1(
+            connection_id=trusted_scope.connection,
+            account_id=trusted_scope.account,
+            campaign_id=trusted_scope.campaign,
+            trusted_change_author=connected.direct_state.last_change_author,
+            report_reader=fixture_reads,
+            state_reader=fixture_reads,
         ),
-        requested_period=AnalyticsPeriod(
-            period_start=period_start,
-            period_end=period_end,
+        environment=ExecutionEnvironment.TEST,
+    )
+    metrika_module = MetrikaModuleV1(
+        clock=lambda: observed_at,
+        provider_reader=BoundMetrikaReadProviderV1(
+            connection_id=trusted_scope.connection,
+            counter_id=trusted_scope.counter,
+            goal_id=trusted_scope.goal,
+            campaign_id=trusted_scope.campaign,
+            reader=fixture_reads,
         ),
-        direct_report=direct_block,
-        direct_state=state_block,
-        metrika_report=metrika_block,
-        baseline=baseline,
     )
-    draft = IntegratedSnapshotNormalizerV1().normalize(
-        connected,
-        policy,
-        trusted_scope,
+    return PairedModuleRuntimeV1(
+        direct=InProcessModuleAdapterV1(
+            direct_module,
+            environment=ExecutionEnvironment.TEST,
+        ),
+        metrika=InProcessModuleAdapterV1(
+            metrika_module,
+            environment=ExecutionEnvironment.TEST,
+        ),
+        environment=ExecutionEnvironment.TEST,
+    ).collect_snapshot(
+        policy=policy,
+        observation_id=connected.observation_id,
+        generated_at=connected.generated_at,
+        period_start=connected.direct_report.period_start,
+        period_end=connected.direct_report.period_end,
+        trusted_scope=trusted_scope,
+        connection_refs=PairedConnectionRefsV1(
+            direct=trusted_scope.connection,
+            metrika=trusted_scope.connection,
+        ),
+        baseline=connected.baseline,
     )
-    snapshot = IntegratedAnalyticsEngineV1().calculate(draft)
-    if not IntegratedSnapshotNormalizerV1.verify_fingerprint(snapshot.as_dict()):
-        raise RunRejectedError(
-            "SNAPSHOT_FINGERPRINT_MISMATCH",
-            "analytics",
-            "The integrated snapshot fingerprint does not match its fields.",
-        )
-    return snapshot
 
 
 def _safe_rejected_run_id(rejected_run_id: str) -> str:
@@ -221,8 +191,8 @@ def _safe_rejected_run_id(rejected_run_id: str) -> str:
 def _report(
     run_id: str,
     status: str,
-    snapshot: Optional[IntegratedPerformanceSnapshot],
-    error_code: Optional[str],
+    snapshot: IntegratedPerformanceSnapshot | None,
+    error_code: str | None,
 ) -> str:
     lines = ["# Отчёт MOX-ADV OBSERVE", ""]
     if status == "SUCCEEDED" and snapshot is not None:
@@ -279,10 +249,10 @@ def _result(
     started_at: str,
     started_monotonic: float,
     audit: AuditVerification,
-    snapshot: Optional[IntegratedPerformanceSnapshot],
-    error_code: Optional[str],
-    error_stage: Optional[str],
-    error_message: Optional[str],
+    snapshot: IntegratedPerformanceSnapshot | None,
+    error_code: str | None,
+    error_stage: str | None,
+    error_message: str | None,
 ) -> Mapping[str, Any]:
     return {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
@@ -413,52 +383,10 @@ def run_observe_fixture(
             policy,
             connected.observation_id,
         )
-        fixture_reads = FixtureAnalyticsReadConnectorsV1(connected)
-        observed_at = datetime.fromisoformat(connected.generated_at)
-        direct_module = DirectModuleV1(
-            clock=lambda: observed_at,
-            provider_reader=BoundDirectReadProviderV1(
-                connection_id=trusted_scope.connection,
-                account_id=trusted_scope.account,
-                campaign_id=trusted_scope.campaign,
-                trusted_change_author=connected.direct_state.last_change_author,
-                report_reader=fixture_reads,
-                state_reader=fixture_reads,
-            ),
-            environment=ExecutionEnvironment.TEST,
-        )
-        metrika_module = MetrikaModuleV1(
-            clock=lambda: observed_at,
-            provider_reader=BoundMetrikaReadProviderV1(
-                connection_id=trusted_scope.connection,
-                counter_id=trusted_scope.counter,
-                goal_id=trusted_scope.goal,
-                campaign_id=trusted_scope.campaign,
-                reader=fixture_reads,
-            ),
-        )
-        snapshot = PairedModuleRuntimeV1(
-            direct=InProcessModuleAdapterV1(
-                direct_module,
-                environment=ExecutionEnvironment.TEST,
-            ),
-            metrika=InProcessModuleAdapterV1(
-                metrika_module,
-                environment=ExecutionEnvironment.TEST,
-            ),
-            environment=ExecutionEnvironment.TEST,
-        ).collect_snapshot(
+        snapshot = collect_paired_fixture_snapshot_via_modules(
             policy=policy,
-            observation_id=connected.observation_id,
-            generated_at=connected.generated_at,
-            period_start=connected.direct_report.period_start,
-            period_end=connected.direct_report.period_end,
+            connected=connected,
             trusted_scope=trusted_scope,
-            connection_refs=PairedConnectionRefsV1(
-                direct=trusted_scope.connection,
-                metrika=trusted_scope.connection,
-            ),
-            baseline=connected.baseline,
         )
         journal.append(
             "analytics.snapshot_ready",
@@ -535,7 +463,7 @@ def _complete_rejection(
     started_at: str,
     started_monotonic: float,
     error: RunRejectedError,
-    journal: Optional[SQLiteAuditJournal] = None,
+    journal: SQLiteAuditJournal | None = None,
 ) -> RunOutcome:
     owns_journal = journal is None
     if journal is None:

@@ -11,15 +11,19 @@ from typing import Any
 from unittest.mock import patch
 
 from mox_adv.connectors import (
-    DirectCampaignStateReadConnectorV1,
-    DirectReportsReadConnectorV1,
     FixtureAnalyticsConnectorV1,
-    MetrikaReportReadConnectorV1,
 )
-from mox_adv.contracts import VersionedReadRequest
-from mox_adv.observe import read_observe_snapshot, trusted_fixture_scope
+from mox_adv.contracts import (
+    AnalyticsPeriod,
+    AnalyticsScope,
+    ConnectedAnalytics,
+)
+from mox_adv.observe import (
+    collect_paired_fixture_snapshot_via_modules,
+    trusted_fixture_scope,
+)
+from mox_adv.paired_production import PairedYandexProductionReaderV1
 from mox_adv.ui_service import UiRunRejected, UiRunService
-from mox_adv.yandex_read import YandexProductionReader
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "config" / "gate0-policy.json"
@@ -68,13 +72,6 @@ class StubProductionReader:
             "write_flow": "DISABLED",
         }
 
-    def read(self, request: VersionedReadRequest) -> Any:
-        if request.system == "DIRECT_REPORTS":
-            return self.direct_report
-        if request.system == "DIRECT":
-            return self.direct_state
-        return self.metrika_report
-
     def collect_snapshot(
         self,
         *,
@@ -98,17 +95,30 @@ class StubProductionReader:
             retrieved_at=observed_at,
             watermark=observed_at,
         )
-        snapshot = read_observe_snapshot(
-            policy=policy,
+        connected = ConnectedAnalytics(
             observation_id=observation_id,
             generated_at=generated_at.isoformat(),
-            period_start=self.period_start,
-            period_end=self.period_end,
-            trusted_scope=self.scope,
-            direct_reports=DirectReportsReadConnectorV1(self),
-            direct_state=DirectCampaignStateReadConnectorV1(self),
-            metrika_report=MetrikaReportReadConnectorV1(self),
+            scope=AnalyticsScope(
+                organization=self.scope.organization,
+                connection=self.scope.connection,
+                account=self.scope.account,
+                campaign=self.scope.campaign,
+                counter=self.scope.counter,
+                goal=self.scope.goal,
+            ),
+            requested_period=AnalyticsPeriod(
+                period_start=self.period_start,
+                period_end=self.period_end,
+            ),
+            direct_report=self.direct_report,
+            direct_state=self.direct_state,
+            metrika_report=self.metrika_report,
             baseline=self.baseline,
+        )
+        snapshot = collect_paired_fixture_snapshot_via_modules(
+            policy=policy,
+            connected=connected,
+            trusted_scope=self.scope,
         )
         self.last_records = (
             {
@@ -155,9 +165,12 @@ class UiRunServiceTests(unittest.TestCase):
             root = Path(temporary)
             service = UiRunService(
                 root,
-                production_reader=YandexProductionReader(
-                    configuration_path=root / "missing-production-read.json",
-                    environment_path=root / "missing.env",
+                production_reader=PairedYandexProductionReaderV1(
+                    paired_configuration_path=root / "missing-paired.json",
+                    direct_configuration_path=root / "missing-direct.json",
+                    metrika_configuration_path=root / "missing-metrika.json",
+                    direct_environment_path=root / "missing.env",
+                    metrika_environment_path=root / "missing.env",
                 ),
             )
 
@@ -686,9 +699,12 @@ class UiRunServiceTests(unittest.TestCase):
             root = Path(temporary)
             service = UiRunService(
                 root,
-                production_reader=YandexProductionReader(
-                    configuration_path=root / "missing-production-read.json",
-                    environment_path=root / ".env",
+                production_reader=PairedYandexProductionReaderV1(
+                    paired_configuration_path=root / "missing-paired.json",
+                    direct_configuration_path=root / "missing-direct.json",
+                    metrika_configuration_path=root / "missing-metrika.json",
+                    direct_environment_path=root / ".env",
+                    metrika_environment_path=root / ".env",
                 ),
             )
 

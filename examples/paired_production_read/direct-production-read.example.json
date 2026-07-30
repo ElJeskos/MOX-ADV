@@ -1,0 +1,6 @@
+{
+  "account_id": "stored-direct-account-id",
+  "campaign_id": "stored-linked-campaign-id",
+  "connection_id": "stored-direct-connection-id",
+  "trusted_change_author": "trusted-operator-login"
+}

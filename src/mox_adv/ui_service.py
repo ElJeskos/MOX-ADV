@@ -35,6 +35,7 @@ from mox_adv.paired_cycle import (
     PairedDirectExecutionOutcomeV1,
     execute_paired_direct_test_action,
 )
+from mox_adv.paired_production import PairedYandexProductionReaderV1
 from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_contracts import OptimizationProposalV1, ProviderMetadata
 from mox_adv.recommend_projection import SanitizedProjection, build_sanitized_projection
@@ -49,7 +50,6 @@ from mox_adv.ui_automation import (
     validate_scenario,
 )
 from mox_adv.ui_evidence import write_dashboard_evidence_bundle
-from mox_adv.yandex_read import YandexProductionReader
 
 ROOT = Path(__file__).resolve().parents[2]
 POLICY_PATH = ROOT / "config" / "gate0-policy.json"
@@ -129,7 +129,7 @@ def production_readiness(
 ) -> dict[str, Any]:
     """Return readiness for the local read-only main mode."""
 
-    reader = production_reader or YandexProductionReader()
+    reader = production_reader or PairedYandexProductionReaderV1()
     reader_readiness = reader.readiness(policy)
     write_egress_disabled = (
         policy["environment"].get("simulation_write_egress") is False
@@ -892,7 +892,9 @@ class UiRunService:
         self.runs_root = runs_root
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self.policy = _read_json(POLICY_PATH)
-        self.production_reader = production_reader or YandexProductionReader()
+        self.production_reader = (
+            production_reader or PairedYandexProductionReaderV1()
+        )
         self.automation_store = AutomationStore(
             self.runs_root / "ui-test-automation.sqlite3",
             self.policy,

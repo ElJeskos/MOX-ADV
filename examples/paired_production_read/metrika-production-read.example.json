@@ -1,0 +1,6 @@
+{
+  "campaign_id": "stored-linked-campaign-id",
+  "connection_id": "stored-metrika-connection-id",
+  "counter_id": "stored-metrika-counter-id",
+  "goal_id": "stored-metrika-goal-id"
+}

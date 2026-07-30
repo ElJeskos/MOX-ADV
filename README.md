@@ -57,8 +57,8 @@ It creates the same three immutable run artifacts and includes the complete `Int
 The Russian report shows the calculated metrics and comparability status.
 The OBSERVE path does not create a write-proposal and does not invoke an executor.
 The fixture contains a read-only baseline, but its campaign identifier is removed before the decision-facing snapshot is created.
-The internal `read_observe_snapshot` path accepts the versioned Direct Reports, Direct campaign-state, and Metrika read connectors with an explicit trusted scope.
-Those connectors expose typed read queries and share no write-capable transport operation.
+The paired fixture path invokes the Direct and Metrika modules through the same in-process contract used by the paired production composition.
+Each provider module owns its typed read queries and exposes no write-capable production transport operation.
 
 ## Safety boundary
 
@@ -133,7 +133,11 @@ The Direct provider resolves only `YANDEX_DIRECT_OAUTH_TOKEN` and `YANDEX_DIRECT
 The Metrika provider resolves only `YANDEX_METRIKA_OAUTH_TOKEN`.
 The paired composition itself receives only stored connection references and typed `ModuleResultV1` values.
 It performs one Direct Reports read, one Direct campaign-state read, and one Metrika report read, and it exposes no provider write operation.
-The local configuration path defaults to `config/yandex-production-read.json`, and credentials are read from the local `.env` file without being added to reports, snapshots, or request records.
+The paired context defaults to `config/paired-production-read.json`.
+Direct and Metrika settings default to `config/direct-production-read.json` and `config/metrika-production-read.json`, respectively.
+The Direct composition reads only `.env.direct-read`, and the Metrika composition reads only `.env.metrika-read`.
+Each provider resolves only its own credential names, and credentials are never added to reports, snapshots, or request records.
+Non-secret split configuration examples and migration instructions are available in [`examples/paired_production_read/`](examples/paired_production_read/).
 
 ## Tests
 
