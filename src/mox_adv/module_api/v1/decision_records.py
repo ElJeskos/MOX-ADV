@@ -18,6 +18,7 @@ from mox_adv.module_api.v1.contracts import (
     MODULE_STATUSES,
     MetricValueV1,
     ModuleAssessmentV1,
+    ModuleHypothesisV1,
     ModuleIdentityV1,
     ModuleProvenanceV1,
     ModuleRecommendationV1,
@@ -44,12 +45,14 @@ class ModuleDecisionFactsV1:
     assessment: ModuleAssessmentV1
     recommendations: Tuple[ModuleRecommendationV1, ...]
     provenance: Tuple[ModuleProvenanceV1, ...]
+    hypotheses: Tuple[ModuleHypothesisV1, ...] = ()
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "metrics": [item.as_dict() for item in self.metrics],
             "assessment": self.assessment.as_dict(),
             "recommendations": [item.as_dict() for item in self.recommendations],
+            "hypotheses": [item.as_dict() for item in self.hypotheses],
             "provenance": [item.as_dict() for item in self.provenance],
         }
 

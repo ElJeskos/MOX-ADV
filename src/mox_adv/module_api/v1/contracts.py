@@ -653,6 +653,62 @@ class ModuleAssessmentV1:
 
 
 @dataclass(frozen=True)
+class ModuleHypothesisV1:
+    """One bounded hypothesis linked to normalized result metrics."""
+
+    code: str
+    summary: str
+    evidence_metric_names: Tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _text(self.code, "hypothesis.code", maximum=128)
+        _text(self.summary, "hypothesis.summary", maximum=1_000)
+        if not self.evidence_metric_names:
+            raise ContractValidationError(
+                "hypothesis.evidence_metric_names must not be empty"
+            )
+        if len(set(self.evidence_metric_names)) != len(
+            self.evidence_metric_names
+        ):
+            raise ContractValidationError(
+                "hypothesis.evidence_metric_names must not contain duplicates"
+            )
+        for name in self.evidence_metric_names:
+            _text(name, "hypothesis.evidence_metric_names[]", maximum=128)
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        field: str = "hypothesis",
+    ) -> "ModuleHypothesisV1":
+        _exact_fields(
+            value,
+            field=field,
+            required=("code", "summary", "evidence_metric_names"),
+        )
+        return cls(
+            code=_text(value["code"], f"{field}.code", maximum=128),
+            summary=_text(value["summary"], f"{field}.summary", maximum=1_000),
+            evidence_metric_names=tuple(
+                _text(item, f"{field}.evidence_metric_names[]", maximum=128)
+                for item in _array(
+                    value["evidence_metric_names"],
+                    f"{field}.evidence_metric_names",
+                )
+            ),
+        )
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "code": self.code,
+            "summary": self.summary,
+            "evidence_metric_names": list(self.evidence_metric_names),
+        }
+
+
+@dataclass(frozen=True)
 class ModuleRecommendationV1:
     code: str
     summary: str
@@ -947,6 +1003,7 @@ class ModuleResultV1:
     warnings: Tuple[ModuleWarningV1, ...]
     errors: Tuple[ModuleErrorV1, ...]
     decision_record_ref: Optional[str]
+    hypotheses: Tuple[ModuleHypothesisV1, ...] = ()
 
     def __post_init__(self) -> None:
         _one_of(
@@ -972,6 +1029,22 @@ class ModuleResultV1:
             raise ContractValidationError(
                 f"result.errors must not be empty when status is {status}"
             )
+        if len(self.hypotheses) > 3:
+            raise ContractValidationError(
+                "result must contain at most three hypotheses"
+            )
+        metric_names = {metric.name for metric in self.metrics}
+        for hypothesis in self.hypotheses:
+            if not isinstance(hypothesis, ModuleHypothesisV1):
+                raise ContractValidationError(
+                    "result.hypotheses must contain ModuleHypothesisV1 values"
+                )
+            unknown = set(hypothesis.evidence_metric_names) - metric_names
+            if unknown:
+                raise ContractValidationError(
+                    "hypothesis references an unknown metric: "
+                    + sorted(unknown)[0]
+                )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleResultV1":
@@ -992,7 +1065,7 @@ class ModuleResultV1:
                 "errors",
                 "decision_record_ref",
             ),
-            optional=("proposal", "execution_result"),
+            optional=("proposal", "execution_result", "hypotheses"),
         )
         proposal_value = value.get("proposal")
         execution_value = value.get("execution_result")
@@ -1075,6 +1148,15 @@ class ModuleResultV1:
                 value["decision_record_ref"],
                 "result.decision_record_ref",
                 maximum=500,
+            ),
+            hypotheses=tuple(
+                ModuleHypothesisV1.from_dict(
+                    _object(item, f"hypotheses[{index}]"),
+                    field=f"hypotheses[{index}]",
+                )
+                for index, item in enumerate(
+                    _array(value.get("hypotheses", ()), "hypotheses")
+                )
             ),
         )
 
@@ -1160,6 +1242,7 @@ class ModuleResultV1:
             "recommendations": [
                 item.as_dict() for item in self.recommendations
             ],
+            "hypotheses": [item.as_dict() for item in self.hypotheses],
             "proposal": None if self.proposal is None else self.proposal.as_dict(),
             "execution_result": (
                 None

@@ -73,6 +73,7 @@ Standalone Direct and Metrika integrations share `ModuleRequestV1` and `ModuleRe
 The in-process and HTTP/JSON adapters invoke the same `ModuleV1` interface, so the paired runtime can adopt the contract without an HTTP hop.
 Requests reference stored connections and accept only closed high-level operations and normalized scalar evidence.
 They have no fields for OAuth tokens, arbitrary endpoints, provider HTTP methods, headers, or raw Yandex payloads.
+Results can carry at most three typed hypotheses, and every hypothesis names the normalized result metrics that support it.
 An `EXECUTE` request expresses typed intent but grants no authority: the trusted module guard must block it in production and may execute it only through an approved test adapter.
 The published HTTP contract is [`openapi/module-api-v1.openapi.json`](openapi/module-api-v1.openapi.json).
 The Python operation mapping is canonical for the closed operation vocabulary, and a parity test requires OpenAPI to publish the same valid kind/type pairs.
@@ -89,6 +90,19 @@ Provider-owned reads use `BoundMetrikaReadProviderV1` to bind a stored connectio
 The module validates the closed period, daily grain, scope, attribution, timestamps, watermark ordering, and the six-hour Metrika freshness window.
 It returns the existing exact conversion-rate calculation, assessment, non-executable recommendations, provenance, warnings, typed errors, and a Decision Record reference.
 Because Metrika alone has no campaign spend or state, the standalone result is partial and never produces a financial proposal.
+
+## Standalone Direct
+
+`DirectModuleV1` runs headlessly through either the HTTP/JSON or in-process module adapter.
+It can start without Metrika, Metrika credentials, the Dashboard, or a provider reader when the customer supplies validated normalized Direct evidence.
+Build the independently installable headless wheel with `python3 packaging/direct/setup.py bdist_wheel`.
+The resulting `mox-adv-direct` distribution contains neither the Metrika module nor Dashboard assets.
+Provider-owned reads use `BoundDirectReadProviderV1` to bind a stored connection to one allowlisted account and campaign before the typed Direct Reports and campaign-state readers are called.
+The module validates the closed period, daily report grain, account and campaign scope, attribution, currency, state, managed values, UTC timestamps, watermark ordering, and the 30-minute Direct freshness window.
+It returns the existing exact CTR, CPC, budget-utilization, and pacing calculations together with normalized campaign state, managed values, provenance, warnings, distinct evidence-linked hypotheses, recommendations, typed errors, and a Decision Record reference.
+Customer evidence uses a closed metric vocabulary and cannot carry an arbitrary provider payload.
+Conversion-dependent conclusions remain partial until a valid provider-neutral conversion count is supplied.
+Standalone analysis is read-only and never produces an executable campaign proposal.
 
 ## Environment safety
 

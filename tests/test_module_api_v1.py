@@ -18,6 +18,7 @@ from mox_adv.module_api.v1 import (
     ModuleProposalV1,
     ModuleRequestV1,
     ModuleResultV1,
+    ModuleHypothesisV1,
     OPERATION_TYPES_BY_KIND,
 )
 from mox_adv.environment import ExecutionEnvironment
@@ -264,6 +265,36 @@ class ModuleRequestContractTests(unittest.TestCase):
                 ):
                     construct()
 
+    def test_result_limits_hypotheses_and_requires_metric_evidence(self) -> None:
+        result = ModuleResultV1.from_dict(successful_result_payload())
+        hypothesis = ModuleHypothesisV1(
+            code="LOW_CTR",
+            summary="The current ad may not match the search intent.",
+            evidence_metric_names=("ctr_percent", "impressions"),
+        )
+
+        with self.assertRaisesRegex(
+            ContractValidationError,
+            "at most three hypotheses",
+        ):
+            replace(
+                result,
+                hypotheses=(hypothesis, hypothesis, hypothesis, hypothesis),
+            )
+        with self.assertRaisesRegex(
+            ContractValidationError,
+            "unknown metric",
+        ):
+            replace(
+                result,
+                hypotheses=(
+                    replace(
+                        hypothesis,
+                        evidence_metric_names=("missing_metric",),
+                    ),
+                ),
+            )
+
     def test_production_execution_intent_remains_representable_for_policy_guard(
         self,
     ) -> None:
@@ -389,6 +420,25 @@ class OpenAPIContractTests(unittest.TestCase):
         }
 
         self.assertEqual(OPERATION_TYPES_BY_KIND, openapi_pairs)
+
+    def test_openapi_publishes_the_bounded_hypothesis_contract(self) -> None:
+        document = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+        schemas = document["components"]["schemas"]
+
+        self.assertEqual(
+            3,
+            schemas["ModuleResultV1"]["properties"]["hypotheses"]["maxItems"],
+        )
+        self.assertEqual(
+            1,
+            schemas["ModuleHypothesisV1"]["properties"][
+                "evidence_metric_names"
+            ]["minItems"],
+        )
+        self.assertIn(
+            "hypotheses",
+            schemas["ModuleResultV1"]["required"],
+        )
 
     def test_result_proposal_and_execution_are_optional_inputs(self) -> None:
         payload = successful_result_payload()
