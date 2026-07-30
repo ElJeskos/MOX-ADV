@@ -10,7 +10,13 @@ from mox_adv.connectors import (
     FixtureAnalyticsReadConnectorsV1,
 )
 from mox_adv.environment import ExecutionEnvironment
-from mox_adv.module_api.v1 import InProcessModuleAdapterV1
+from mox_adv.errors import RunRejectedError
+from mox_adv.module_api.v1 import (
+    InProcessModuleAdapterV1,
+    ModuleErrorV1,
+    ModuleIdentityV1,
+    ModuleResultV1,
+)
 from mox_adv.modules.direct import BoundDirectReadProviderV1, DirectModuleV1
 from mox_adv.modules.metrika import BoundMetrikaReadProviderV1, MetrikaModuleV1
 from mox_adv.observe import (
@@ -44,6 +50,45 @@ class CountingFixtureReads(FixtureAnalyticsReadConnectorsV1):
     def read_metrika_report(self, query: object):
         self.metrika_report_reads += 1
         return super().read_metrika_report(query)
+
+
+class StaticResultAdapter:
+    def __init__(self, result: ModuleResultV1) -> None:
+        self.result = result
+        self.invocations = 0
+
+    def invoke(self, request: object) -> ModuleResultV1:
+        del request
+        self.invocations += 1
+        return self.result
+
+
+def failed_result(module_id: str) -> ModuleResultV1:
+    return ModuleResultV1(
+        schema_version="module-result-v1",
+        run_id="failed-provider-run",
+        module=ModuleIdentityV1(
+            module_id=module_id,
+            module_version="1.0.0",
+        ),
+        status="FAILED",
+        metrics=(),
+        assessment=None,
+        recommendations=(),
+        proposal=None,
+        execution_result=None,
+        provenance=(),
+        warnings=(),
+        errors=(
+            ModuleErrorV1(
+                code="PROVIDER_READ_FAILED",
+                message="Provider result is unavailable.",
+                field=None,
+                retryable=True,
+            ),
+        ),
+        decision_record_ref=None,
+    )
 
 
 class PairedModuleRuntimeTests(unittest.TestCase):
@@ -131,6 +176,48 @@ class PairedModuleRuntimeTests(unittest.TestCase):
         self.assertEqual(1, reads.direct_report_reads)
         self.assertEqual(1, reads.direct_state_reads)
         self.assertEqual(1, reads.metrika_report_reads)
+
+    def test_invalid_direct_result_stops_before_metrika_and_is_not_passed(
+        self,
+    ) -> None:
+        policy = load_observe_policy(POLICY)
+        fixture = load_linked_fixture(FIXTURE)
+        connected = FixtureAnalyticsConnectorV1().read_linked(fixture)
+        trusted_scope = trusted_fixture_scope(policy, connected.observation_id)
+        direct = StaticResultAdapter(failed_result("YANDEX_DIRECT"))
+        metrika = StaticResultAdapter(failed_result("YANDEX_METRIKA"))
+        progress = []
+        runtime = PairedModuleRuntimeV1(
+            direct=direct,  # type: ignore[arg-type]
+            metrika=metrika,  # type: ignore[arg-type]
+            environment=ExecutionEnvironment.TEST,
+        )
+
+        with self.assertRaisesRegex(
+            RunRejectedError,
+            "Provider result is unavailable",
+        ):
+            runtime.collect_snapshot(
+                policy=policy,
+                observation_id=connected.observation_id,
+                generated_at=connected.generated_at,
+                period_start=connected.direct_report.period_start,
+                period_end=connected.direct_report.period_end,
+                trusted_scope=trusted_scope,
+                connection_refs=PairedConnectionRefsV1(
+                    direct="paired-direct",
+                    metrika="paired-metrika",
+                ),
+                baseline=connected.baseline,
+                progress_callback=lambda step, status: progress.append(
+                    (step, status)
+                ),
+            )
+
+        self.assertEqual(1, direct.invocations)
+        self.assertEqual(0, metrika.invocations)
+        self.assertNotIn(("direct", "PASSED"), progress)
+        self.assertNotIn(("metrika", "RUNNING"), progress)
 
     def test_openapi_publishes_the_lossless_paired_observation(self) -> None:
         specification = json.loads(

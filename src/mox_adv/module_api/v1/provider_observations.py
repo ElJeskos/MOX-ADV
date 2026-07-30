@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Mapping, Tuple, Union, cast
+from typing import Any, Dict, Mapping, Tuple, Union
 
 from mox_adv.contracts import (
     DirectCampaignStateBlock,
@@ -62,12 +62,15 @@ def _report_as_dict(
     return result
 
 
-def _direct_report_from_dict(
+def _report_envelope_from_dict(
     value: Mapping[str, Any],
-) -> DirectReportBlock:
+    *,
+    required_extra: Tuple[str, ...] = (),
+) -> Dict[str, str]:
+    field = "provider_observation.report"
     _exact_fields(
         value,
-        field="provider_observation.report",
+        field=field,
         required=(
             "source",
             "retrieved_at",
@@ -76,9 +79,46 @@ def _direct_report_from_dict(
             "period_end",
             "timezone",
             "attribution",
-            "currency",
+            *required_extra,
             "rows",
         ),
+    )
+    return {
+        "source": _text(value["source"], field + ".source", maximum=64),
+        "retrieved_at": _timestamp(
+            value["retrieved_at"],
+            field + ".retrieved_at",
+        ),
+        "watermark": _timestamp(
+            value["watermark"],
+            field + ".watermark",
+        ),
+        "period_start": _iso_date(
+            value["period_start"],
+            field + ".period_start",
+        ),
+        "period_end": _iso_date(
+            value["period_end"],
+            field + ".period_end",
+        ),
+        "timezone": _timezone(
+            value["timezone"],
+            field + ".timezone",
+        ),
+        "attribution": _text(
+            value["attribution"],
+            field + ".attribution",
+            maximum=64,
+        ),
+    }
+
+
+def _direct_report_from_dict(
+    value: Mapping[str, Any],
+) -> DirectReportBlock:
+    envelope = _report_envelope_from_dict(
+        value,
+        required_extra=("currency",),
     )
     rows = []
     for index, item in enumerate(
@@ -116,32 +156,7 @@ def _direct_report_from_dict(
             )
         )
     return DirectReportBlock(
-        source=_text(value["source"], "provider_observation.report.source", maximum=64),
-        retrieved_at=_timestamp(
-            value["retrieved_at"],
-            "provider_observation.report.retrieved_at",
-        ),
-        watermark=_timestamp(
-            value["watermark"],
-            "provider_observation.report.watermark",
-        ),
-        period_start=_iso_date(
-            value["period_start"],
-            "provider_observation.report.period_start",
-        ),
-        period_end=_iso_date(
-            value["period_end"],
-            "provider_observation.report.period_end",
-        ),
-        timezone=_timezone(
-            value["timezone"],
-            "provider_observation.report.timezone",
-        ),
-        attribution=_text(
-            value["attribution"],
-            "provider_observation.report.attribution",
-            maximum=64,
-        ),
+        **envelope,
         currency=_text(
             value["currency"],
             "provider_observation.report.currency",
@@ -223,20 +238,7 @@ def _direct_state_from_dict(
 def _metrika_report_from_dict(
     value: Mapping[str, Any],
 ) -> MetrikaReportBlock:
-    _exact_fields(
-        value,
-        field="provider_observation.report",
-        required=(
-            "source",
-            "retrieved_at",
-            "watermark",
-            "period_start",
-            "period_end",
-            "timezone",
-            "attribution",
-            "rows",
-        ),
-    )
+    envelope = _report_envelope_from_dict(value)
     rows = []
     for index, item in enumerate(
         _rows(value["rows"], "provider_observation.report.rows")
@@ -264,32 +266,7 @@ def _metrika_report_from_dict(
             )
         )
     return MetrikaReportBlock(
-        source=_text(value["source"], "provider_observation.report.source", maximum=64),
-        retrieved_at=_timestamp(
-            value["retrieved_at"],
-            "provider_observation.report.retrieved_at",
-        ),
-        watermark=_timestamp(
-            value["watermark"],
-            "provider_observation.report.watermark",
-        ),
-        period_start=_iso_date(
-            value["period_start"],
-            "provider_observation.report.period_start",
-        ),
-        period_end=_iso_date(
-            value["period_end"],
-            "provider_observation.report.period_end",
-        ),
-        timezone=_timezone(
-            value["timezone"],
-            "provider_observation.report.timezone",
-        ),
-        attribution=_text(
-            value["attribution"],
-            "provider_observation.report.attribution",
-            maximum=64,
-        ),
+        **envelope,
         rows=tuple(rows),
     )
 
@@ -403,4 +380,4 @@ def provider_observation_as_dict(
 ) -> Dict[str, Any]:
     if isinstance(value, DirectProviderObservationV1):
         return value.as_dict()
-    return cast(MetrikaProviderObservationV1, value).as_dict()
+    return value.as_dict()

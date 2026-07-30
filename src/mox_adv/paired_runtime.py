@@ -84,6 +84,7 @@ class PairedModuleRuntimeV1:
                 period_end=period_end,
             )
         )
+        direct_observation = self._direct_observation(direct_result)
         self._progress(progress_callback, "direct", "PASSED")
         self._progress(progress_callback, "metrika", "RUNNING")
         metrika_result = self._metrika.invoke(
@@ -96,10 +97,9 @@ class PairedModuleRuntimeV1:
                 period_end=period_end,
             )
         )
+        metrika_observation = self._metrika_observation(metrika_result)
         self._progress(progress_callback, "metrika", "PASSED")
         self._progress(progress_callback, "analytics", "RUNNING")
-        direct_observation = self._direct_observation(direct_result)
-        metrika_observation = self._metrika_observation(metrika_result)
         connected = ConnectedAnalytics(
             observation_id=observation_id,
             generated_at=generated_at,
