@@ -593,6 +593,23 @@ class UiBrowserTests(unittest.TestCase):
                         .locator("strong")
                         .inner_text(),
                     )
+                    page.get_by_role(
+                        "link",
+                        name="Правила",
+                        exact=True,
+                    ).click()
+                    self.assertEqual(
+                        1,
+                        page.locator(
+                            "#recommendation-matrix tbody tr.is-current"
+                        ).count(),
+                    )
+                    self.assertIn(
+                        "больше данных",
+                        page.locator("#recommendation-matrix tbody tr.is-current")
+                        .inner_text()
+                        .lower(),
+                    )
                     browser.close()
             finally:
                 server.shutdown()
@@ -696,13 +713,79 @@ class UiBrowserTests(unittest.TestCase):
                         7,
                     )
                     self.assertIn(
+                        "передать решение человеку",
+                        page.locator("#recommendation-matrix tbody tr")
+                        .first.inner_text()
+                        .lower(),
+                    )
+                    self.assertIn(
                         "больше данных",
                         page.locator("#recommendation-matrix tbody tr")
-                        .nth(1)
+                        .nth(2)
                         .inner_text()
                         .lower(),
                     )
-                    page.get_by_label("Целевой CPA, ₽").fill("800")
+                    recommendation = page.get_by_label("Рекомендация")
+                    recommendation.select_option("NO_CHANGE_SAMPLE")
+                    self.assertEqual(
+                        1,
+                        page.locator(
+                            "#recommendation-matrix tbody tr.is-current"
+                        ).count(),
+                    )
+                    self.assertIn(
+                        "больше данных",
+                        page.locator("#recommendation-matrix tbody tr.is-current")
+                        .inner_text()
+                        .lower(),
+                    )
+                    recommendation.select_option("NO_CHANGE")
+                    self.assertEqual(
+                        1,
+                        page.locator(
+                            "#recommendation-matrix tbody tr.is-current"
+                        ).count(),
+                    )
+                    recommendation_values = recommendation.locator(
+                        "option"
+                    ).evaluate_all("(options) => options.map((option) => option.value)")
+                    self.assertEqual(10, len(recommendation_values))
+                    for recommendation_value in recommendation_values:
+                        recommendation.select_option(recommendation_value)
+                        self.assertGreater(
+                            page.locator(
+                                "#decision-criteria-editor input:visible"
+                            ).count(),
+                            0,
+                        )
+                        self.assertTrue(
+                            page.locator("#selected-rule-formula").inner_text()
+                        )
+                    recommendation.select_option("REQUEST_HUMAN_HELP")
+                    page.get_by_label("Расхождение источников от, %").fill("35")
+                    recommendation.select_option("DECREASE_WEEKLY_BUDGET")
+                    page.get_by_role(
+                        "heading",
+                        name="Уменьшить недельный бюджет",
+                    ).wait_for()
+                    self.assertIn(
+                        "CPA выше 1 000 ₽",
+                        page.locator("#selected-rule-formula").inner_text(),
+                    )
+                    self.assertTrue(page.get_by_label("Низкий CTR, %").is_hidden())
+                    page.get_by_label("CPA выше, ₽").fill("800")
+                    self.assertIn(
+                        "CPA выше 800 ₽",
+                        page.locator("#selected-rule-formula").inner_text(),
+                    )
+                    recommendation.select_option("SET_AD_VARIANT")
+                    page.get_by_role(
+                        "heading",
+                        name="Сменить вариант объявления",
+                    ).wait_for()
+                    self.assertTrue(page.get_by_label("Низкий CTR, %").is_visible())
+                    self.assertTrue(page.get_by_label("Показов от").is_visible())
+                    recommendation.select_option("DECREASE_WEEKLY_BUDGET")
                     page.get_by_role(
                         "button",
                         name="Сохранить логику",
@@ -714,8 +797,19 @@ class UiBrowserTests(unittest.TestCase):
 
                     page.reload(wait_until="networkidle")
                     self.assertEqual(
+                        "DECREASE_WEEKLY_BUDGET",
+                        page.get_by_label("Рекомендация").input_value(),
+                    )
+                    self.assertEqual(
                         "800",
-                        page.get_by_label("Целевой CPA, ₽").input_value(),
+                        page.get_by_label("CPA выше, ₽").input_value(),
+                    )
+                    page.get_by_label("Рекомендация").select_option(
+                        "REQUEST_HUMAN_HELP"
+                    )
+                    self.assertEqual(
+                        "35",
+                        page.get_by_label("Расхождение источников от, %").input_value(),
                     )
                     page.get_by_role(
                         "link",
@@ -728,6 +822,13 @@ class UiBrowserTests(unittest.TestCase):
                     page.locator("#scenario-visits").fill("100")
                     page.locator("#scenario-conversions").fill("10")
                     page.locator("#scenario-budget").fill("4000")
+                    additional_metrics = page.get_by_text(
+                        "Дополнительные показатели",
+                        exact=True,
+                    )
+                    if additional_metrics.count():
+                        additional_metrics.click()
+                    page.locator("#scenario-source-mismatch").fill("35")
                     page.get_by_role(
                         "button",
                         name="Получить предложение",
@@ -736,7 +837,26 @@ class UiBrowserTests(unittest.TestCase):
                         "heading",
                         name="Цикл завершён",
                     ).wait_for()
+                    self.assertIn(
+                        "Передать человеку",
+                        page.locator("#decision-title").inner_text(),
+                    )
 
+                    page.locator("#scenario-source-mismatch").fill("0")
+                    with page.expect_response(
+                        lambda response: (
+                            response.url.endswith("/api/runs")
+                            and response.request.method == "POST"
+                        )
+                    ):
+                        page.get_by_role(
+                            "button",
+                            name="Получить предложение",
+                        ).click()
+                    page.wait_for_function(
+                        "() => document.querySelector('#decision-title')"
+                        ".textContent.includes('Уменьшить недельный бюджет')"
+                    )
                     self.assertIn(
                         "Уменьшить недельный бюджет",
                         page.locator("#decision-title").inner_text(),

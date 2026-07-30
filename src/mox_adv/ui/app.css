@@ -1048,8 +1048,61 @@ input[type="checkbox"] {
   border-bottom: 1px solid var(--line);
 }
 
-.threshold-title {
+.decision-rule-workspace {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 44px;
   margin-top: 52px;
+  padding: 32px 0;
+  border-top: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.decision-rule-picker {
+  padding-right: 36px;
+  border-right: 1px solid var(--line);
+}
+
+.decision-rule-picker > label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.decision-rule-picker > p:last-child {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.decision-rule-editor h3 {
+  margin: 5px 0 10px;
+  font-size: 26px;
+  letter-spacing: -0.025em;
+}
+
+.selected-rule-formula {
+  max-width: 780px;
+  margin: 0;
+  color: var(--green-dark);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.55;
+}
+
+.decision-rule-editor .threshold-editor {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 26px 0 20px;
+}
+
+.decision-rule-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .threshold-editor {
@@ -1069,9 +1122,29 @@ input[type="checkbox"] {
   color: var(--muted);
 }
 
+.matrix-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 40px;
+  margin-top: 52px;
+}
+
+.matrix-heading h3 {
+  margin: 5px 0 0;
+}
+
+.matrix-heading > p {
+  max-width: 430px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: right;
+}
+
 .matrix-scroll {
   overflow: hidden;
-  margin-top: 28px;
+  margin-top: 20px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface);

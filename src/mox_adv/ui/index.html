@@ -562,40 +562,78 @@
           <h3>Когда запускать цикл</h3>
         </div>
 
-        <h3 class="threshold-title">Как выбирать решение</h3>
-        <div class="threshold-editor">
-          <label>
-            <span>Минимум кликов</span>
-            <input id="recommend-minimum-clicks" type="number" min="50" value="50">
-          </label>
-          <label>
-            <span>Минимум конверсий</span>
-            <input id="recommend-minimum-conversions" type="number" min="3" value="3">
-          </label>
-          <label>
-            <span>Целевой CPA, ₽</span>
-            <input id="recommend-target-cpa" type="number" min="1" max="1000" value="1000">
-          </label>
-          <label>
-            <span>Давление бюджета, %</span>
-            <input id="recommend-budget-pressure" type="number" min="90" value="90">
-          </label>
-          <label>
-            <span>Расход без конверсий, ₽</span>
-            <input id="recommend-no-conversion-spend" type="number" min="2000" value="2000">
-          </label>
-          <label>
-            <span>Низкий CTR, %</span>
-            <input id="recommend-low-ctr" type="number" min="0.1" max="1" step="0.1" value="1">
-          </label>
-          <label>
-            <span>Показов для проверки CTR</span>
-            <input id="recommend-low-ctr-impressions" type="number" min="5000" value="5000">
-          </label>
-          <label>
-            <span>Кликов для роста ставки, до</span>
-            <input id="recommend-bid-max-clicks" type="number" min="50" max="99" value="99">
-          </label>
+        <div class="decision-rule-workspace">
+          <div class="decision-rule-picker">
+            <p class="eyebrow">Рекомендация</p>
+            <label>
+              <span>Рекомендация</span>
+              <select id="decision-rule-select"></select>
+            </label>
+            <p>
+              Выберите решение и задайте показатели, при которых пайплайн должен
+              его предложить.
+            </p>
+          </div>
+
+          <div class="decision-rule-editor">
+            <p class="eyebrow">Критерии решения</p>
+            <h3 id="selected-rule-title">Передать решение человеку</h3>
+            <p class="selected-rule-formula" id="selected-rule-formula" aria-live="polite"></p>
+            <div class="threshold-editor" id="decision-criteria-editor">
+              <label data-criterion="minimum_clicks">
+                <span>Минимум кликов</span>
+                <input id="recommend-minimum-clicks" type="number" min="50" value="50">
+              </label>
+              <label data-criterion="minimum_conversions">
+                <span>Минимум конверсий</span>
+                <input id="recommend-minimum-conversions" type="number" min="3" value="3">
+              </label>
+              <label data-criterion="target_cpa_rub">
+                <span>Целевой CPA, ₽</span>
+                <input id="recommend-target-cpa" type="number" min="1" max="1000" value="1000">
+              </label>
+              <label data-criterion="budget_pressure_percent">
+                <span>Давление бюджета, %</span>
+                <input id="recommend-budget-pressure" type="number" min="90" value="90">
+              </label>
+              <label data-criterion="no_conversion_spend_rub">
+                <span>Расход без конверсий, ₽</span>
+                <input id="recommend-no-conversion-spend" type="number" min="2000" value="2000">
+              </label>
+              <label data-criterion="low_ctr_percent">
+                <span>Низкий CTR, %</span>
+                <input id="recommend-low-ctr" type="number" min="0.1" max="1" step="0.1" value="1">
+              </label>
+              <label data-criterion="low_ctr_minimum_impressions">
+                <span>Показов для проверки CTR</span>
+                <input id="recommend-low-ctr-impressions" type="number" min="5000" value="5000">
+              </label>
+              <label data-criterion="bid_increase_maximum_clicks">
+                <span>Кликов для роста ставки, до</span>
+                <input id="recommend-bid-max-clicks" type="number" min="50" max="99" value="99">
+              </label>
+              <label data-safety-criterion="source_mismatch_percent" hidden>
+                <span>Расхождение источников от, %</span>
+                <input id="recommend-source-mismatch" type="number" min="30" value="30">
+              </label>
+              <label data-safety-criterion="direct_age_minutes" hidden>
+                <span>Задержка данных Директа больше, мин</span>
+                <input id="recommend-direct-freshness" type="number" min="1" max="30" value="30">
+              </label>
+              <label data-safety-criterion="metrika_age_minutes" hidden>
+                <span>Возраст данных Метрики больше, мин</span>
+                <input id="recommend-metrika-freshness" type="number" min="1" max="360" value="360">
+              </label>
+              <label data-safety-criterion="watermark_skew_minutes" hidden>
+                <span>Разница времени данных больше, мин</span>
+                <input id="recommend-watermark-freshness" type="number" min="1" max="360" value="360">
+              </label>
+            </div>
+            <p class="decision-rule-note" id="decision-rule-note">
+              Общие показатели синхронизируются между решениями и используются
+              в следующем запуске цикла.
+            </p>
+          </div>
         </div>
 
         <div class="guide-actions">
@@ -608,6 +646,13 @@
         </div>
         <p class="automation-message" id="recommendation-message" aria-live="polite"></p>
 
+        <div class="matrix-heading">
+          <div>
+            <p class="eyebrow">Порядок проверки</p>
+            <h3>Все возможные решения</h3>
+          </div>
+          <p>Пайплайн проверяет условия сверху вниз и выбирает первое совпадение.</p>
+        </div>
         <div class="matrix-scroll">
           <table class="recommendation-matrix" id="recommendation-matrix">
             <thead>

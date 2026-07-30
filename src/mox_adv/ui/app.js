@@ -165,6 +165,30 @@ const elements = {
       "#recommend-bid-max-clicks",
     ),
   },
+  decisionRuleSelect: document.querySelector("#decision-rule-select"),
+  selectedRuleTitle: document.querySelector("#selected-rule-title"),
+  selectedRuleFormula: document.querySelector("#selected-rule-formula"),
+  decisionRuleNote: document.querySelector("#decision-rule-note"),
+  decisionCriterionLabels: Array.from(
+    document.querySelectorAll("[data-criterion]"),
+  ),
+  decisionSafetyCriterionLabels: Array.from(
+    document.querySelectorAll("[data-safety-criterion]"),
+  ),
+  decisionSafetyInputs: {
+    source_mismatch_percent: document.querySelector(
+      "#recommend-source-mismatch",
+    ),
+    direct_age_minutes: document.querySelector(
+      "#recommend-direct-freshness",
+    ),
+    metrika_age_minutes: document.querySelector(
+      "#recommend-metrika-freshness",
+    ),
+    watermark_skew_minutes: document.querySelector(
+      "#recommend-watermark-freshness",
+    ),
+  },
   recommendationMatrixBody: document.querySelector(
     "#recommendation-matrix-body",
   ),
@@ -234,6 +258,249 @@ const actionLabels = {
   RESUME_CAMPAIGN: "Возобновить кампанию",
   REQUEST_HUMAN_HELP: "Передать человеку",
 };
+
+function formatRuleNumber(value) {
+  return new Intl.NumberFormat("ru-RU", {
+    maximumFractionDigits: 1,
+  })
+    .format(Number(value))
+    .replace(/\u00a0/g, " ");
+}
+
+function enoughSampleFormula(rules) {
+  return (
+    `клики от ${formatRuleNumber(rules.minimum_clicks)}, конверсии от ` +
+    `${formatRuleNumber(rules.minimum_conversions)}`
+  );
+}
+
+const decisionRuleDefinitions = {
+  SUSPEND_CAMPAIGN: {
+    title: "Приостановить кампанию",
+    outcome: "Тестовая кампания приостанавливается",
+    criteria: ["no_conversion_spend_rub"],
+    labels: {
+      no_conversion_spend_rub: "Расход без конверсий от, ₽",
+    },
+    formula: (rules) =>
+      `0 конверсий и расход от ${formatRuleNumber(
+        rules.no_conversion_spend_rub,
+      )} ₽.`,
+  },
+  NO_CHANGE_SAMPLE: {
+    title: "Собрать больше данных",
+    matrixAction: "NO_CHANGE",
+    outcome: "Цикл запрашивает больше данных",
+    criteria: ["minimum_clicks", "minimum_conversions"],
+    labels: {
+      minimum_clicks: "Кликов меньше",
+      minimum_conversions: "Конверсий меньше",
+    },
+    formula: (rules) =>
+      `Кликов меньше ${formatRuleNumber(
+        rules.minimum_clicks,
+      )} или конверсий меньше ${formatRuleNumber(
+        rules.minimum_conversions,
+      )}.`,
+  },
+  SET_AD_VARIANT: {
+    title: "Сменить вариант объявления",
+    outcome: "Активируется другой тестовый вариант объявления",
+    criteria: [
+      "minimum_clicks",
+      "minimum_conversions",
+      "low_ctr_percent",
+      "low_ctr_minimum_impressions",
+    ],
+    labels: {
+      minimum_clicks: "Кликов от",
+      minimum_conversions: "Конверсий от",
+      low_ctr_percent: "Низкий CTR, %",
+      low_ctr_minimum_impressions: "Показов от",
+    },
+    formula: (rules) =>
+      `CTR ниже ${formatRuleNumber(
+        rules.low_ctr_percent,
+      )}%, показов от ${formatRuleNumber(
+        rules.low_ctr_minimum_impressions,
+      )}; ${enoughSampleFormula(rules)}.`,
+  },
+  INCREASE_WEEKLY_BUDGET: {
+    title: "Увеличить недельный бюджет",
+    outcome: "Недельный бюджет увеличивается на 10%",
+    criteria: [
+      "minimum_clicks",
+      "minimum_conversions",
+      "target_cpa_rub",
+      "budget_pressure_percent",
+    ],
+    labels: {
+      minimum_clicks: "Кликов от",
+      minimum_conversions: "Конверсий от",
+      target_cpa_rub: "CPA не выше, ₽",
+      budget_pressure_percent: "Использование бюджета от, %",
+    },
+    formula: (rules) =>
+      `${enoughSampleFormula(rules)}; CPA не выше ${formatRuleNumber(
+        rules.target_cpa_rub,
+      )} ₽; использование бюджета от ${formatRuleNumber(
+        rules.budget_pressure_percent,
+      )}%.`,
+  },
+  DECREASE_WEEKLY_BUDGET: {
+    title: "Уменьшить недельный бюджет",
+    outcome: "Недельный бюджет уменьшается на 10%",
+    criteria: [
+      "minimum_clicks",
+      "minimum_conversions",
+      "target_cpa_rub",
+      "budget_pressure_percent",
+    ],
+    labels: {
+      minimum_clicks: "Кликов от",
+      minimum_conversions: "Конверсий от",
+      target_cpa_rub: "CPA выше, ₽",
+      budget_pressure_percent: "Использование бюджета от, %",
+    },
+    formula: (rules) =>
+      `${enoughSampleFormula(rules)}; CPA выше ${formatRuleNumber(
+        rules.target_cpa_rub,
+      )} ₽; использование бюджета от ${formatRuleNumber(
+        rules.budget_pressure_percent,
+      )}%.`,
+  },
+  DECREASE_SEARCH_BID: {
+    title: "Уменьшить поисковую ставку",
+    outcome: "Поисковая ставка уменьшается на 10%",
+    criteria: [
+      "minimum_clicks",
+      "minimum_conversions",
+      "target_cpa_rub",
+      "budget_pressure_percent",
+    ],
+    labels: {
+      minimum_clicks: "Кликов от",
+      minimum_conversions: "Конверсий от",
+      target_cpa_rub: "CPA выше, ₽",
+      budget_pressure_percent: "Использование бюджета ниже, %",
+    },
+    formula: (rules) =>
+      `${enoughSampleFormula(rules)}; CPA выше ${formatRuleNumber(
+        rules.target_cpa_rub,
+      )} ₽; использование бюджета ниже ${formatRuleNumber(
+        rules.budget_pressure_percent,
+      )}%.`,
+  },
+  INCREASE_SEARCH_BID: {
+    title: "Увеличить поисковую ставку",
+    outcome: "Поисковая ставка увеличивается на 10%",
+    criteria: [
+      "minimum_clicks",
+      "minimum_conversions",
+      "target_cpa_rub",
+      "budget_pressure_percent",
+      "bid_increase_maximum_clicks",
+    ],
+    labels: {
+      minimum_clicks: "Кликов от",
+      minimum_conversions: "Конверсий от",
+      target_cpa_rub: "CPA не выше, ₽",
+      budget_pressure_percent: "Использование бюджета ниже, %",
+      bid_increase_maximum_clicks: "Кликов не больше",
+    },
+    formula: (rules) =>
+      `${enoughSampleFormula(rules)}; CPA не выше ${formatRuleNumber(
+        rules.target_cpa_rub,
+      )} ₽; использование бюджета ниже ${formatRuleNumber(
+        rules.budget_pressure_percent,
+      )}%; кликов не больше ${formatRuleNumber(
+        rules.bid_increase_maximum_clicks,
+      )}.`,
+  },
+  RESUME_CAMPAIGN: {
+    title: "Возобновить кампанию",
+    outcome: "Кампания возобновляется только после подтверждения",
+    criteria: [
+      "minimum_clicks",
+      "minimum_conversions",
+      "target_cpa_rub",
+    ],
+    labels: {
+      minimum_clicks: "Кликов от",
+      minimum_conversions: "Конверсий от",
+      target_cpa_rub: "CPA не выше, ₽",
+    },
+    formula: (rules) =>
+      `Кампания приостановлена; ${enoughSampleFormula(
+        rules,
+      )}; CPA не выше ${formatRuleNumber(rules.target_cpa_rub)} ₽.`,
+  },
+  REQUEST_HUMAN_HELP: {
+    title: "Передать решение человеку",
+    outcome: "Применение останавливается, решение передаётся пользователю",
+    criteria: [],
+    safetyCriteria: [
+      "source_mismatch_percent",
+      "direct_age_minutes",
+      "metrika_age_minutes",
+      "watermark_skew_minutes",
+    ],
+    labels: {},
+    formula: (_rules, safety) =>
+      `Расхождение источников от ${formatRuleNumber(
+        safety.source_mismatch_percent,
+      )}% или задержка данных выше предела: Директ — ${formatRuleNumber(
+        safety.direct_age_minutes,
+      )} мин, Метрика — ${formatRuleNumber(
+        safety.metrika_age_minutes,
+      )} мин, разница времени — ${formatRuleNumber(
+        safety.watermark_skew_minutes,
+      )} мин. Внешнее изменение также передаёт решение человеку.`,
+    note:
+      "Эти пределы синхронизированы со стоп-условиями качества данных выше.",
+  },
+  NO_CHANGE: {
+    title: "Сохранить текущие настройки",
+    outcome: "Настройки сохраняются без изменения кампании",
+    criteria: [
+      "minimum_clicks",
+      "minimum_conversions",
+      "target_cpa_rub",
+      "budget_pressure_percent",
+      "no_conversion_spend_rub",
+      "low_ctr_percent",
+      "low_ctr_minimum_impressions",
+      "bid_increase_maximum_clicks",
+    ],
+    labels: {
+      minimum_clicks: "Минимум кликов",
+      minimum_conversions: "Минимум конверсий",
+      target_cpa_rub: "Целевой CPA, ₽",
+      budget_pressure_percent: "Давление бюджета, %",
+      no_conversion_spend_rub: "Расход без конверсий, ₽",
+      low_ctr_percent: "Низкий CTR, %",
+      low_ctr_minimum_impressions: "Показов для проверки CTR",
+      bid_increase_maximum_clicks: "Кликов для роста ставки, до",
+    },
+    formula: () =>
+      "Ни одно из условий решений с более высоким приоритетом не выполнено.",
+    note:
+      "Это резервное решение. Его границы меняются вместе с критериями остальных рекомендаций.",
+  },
+};
+
+const decisionRuleOrder = [
+  "REQUEST_HUMAN_HELP",
+  "SUSPEND_CAMPAIGN",
+  "NO_CHANGE_SAMPLE",
+  "RESUME_CAMPAIGN",
+  "SET_AD_VARIANT",
+  "DECREASE_WEEKLY_BUDGET",
+  "DECREASE_SEARCH_BID",
+  "INCREASE_WEEKLY_BUDGET",
+  "INCREASE_SEARCH_BID",
+  "NO_CHANGE",
+];
 
 function operatorReason(value) {
   const text = String(value || "");
@@ -646,93 +913,134 @@ function readRecommendationRules() {
   );
 }
 
-function renderRecommendationMatrix() {
-  const rules = readRecommendationRules();
-  const enoughSample =
-    `клики ≥ ${rules.minimum_clicks} и конверсии ≥ ` +
-    `${rules.minimum_conversions}`;
-  const rows = [
-    [
-      "01",
-      `0 конверсий и расход ≥ ${rules.no_conversion_spend_rub} ₽`,
-      "SUSPEND_CAMPAIGN",
-      "Тестовая кампания приостанавливается",
-    ],
-    [
-      "02",
-      `клики < ${rules.minimum_clicks} или конверсии < ` +
-        `${rules.minimum_conversions}`,
-      "NO_CHANGE",
-      "Цикл запрашивает больше данных",
-    ],
-    [
-      "03",
-      `CTR < ${rules.low_ctr_percent}% и показы ≥ ` +
-        `${rules.low_ctr_minimum_impressions}; ${enoughSample}`,
-      "SET_AD_VARIANT",
-      "Активируется другой тестовый вариант объявления",
-    ],
-    [
-      "04",
-      `${enoughSample}; CPA ≤ ${rules.target_cpa_rub} ₽; ` +
-        `бюджет ≥ ${rules.budget_pressure_percent}%`,
-      "INCREASE_WEEKLY_BUDGET",
-      "Недельный бюджет увеличивается на 10%",
-    ],
-    [
-      "05",
-      `${enoughSample}; CPA > ${rules.target_cpa_rub} ₽; ` +
-        `бюджет ≥ ${rules.budget_pressure_percent}%`,
-      "DECREASE_WEEKLY_BUDGET",
-      "Недельный бюджет уменьшается на 10%",
-    ],
-    [
-      "06",
-      `${enoughSample}; CPA > ${rules.target_cpa_rub} ₽; ` +
-        `бюджет < ${rules.budget_pressure_percent}%`,
-      "DECREASE_SEARCH_BID",
-      "Поисковая ставка уменьшается на 10%",
-    ],
-    [
-      "07",
-      `${enoughSample}; CPA ≤ ${rules.target_cpa_rub} ₽; ` +
-        `бюджет < ${rules.budget_pressure_percent}%; клики ≤ ` +
-        `${rules.bid_increase_maximum_clicks}`,
-      "INCREASE_SEARCH_BID",
-      "Поисковая ставка увеличивается на 10%",
-    ],
-    [
-      "08",
-      `кампания приостановлена; ${enoughSample}; CPA ≤ ${rules.target_cpa_rub} ₽`,
-      "RESUME_CAMPAIGN",
-      "Кампания возобновляется только после подтверждения",
-    ],
-    [
-      "09",
-      "Источники несовместимы, данные устарели или найдено внешнее изменение",
-      "REQUEST_HUMAN_HELP",
-      "Применение останавливается, решение передаётся пользователю",
-    ],
-    [
-      "10",
-      "Ни одно из условий выше не выполнено",
-      "NO_CHANGE",
-      "Настройки сохраняются без изменения кампании",
-    ],
-  ];
-  elements.recommendationMatrixBody.replaceChildren();
-  rows.forEach(([priority, condition, action, outcome]) => {
-    const row = document.createElement("tr");
-    row.dataset.action = action;
-    [priority, condition, actionLabels[action] || action, outcome].forEach(
-      (value) => {
-        const cell = document.createElement("td");
-        setText(cell, value);
-        row.append(cell);
-      },
+function safetyRuleSourceInputs() {
+  return {
+    source_mismatch_percent:
+      elements.extendedRules.source_mismatch.threshold_percent,
+    direct_age_minutes: elements.extendedRules.freshness.direct_minutes,
+    metrika_age_minutes: elements.extendedRules.freshness.metrika_minutes,
+    watermark_skew_minutes:
+      elements.extendedRules.freshness.watermark_skew_minutes,
+  };
+}
+
+function readDecisionSafetyRules() {
+  return Object.fromEntries(
+    Object.entries(elements.decisionSafetyInputs).map(([name, input]) => [
+      name,
+      integerValue(input),
+    ]),
+  );
+}
+
+function syncDecisionSafetyInputsFromRules() {
+  Object.entries(safetyRuleSourceInputs()).forEach(([name, input]) => {
+    elements.decisionSafetyInputs[name].value = input.value;
+  });
+}
+
+function renderDecisionRuleEditor() {
+  const selected = elements.decisionRuleSelect.value;
+  const definition =
+    decisionRuleDefinitions[selected] ||
+    decisionRuleDefinitions.SUSPEND_CAMPAIGN;
+  const visibleCriteria = new Set(definition.criteria);
+  const visibleSafetyCriteria = new Set(definition.safetyCriteria || []);
+
+  elements.decisionCriterionLabels.forEach((label) => {
+    const criterion = label.dataset.criterion;
+    label.hidden = !visibleCriteria.has(criterion);
+    if (visibleCriteria.has(criterion)) {
+      setText(
+        label.querySelector("span"),
+        definition.labels[criterion] || criterion,
+      );
+    }
+  });
+  elements.decisionSafetyCriterionLabels.forEach((label) => {
+    label.hidden = !visibleSafetyCriteria.has(label.dataset.safetyCriterion);
+  });
+  setText(elements.selectedRuleTitle, definition.title);
+  setText(
+    elements.selectedRuleFormula,
+    definition.formula(
+      readRecommendationRules(),
+      readDecisionSafetyRules(),
+    ),
+  );
+  setText(
+    elements.decisionRuleNote,
+    definition.note ||
+      "Общие показатели синхронизируются между решениями и используются в следующем запуске цикла.",
+  );
+}
+
+function populateDecisionRuleSelect() {
+  elements.decisionRuleSelect.replaceChildren();
+  decisionRuleOrder.forEach((ruleId) => {
+    const option = document.createElement("option");
+    option.value = ruleId;
+    setText(option, decisionRuleDefinitions[ruleId].title);
+    elements.decisionRuleSelect.append(option);
+  });
+}
+
+function restoreDecisionRuleSelection() {
+  try {
+    const selected = window.localStorage.getItem(
+      "mox-adv-selected-recommendation",
     );
+    if (selected && decisionRuleDefinitions[selected]) {
+      elements.decisionRuleSelect.value = selected;
+    }
+  } catch {
+    // The editor still works when browser storage is unavailable.
+  }
+}
+
+function renderRecommendationMatrix() {
+  syncDecisionSafetyInputsFromRules();
+  const rules = readRecommendationRules();
+  const safetyRules = readDecisionSafetyRules();
+  elements.recommendationMatrixBody.replaceChildren();
+  decisionRuleOrder.forEach((ruleId, index) => {
+    const definition = decisionRuleDefinitions[ruleId];
+    const action = definition.matrixAction || ruleId;
+    const row = document.createElement("tr");
+    row.dataset.rule = ruleId;
+    row.dataset.action = action;
+    [
+      String(index + 1).padStart(2, "0"),
+      definition.formula(rules, safetyRules),
+      definition.title,
+      definition.outcome,
+    ].forEach((value) => {
+      const cell = document.createElement("td");
+      setText(cell, value);
+      row.append(cell);
+    });
     elements.recommendationMatrixBody.append(row);
   });
+  elements.recommendationMatrixBody
+    .querySelectorAll("tr")
+    .forEach((row) =>
+      row.classList.toggle(
+        "is-current",
+        row.dataset.rule === elements.decisionRuleSelect.value,
+      ),
+    );
+  renderDecisionRuleEditor();
+}
+
+function decisionRuleForRecommendation(recommendation) {
+  const action = recommendation.primary_action || recommendation.action;
+  if (
+    action === "NO_CHANGE" &&
+    recommendation.status === "INSUFFICIENT_DATA"
+  ) {
+    return "NO_CHANGE_SAMPLE";
+  }
+  return decisionRuleDefinitions[action] ? action : "NO_CHANGE";
 }
 
 function ratio(numerator, denominator, multiplier = 1) {
@@ -1072,16 +1380,10 @@ function renderReport(report) {
         }${report.recommendation.relative_step_percent}%`
       : "Без изменения",
   );
-  elements.recommendationMatrixBody
-    .querySelectorAll("tr")
-    .forEach((row) => {
-      row.classList.toggle(
-        "is-current",
-        row.dataset.action ===
-          (report.recommendation.primary_action ||
-            report.recommendation.action),
-      );
-    });
+  elements.decisionRuleSelect.value = decisionRuleForRecommendation(
+    report.recommendation,
+  );
+  renderRecommendationMatrix();
   if (readOnly) {
     setText(elements.executionLabel, "Результат");
     setText(
@@ -1883,6 +2185,26 @@ Object.values(elements.scenarioInputs).forEach((input) => {
 Object.values(elements.recommendationInputs).forEach((input) => {
   input.addEventListener("input", renderRecommendationMatrix);
 });
+elements.decisionRuleSelect.addEventListener("change", () => {
+  try {
+    window.localStorage.setItem(
+      "mox-adv-selected-recommendation",
+      elements.decisionRuleSelect.value,
+    );
+  } catch {
+    // Persisting the selected editor is optional.
+  }
+  renderRecommendationMatrix();
+});
+Object.entries(elements.decisionSafetyInputs).forEach(([name, input]) => {
+  input.addEventListener("input", () => {
+    safetyRuleSourceInputs()[name].value = input.value;
+    renderRecommendationMatrix();
+  });
+});
+Object.values(safetyRuleSourceInputs()).forEach((input) => {
+  input.addEventListener("input", renderRecommendationMatrix);
+});
 elements.saveAutomation.addEventListener("click", () => {
   saveAutomation(Boolean(state.automation?.enabled));
 });
@@ -1947,6 +2269,8 @@ fetch("/api/status")
   });
 
 organizePages();
+populateDecisionRuleSelect();
+restoreDecisionRuleSelection();
 showPage(pageFromPath(window.location.pathname));
 updateMode();
 renderDerivedPreview();
