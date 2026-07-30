@@ -111,10 +111,10 @@ class StandaloneDirectAnalysisV1:
             clicks=observation.clicks,
             cost_micros=observation.cost_micros,
             current_weekly_budget_micros=(
-                observation.current_weekly_budget_micros
+                observation.state.current_weekly_budget_micros
             ),
-            budget_period_start=observation.budget_period_start,
-            budget_period_end=observation.budget_period_end,
+            budget_period_start=observation.state.budget_period_start,
+            budget_period_end=observation.state.budget_period_end,
             observed_at=now,
             conversions=observation.conversions,
         )
@@ -124,6 +124,8 @@ class StandaloneDirectAnalysisV1:
             conversions=observation.conversions,
             observed_at=observation.observed_at,
             now=now,
+            budget_period_mismatch=observation.budget_period_mismatch,
+            watermark_skew_exceeded=observation.watermark_skew_exceeded,
         )
         warnings = conditions.warnings()
         hypotheses = direct_hypotheses(calculated)
@@ -239,42 +241,42 @@ class StandaloneDirectAnalysisV1:
             ),
             MetricValueV1(
                 "campaign_state",
-                observation.campaign_state,
+                observation.state.campaign_state,
                 "CODE",
             ),
             MetricValueV1(
                 "group_state",
-                observation.group_state,
+                observation.state.group_state,
                 "CODE",
             ),
             MetricValueV1(
                 "ad_state",
-                observation.ad_state,
+                observation.state.ad_state,
                 "CODE",
             ),
             MetricValueV1(
                 "strategy",
-                observation.strategy,
+                observation.state.strategy,
                 "CODE",
             ),
             MetricValueV1(
                 "current_weekly_budget_micros",
-                observation.current_weekly_budget_micros,
+                observation.state.current_weekly_budget_micros,
                 "MICROS_RUB",
             ),
             MetricValueV1(
                 "current_search_bid_micros",
-                observation.current_search_bid_micros,
+                observation.state.current_search_bid_micros,
                 "MICROS_RUB",
             ),
             MetricValueV1(
                 "ad_variant",
-                observation.ad_variant,
+                observation.state.ad_variant,
                 "CODE",
             ),
             MetricValueV1(
                 "object_config_version",
-                observation.object_config_version,
+                observation.state.object_config_version,
                 "CODE",
             ),
         ]

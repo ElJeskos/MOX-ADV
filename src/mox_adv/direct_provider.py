@@ -127,21 +127,12 @@ class DirectObservationV1:
     impressions: int
     clicks: int
     cost_micros: int
-    campaign_state: str
-    group_state: str
-    ad_state: str
-    strategy: str
-    current_weekly_budget_micros: int
-    budget_period_start: datetime
-    budget_period_end: datetime
-    current_search_bid_micros: int
-    ad_variant: str
-    object_config_version: str
-    last_change_author: Optional[str]
-    last_change_occurred_at: Optional[datetime]
+    state: "DirectStateValuesV1"
     conversions: Optional[int]
     observed_at: datetime
     provenance: Tuple[ModuleProvenanceV1, ...]
+    budget_period_mismatch: bool
+    watermark_skew_exceeded: bool
 
 
 @dataclass(frozen=True)
@@ -156,8 +147,8 @@ class DirectStateValuesV1:
     current_search_bid_micros: int
     ad_variant: str
     object_config_version: str
-    last_change_author: str
-    last_change_occurred_at: datetime
+    last_change_author: Optional[str]
+    last_change_occurred_at: Optional[datetime]
 
 
 class DirectObservationReaderV1:
@@ -221,13 +212,11 @@ class DirectObservationReaderV1:
             self._string(metrics["budget_period_end"], "budget_period_end"),
             "budget_period_end",
         )
-        self._validate_budget_period(budget_start, budget_end, now)
-        return DirectObservationV1(
-            impressions=self._count(metrics["impressions"], "impressions"),
-            clicks=self._count(metrics["clicks"], "clicks"),
-            cost_micros=self._count(metrics["cost_micros"], "cost_micros"),
+        self._validate_budget_period(budget_start, budget_end)
+        state = DirectStateValuesV1(
             campaign_state=self._string(
-                metrics["campaign_state"], "campaign_state"
+                metrics["campaign_state"],
+                "campaign_state",
             ),
             group_state=self._string(metrics["group_state"], "group_state"),
             ad_state=self._string(metrics["ad_state"], "ad_state"),
@@ -249,6 +238,12 @@ class DirectObservationReaderV1:
             ),
             last_change_author=None,
             last_change_occurred_at=None,
+        )
+        return DirectObservationV1(
+            impressions=self._count(metrics["impressions"], "impressions"),
+            clicks=self._count(metrics["clicks"], "clicks"),
+            cost_micros=self._count(metrics["cost_micros"], "cost_micros"),
+            state=state,
             conversions=(
                 None
                 if "conversions" not in metrics
@@ -264,6 +259,8 @@ class DirectObservationReaderV1:
                     evidence_id=request.external_evidence.evidence_id,
                 ),
             ),
+            budget_period_mismatch=budget_start > now,
+            watermark_skew_exceeded=False,
         )
 
     def _read_provider(
@@ -302,7 +299,11 @@ class DirectObservationReaderV1:
             report,
             request,
         )
-        state_values = self._validated_state(state, request, now)
+        state_values = self._validated_state(state, request)
+        if state_values.last_change_author is None:
+            raise ValueError(
+                "The provider state must identify the last change author."
+            )
         try:
             authorized_change = self._provider_reader.authorizes_change_author(
                 request.connection_ref.connection_id,
@@ -338,6 +339,7 @@ class DirectObservationReaderV1:
             impressions=impressions,
             clicks=clicks,
             cost_micros=cost_micros,
+            state=state_values,
             conversions=None,
             observed_at=min(report_retrieved, state_retrieved),
             provenance=(
@@ -354,20 +356,10 @@ class DirectObservationReaderV1:
                     watermark=state.watermark,
                 ),
             ),
-            campaign_state=state_values.campaign_state,
-            group_state=state_values.group_state,
-            ad_state=state_values.ad_state,
-            strategy=state_values.strategy,
-            current_weekly_budget_micros=(
-                state_values.current_weekly_budget_micros
+            budget_period_mismatch=state_values.budget_period_start > now,
+            watermark_skew_exceeded=(
+                abs(report_watermark - state_watermark) > timedelta(hours=6)
             ),
-            budget_period_start=state_values.budget_period_start,
-            budget_period_end=state_values.budget_period_end,
-            current_search_bid_micros=state_values.current_search_bid_micros,
-            ad_variant=state_values.ad_variant,
-            object_config_version=state_values.object_config_version,
-            last_change_author=state_values.last_change_author,
-            last_change_occurred_at=state_values.last_change_occurred_at,
         )
 
     @classmethod
@@ -478,7 +470,6 @@ class DirectObservationReaderV1:
         cls,
         state: DirectCampaignStateBlock,
         request: ModuleRequestV1,
-        now: datetime,
     ) -> DirectStateValuesV1:
         if not isinstance(state, DirectCampaignStateBlock):
             raise ValueError(
@@ -499,7 +490,7 @@ class DirectObservationReaderV1:
             state.budget_period_end,
             "provider_state.budget_period_end",
         )
-        cls._validate_budget_period(budget_start, budget_end, now)
+        cls._validate_budget_period(budget_start, budget_end)
         last_change_occurred_at = cls._timestamp(
             state.last_change_occurred_at,
             "provider_state.last_change_occurred_at",
@@ -577,15 +568,9 @@ class DirectObservationReaderV1:
             raise ValueError(field + " must be an ISO date.") from error
 
     @staticmethod
-    def _validate_budget_period(
-        start: datetime,
-        end: datetime,
-        now: datetime,
-    ) -> None:
+    def _validate_budget_period(start: datetime, end: datetime) -> None:
         if end - start != timedelta(days=7):
             raise ValueError("The weekly budget period must span seven days.")
-        if start > now:
-            raise ValueError("The weekly budget period has not started.")
 
     @staticmethod
     def _validate_provenance(

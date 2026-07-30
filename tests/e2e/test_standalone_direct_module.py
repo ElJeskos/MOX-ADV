@@ -252,6 +252,33 @@ class RogueChangeAuthorDirectReader(RecordingAuthorizedDirectReader):
         )
 
 
+class SkewedWatermarkDirectReader(RecordingAuthorizedDirectReader):
+    def read_direct_state(
+        self,
+        connection_id: str,
+        query: DirectCampaignStateReadQuery,
+    ) -> DirectCampaignStateBlock:
+        state = super().read_direct_state(connection_id, query)
+        return DirectCampaignStateBlock(
+            source=state.source,
+            retrieved_at=state.retrieved_at,
+            watermark="2026-07-30T05:49:00+00:00",
+            campaign=state.campaign,
+            campaign_state=state.campaign_state,
+            group_state=state.group_state,
+            ad_state=state.ad_state,
+            strategy=state.strategy,
+            current_weekly_budget_micros=state.current_weekly_budget_micros,
+            budget_period_start=state.budget_period_start,
+            budget_period_end=state.budget_period_end,
+            current_search_bid_micros=state.current_search_bid_micros,
+            ad_variant=state.ad_variant,
+            object_config_version=state.object_config_version,
+            last_change_author=state.last_change_author,
+            last_change_occurred_at=state.last_change_occurred_at,
+        )
+
+
 class RecordingDirectReportReader:
     def __init__(self) -> None:
         self.queries: list[DirectReportsReadQuery] = []
@@ -623,7 +650,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             response.body["errors"][0]["message"],
         )
 
-    def test_future_budget_period_is_rejected_as_invalid_managed_state(
+    def test_future_budget_period_is_incompatible_managed_state(
         self,
     ) -> None:
         request = customer_evidence_request()
@@ -654,14 +681,21 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
 
-        self.assertEqual(422, response.status_code)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("PARTIAL", response.body["status"])
         self.assertEqual(
-            "DIRECT_EVIDENCE_REJECTED",
-            response.body["errors"][0]["code"],
+            "INCOMPATIBLE",
+            response.body["assessment"]["data_quality_status"],
         )
-        self.assertIn(
-            "budget period has not started",
-            response.body["errors"][0]["message"],
+        self.assertEqual(
+            ["BUDGET_PERIOD_MISMATCH"],
+            [item["code"] for item in response.body["warnings"]],
+        )
+        self.assertEqual([], response.body["errors"])
+        self.assertIsNone(response.body["proposal"])
+        self.assertRegex(
+            response.body["decision_record_ref"],
+            r"^decision-records/[0-9a-f]{64}\.json$",
         )
 
     def test_stale_direct_evidence_is_partial_and_non_executable(self) -> None:
@@ -757,6 +791,41 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         self.assertIn(
             "DIRECT_DATA_STALE",
             [item["code"] for item in response.body["warnings"]],
+        )
+
+    def test_excessive_provider_watermark_skew_is_incompatible(self) -> None:
+        request = customer_evidence_request()
+        request.pop("external_evidence")
+
+        response = HttpJsonModuleAdapterV1(
+            DirectModuleV1(
+                provider_reader=SkewedWatermarkDirectReader(),
+                clock=lambda: datetime(
+                    2026,
+                    7,
+                    30,
+                    12,
+                    0,
+                    tzinfo=timezone.utc,
+                ),
+            ),
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("PARTIAL", response.body["status"])
+        self.assertEqual(
+            "INCOMPATIBLE",
+            response.body["assessment"]["data_quality_status"],
+        )
+        self.assertIn(
+            "WATERMARK_SKEW_EXCEEDED",
+            [item["code"] for item in response.body["warnings"]],
+        )
+        self.assertIsNone(response.body["proposal"])
+        self.assertRegex(
+            response.body["decision_record_ref"],
+            r"^decision-records/[0-9a-f]{64}\.json$",
         )
 
     def test_malformed_provider_response_is_rejected(self) -> None:
