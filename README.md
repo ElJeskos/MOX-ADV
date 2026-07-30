@@ -76,6 +76,7 @@ They have no fields for OAuth tokens, arbitrary endpoints, provider HTTP methods
 Results can carry at most three typed hypotheses, and every hypothesis names the normalized result metrics that support it.
 An `EXECUTE` request expresses typed intent but grants no authority: the trusted module guard must block it in production and may execute it only through an approved test adapter.
 The published HTTP contract is [`openapi/module-api-v1.openapi.json`](openapi/module-api-v1.openapi.json).
+Installation, compatibility, diagnostics, upgrade, rollback, and uninstall instructions for all three release distributions are in [`docs/release-distributions.md`](docs/release-distributions.md).
 The Python operation mapping is canonical for the closed operation vocabulary, and a parity test requires OpenAPI to publish the same valid kind/type pairs.
 Generating the complete OpenAPI document from code is intentionally deferred to a dedicated contract-tooling slice.
 The paired runtime now invokes `DirectModuleV1` and `MetrikaModuleV1` through `InProcessModuleAdapterV1` and reconstructs the unchanged integrated snapshot only from their canonical `ModuleResultV1` values.
