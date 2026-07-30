@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict
+from typing import Any
 
 from mox_adv.module_api.v1 import HttpJsonModuleAdapterV1
 
@@ -32,8 +32,8 @@ class ModuleHttpServerV1(ThreadingHTTPServer):
     """Bind one adapter and redacted diagnostics to a loopback HTTP server."""
 
     adapter: HttpJsonModuleAdapterV1
-    diagnostics: Dict[str, Any]
-    openapi_document: Dict[str, Any]
+    diagnostics: dict[str, Any]
+    openapi_document: dict[str, Any]
 
 
 class ModuleHttpRequestHandlerV1(BaseHTTPRequestHandler):

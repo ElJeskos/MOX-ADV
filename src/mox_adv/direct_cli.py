@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from mox_adv.direct_production import DirectProductionReadCompositionV1
 from mox_adv.module_api.v1 import ModuleDecisionRecordStoreV1, ModuleV1
@@ -55,7 +54,7 @@ def _diagnostics(
     }
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     return standalone_main_v1(
         argv,
         program="mox-adv-direct",

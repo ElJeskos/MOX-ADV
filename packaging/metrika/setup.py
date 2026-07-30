@@ -1,7 +1,7 @@
 """Build the headless Metrika edition from an explicit module allowlist."""
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from setuptools import setup
 from setuptools.command.build_py import build_py
@@ -9,8 +9,7 @@ from setuptools.command.build_py import build_py
 PACKAGING_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGING_ROOT))
 
-from release import exact_core_requirement, release_version  # noqa: E402
-
+from release import exact_core_requirement, release_version
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = REPOSITORY_ROOT / "src"

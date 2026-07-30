@@ -18,8 +18,7 @@ from mox_adv.contracts import (
 )
 from mox_adv.direct_provider import DirectReadAuthorizationError
 from mox_adv.environment import ExecutionEnvironment
-from mox_adv.module_api.v1 import InProcessModuleAdapterV1
-from mox_adv.module_api.v1 import ModuleDecisionRecordStoreV1
+from mox_adv.module_api.v1 import InProcessModuleAdapterV1, ModuleDecisionRecordStoreV1
 from mox_adv.modules.direct import DirectModuleV1
 from mox_adv.yandex_credentials import DotenvValue
 from mox_adv.yandex_transport import (

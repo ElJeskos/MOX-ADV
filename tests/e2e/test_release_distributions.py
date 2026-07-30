@@ -2,21 +2,30 @@
 
 from __future__ import annotations
 
+import os
+import selectors
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 import urllib.request
 import zipfile
-import os
-import selectors
-import sqlite3
-from itertools import combinations
 from datetime import datetime, timedelta, timezone
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
+from playwright.sync_api import sync_playwright
+
+from tests.e2e.test_paired_dashboard_regression import (
+    EXISTING_ROUTES,
+    PRE_MIGRATION_SCREENSHOT_DIGESTS,
+    _stable_screenshot,
+    _visual_digest,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -224,6 +233,89 @@ class ReleaseDistributionTests(unittest.TestCase):
                     [],
                     overlap,
                     f"{left_name} and {right_name} both own files",
+                )
+
+    def test_repository_root_builds_the_official_paired_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paired = _build_wheel(
+                ROOT / "packaging" / "paired" / "setup.py",
+                root / "paired",
+            )
+            built = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "wheel",
+                    "--quiet",
+                    "--no-deps",
+                    "--no-build-isolation",
+                    "--wheel-dir",
+                    str(root / "root-dist"),
+                    str(ROOT),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, built.returncode, built.stderr)
+            root_wheels = tuple((root / "root-dist").glob("*.whl"))
+            self.assertEqual(1, len(root_wheels))
+            self.assertEqual(
+                paired.name,
+                root_wheels[0].name,
+            )
+            self.assertEqual(
+                _installed_paths(paired),
+                _installed_paths(root_wheels[0]),
+            )
+
+    def test_official_release_builder_isolates_stale_build_trees(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work_root = root / "work"
+            poison = (
+                work_root
+                / "stale"
+                / "build"
+                / "lib"
+                / "mox_adv"
+                / "metrika_poison.py"
+            )
+            poison.parent.mkdir(parents=True)
+            poison.write_text("raise AssertionError('stale build leaked')\n")
+            output = root / "wheelhouse"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "build_release_distributions.py"),
+                    "--version",
+                    "1.0.0",
+                    "--output-dir",
+                    str(output),
+                    "--work-root",
+                    str(work_root),
+                ],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            wheels = tuple(sorted(output.glob("*.whl")))
+            self.assertEqual(4, len(wheels))
+            self.assertTrue((output / "release-manifest.json").is_file())
+            self.assertFalse(
+                any(
+                    "mox_adv/metrika_poison.py" in _installed_paths(wheel)
+                    for wheel in wheels
+                )
+            )
+            for left, right in combinations(wheels, 2):
+                self.assertEqual(
+                    set(),
+                    _installed_paths(left) & _installed_paths(right),
                 )
 
     def test_clean_direct_install_starts_http_host_and_returns_module_result(
@@ -436,6 +528,10 @@ class ReleaseDistributionTests(unittest.TestCase):
 
             self.assertIn("Requires-Dist: mox-adv-direct (==1.0.0)", metadata)
             self.assertIn("Requires-Dist: mox-adv-metrika (==1.0.0)", metadata)
+            self.assertIn(
+                "Requires-Dist: playwright (==1.59.0)",
+                metadata,
+            )
             self.assertIn("mox_adv/paired_runtime.py", names)
             self.assertIn("mox_adv/ui/app.js", names)
             self.assertNotIn("mox_adv/modules/direct.py", names)
@@ -470,10 +566,9 @@ class ReleaseDistributionTests(unittest.TestCase):
                     "pip",
                     "install",
                     "--quiet",
+                    "--no-deps",
                     "--no-index",
-                    "--find-links",
-                    str(wheelhouse),
-                    "mox-adv-paired==1.0.0",
+                    *(str(wheel) for wheel in sorted(wheelhouse.glob("*.whl"))),
                 ],
                 check=False,
                 capture_output=True,
@@ -513,7 +608,7 @@ class ReleaseDistributionTests(unittest.TestCase):
                             timeout=0.5,
                         ) as response:
                             page = response.read().decode("utf-8")
-                    except Exception as error:
+                    except (TimeoutError, urllib.error.URLError) as error:
                         last_error = error
                         time.sleep(0.05)
                 if not page:
@@ -526,6 +621,84 @@ class ReleaseDistributionTests(unittest.TestCase):
                     self.fail("paired Dashboard did not start: " + stderr)
                 self.assertIn('lang="ru"', page)
                 self.assertIn("MOX-ADV", page)
+                page_errors: list[str] = []
+                console_errors: list[str] = []
+                with sync_playwright() as playwright:
+                    browser = playwright.chromium.launch(headless=True)
+                    dashboard = browser.new_page(
+                        viewport={"width": 1440, "height": 1000},
+                        device_scale_factor=1,
+                    )
+                    dashboard.on(
+                        "pageerror",
+                        lambda error: page_errors.append(str(error)),
+                    )
+                    dashboard.on(
+                        "console",
+                        lambda message: (
+                            console_errors.append(message.text)
+                            if message.type == "error"
+                            else None
+                        ),
+                    )
+                    origin = "http://127.0.0.1:8878"
+                    for route in EXISTING_ROUTES:
+                        response = dashboard.goto(
+                            origin + route,
+                            wait_until="networkidle",
+                        )
+                        self.assertIsNotNone(response)
+                        self.assertTrue(response.ok)
+                    dashboard.goto(origin + "/cycle", wait_until="networkidle")
+                    visual_digests = {
+                        "test_initial": _visual_digest(
+                            _stable_screenshot(dashboard)
+                        )
+                    }
+                    dashboard.get_by_role("tab", name="Основной").click()
+                    dashboard.locator("#mode-name").get_by_text(
+                        "Реальные данные",
+                        exact=True,
+                    ).wait_for()
+                    visual_digests["production_initial"] = _visual_digest(
+                        _stable_screenshot(dashboard)
+                    )
+                    dashboard.get_by_role("tab", name="Тестовый").click()
+                    dashboard.locator("#mode-name").get_by_text(
+                        "Тестовые данные",
+                        exact=True,
+                    ).wait_for()
+                    dashboard.get_by_role(
+                        "button",
+                        name="Получить предложение",
+                    ).click()
+                    dashboard.get_by_text(
+                        "Предложение готово и ещё не применено",
+                        exact=True,
+                    ).wait_for()
+                    dashboard.locator("#report-run-id").evaluate(
+                        "(element) => {"
+                        " element.textContent = 'ui-reference-run';"
+                        " }"
+                    )
+                    visual_digests["test_result"] = _visual_digest(
+                        _stable_screenshot(dashboard)
+                    )
+                    browser.close()
+                self.assertEqual([], page_errors)
+                application_console_errors = [
+                    message
+                    for message in console_errors
+                    if not (
+                        message.startswith("Applying inline style violates")
+                        and "style-src 'self'" in message
+                    )
+                ]
+                self.assertEqual([], application_console_errors)
+                self.assertEqual(
+                    PRE_MIGRATION_SCREENSHOT_DIGESTS,
+                    visual_digests,
+                )
             finally:
                 if process.poll() is None:
                     process.terminate()

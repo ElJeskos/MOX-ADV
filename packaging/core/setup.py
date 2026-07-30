@@ -1,8 +1,8 @@
 """Build the internal shared runtime without provider or Dashboard code."""
 
-from pathlib import Path
 import shutil
 import sys
+from pathlib import Path
 
 from setuptools import setup
 from setuptools.command.build_py import build_py
@@ -10,8 +10,7 @@ from setuptools.command.build_py import build_py
 PACKAGING_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGING_ROOT))
 
-from release import release_version  # noqa: E402
-
+from release import release_version
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = REPOSITORY_ROOT / "src"

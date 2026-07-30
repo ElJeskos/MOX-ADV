@@ -10,11 +10,10 @@ import json
 import os
 import platform
 import sqlite3
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.module_api.v1 import (
@@ -33,8 +32,8 @@ LOOPBACK_BINDS = frozenset({"127.0.0.1", "localhost"})
 class StandaloneRuntimeSettingsV1:
     environment: ExecutionEnvironment
     state_dir: Path
-    configuration_path: Optional[Path]
-    environment_path: Optional[Path]
+    configuration_path: Path | None
+    environment_path: Path | None
 
     @property
     def provider_read_enabled(self) -> bool:
@@ -52,7 +51,7 @@ DiagnosticBuilderV1 = Callable[
 
 
 def standalone_main_v1(
-    argv: Optional[Sequence[str]],
+    argv: Sequence[str] | None,
     *,
     program: str,
     edition: str,
@@ -192,7 +191,7 @@ def _diagnostics(
     )
     openapi = json.loads(openapi_bytes)
     if not isinstance(openapi, dict):
-        raise RuntimeError("The packaged OpenAPI document is invalid.")
+        raise TypeError("The packaged OpenAPI document must be an object.")
     return (
         {
             "schema_version": "support-diagnostics-v1",

@@ -395,7 +395,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 "mox-adv-metrika (==1.0.0)",
             }.issubset(paired_requirements),
         )
-        self.assertIn("playwright (<2,>=1.48)", paired_requirements)
+        self.assertIn("playwright (==1.59.0)", paired_requirements)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import re
 
-
 DEFAULT_RELEASE_VERSION = "1.0.0"
 _RELEASE_VERSION = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"

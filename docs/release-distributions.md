@@ -58,7 +58,7 @@ Install each customer deployment in its own virtual environment.
 
 The examples use a local release wheelhouse so installation does not resolve an unintended package from the network.
 
-The paired wheelhouse must contain the supported `playwright>=1.48,<2` Python distribution and its transitive dependencies in addition to the four MOX-ADV release artifacts.
+The paired wheelhouse must contain the verified `playwright==1.59.0` Python distribution and its transitive dependencies in addition to the four MOX-ADV release artifacts.
 
 The Chromium provisioning command may download a browser, so an offline deployment must pre-populate the supported Playwright browser cache or use its approved internal artifact mirror.
 
@@ -122,6 +122,8 @@ python3 -m venv .venv-paired
 The existing paired Dashboard remains available at `http://127.0.0.1:8878/`.
 
 The paired wheel depends on the released standalone wheels and does not contain copied Direct or Metrika provider implementation.
+
+The paired release pins the Playwright version that passed its visual contract, and a Playwright upgrade requires a new MOX-ADV patch release with the same browser regression evidence.
 
 ## External configuration and state
 
@@ -274,18 +276,33 @@ Delete or archive those external paths only through the customer's separate data
 
 ## Release verification
 
-Build every artifact with the same `MOX_ADV_RELEASE_VERSION`.
+Build every artifact through the isolated release builder.
+
+The builder uses a different temporary egg, build, and wheel tree for every artifact.
+
+It validates pairwise-disjoint installed paths and exact dependency metadata before publishing the completed wheelhouse atomically.
 
 ```shell
-MOX_ADV_RELEASE_VERSION=1.0.1 \
-  python3 packaging/core/setup.py bdist_wheel
-MOX_ADV_RELEASE_VERSION=1.0.1 \
-  python3 packaging/direct/setup.py bdist_wheel
-MOX_ADV_RELEASE_VERSION=1.0.1 \
-  python3 packaging/metrika/setup.py bdist_wheel
-MOX_ADV_RELEASE_VERSION=1.0.1 \
-  python3 packaging/paired/setup.py bdist_wheel
+python3 scripts/build_release_distributions.py \
+  --version 1.0.1 \
+  --output-dir ./wheelhouse-1.0.1
 ```
+
+The output directory must not already exist.
+
+The resulting `release-manifest.json` records the exact wheel filenames and SHA-256 digests.
+
+The manifest covers the four MOX-ADV artifacts only.
+
+For an install-ready paired offline wheelhouse, download the declared platform-specific Playwright dependency set into the completed directory from the approved package index or mirror.
+
+```shell
+python3 -m pip download \
+  --dest ./wheelhouse-1.0.1 \
+  'playwright==1.59.0'
+```
+
+Provision Chromium through the approved Playwright browser mirror or cache described in the clean-install section.
 
 Run the clean-wheel distribution and lifecycle acceptance tests on every supported target.
 
@@ -296,4 +313,4 @@ PYTHONPATH=src:. python3 -m unittest \
   tests.e2e.test_release_production_safety
 ```
 
-The lifecycle suite verifies exact dependency metadata, diagnostics, secret redaction, a durable 1.0.0 to 1.0.1 upgrade, a 1.0.1 to 1.0.0 rollback, byte-identical replay, uninstall isolation, and preservation of external configuration and state.
+The release suites verify isolated build ownership, clean installation, exact dependency metadata, diagnostics, secret redaction, production write blocking before credentials and HTTP, a durable 1.0.0 to 1.0.1 upgrade, a 1.0.1 to 1.0.0 rollback, byte-identical replay, uninstall isolation, the installed Dashboard visual states, and preservation of external configuration and state.

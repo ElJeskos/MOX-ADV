@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 PACKAGED_ROOT = Path(__file__).with_name("runtime_data")
 

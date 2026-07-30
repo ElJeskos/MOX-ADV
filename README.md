@@ -94,7 +94,7 @@ The paired Dashboard routes, controls, reports, operating modes, and Russian use
 
 `MetrikaModuleV1` runs headlessly through either the HTTP/JSON or in-process module adapter.
 It can start without Direct, the Dashboard, or a provider reader when the customer supplies validated `visits` and `goal_visits` evidence.
-Build the independently installable headless wheel with `python3 packaging/metrika/setup.py bdist_wheel`.
+Build the isolated MOX-ADV artifact set with `python3 scripts/build_release_distributions.py --version 1.0.0 --output-dir ./wheelhouse-1.0.0`.
 The resulting `mox-adv-metrika` distribution contains neither the Direct module nor Dashboard assets.
 Provider-owned reads use `BoundMetrikaReadProviderV1` to bind a stored connection to one allowlisted counter, goal, and campaign before the underlying read connector is called.
 The module validates the closed period, daily grain, scope, attribution, timestamps, watermark ordering, and the six-hour Metrika freshness window.
@@ -105,7 +105,7 @@ Because Metrika alone has no campaign spend or state, the standalone result is p
 
 `DirectModuleV1` runs headlessly through either the HTTP/JSON or in-process module adapter.
 It can start without Metrika, Metrika credentials, the Dashboard, or a provider reader when the customer supplies validated normalized Direct evidence.
-Build the independently installable headless wheel with `python3 packaging/direct/setup.py bdist_wheel`.
+The same release wheelhouse contains the independently installable Direct artifact and its exact internal core dependency.
 The resulting `mox-adv-direct` distribution contains neither the Metrika module nor Dashboard assets.
 Provider-owned reads use `BoundDirectReadProviderV1` to bind a stored connection to one allowlisted account and campaign before the typed Direct Reports and campaign-state readers are called.
 The module validates the closed period, daily report grain, account and campaign scope, attribution, currency, state, managed values, UTC timestamps, watermark ordering, and the 30-minute Direct freshness window.

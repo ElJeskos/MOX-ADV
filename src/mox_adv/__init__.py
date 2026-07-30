@@ -1,3 +1,8 @@
-"""Safe local bootstrap for the MOX-ADV prototype."""
+"""Versioned shared runtime for the three MOX-ADV editions."""
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("mox-adv-core")
+except PackageNotFoundError:
+    __version__ = "1.0.0"

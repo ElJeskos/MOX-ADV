@@ -1,22 +1,3 @@
 [build-system]
-requires = ["setuptools>=58"]
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[project]
-name = "mox-adv"
-version = "0.1.0"
-description = "Safe local MOX-ADV prototype bootstrap"
-requires-python = ">=3.9"
-dependencies = []
-
-[project.scripts]
-mox-adv = "mox_adv.cli:main"
-
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-mox_adv = ["ui/*.css", "ui/*.html", "ui/*.js"]

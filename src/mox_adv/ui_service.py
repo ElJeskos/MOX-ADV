@@ -7,14 +7,14 @@ import json
 import re
 import shutil
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 from mox_adv.commands import (
     ACTION_SPECS,
