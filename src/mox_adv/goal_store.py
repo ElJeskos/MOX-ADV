@@ -619,14 +619,21 @@ class GoalLifecycleStore:
         return self._candidate_from_row(row)
 
     def load_publication(self, candidate_id: str) -> SitePublication:
+        publication = self.load_publication_optional(candidate_id)
+        if publication is None:
+            raise GoalLifecycleRejected("SITE_EVENT_NOT_PUBLISHED")
+        return publication
+
+    def load_publication_optional(
+        self,
+        candidate_id: str,
+    ) -> SitePublication | None:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM goal_site_publications WHERE candidate_id = ?",
                 (candidate_id,),
             ).fetchone()
-        if row is None:
-            raise GoalLifecycleRejected("SITE_EVENT_NOT_PUBLISHED")
-        return self._publication_from_row(row)
+        return None if row is None else self._publication_from_row(row)
 
     def reserved_authority_principal(
         self,

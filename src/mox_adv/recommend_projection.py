@@ -242,8 +242,6 @@ def validate_projection(projection: Mapping[str, Any]) -> None:
             ) from error
     if projection["timezone"] != "UTC":
         raise SchemaValidationError("Projection timezone must be UTC.")
-    if projection["campaign_state"] not in {"ON", "SUSPENDED"}:
-        raise SchemaValidationError("Projection campaign state is unsupported.")
     if projection["campaign_strategy"] != "HIGHEST_POSITION":
         raise SchemaValidationError("Projection campaign strategy is unsupported.")
     if projection["current_ad_variant"] not in {"A", "B"}:

@@ -63,10 +63,10 @@ class DurableMandateAuthority:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path), timeout=0.25)
+        connection = sqlite3.connect(str(self.path), timeout=0.05)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 250")
+        connection.execute("PRAGMA busy_timeout = 50")
         return connection
 
     def _initialize(self) -> None:
@@ -529,7 +529,8 @@ class DurableMandateAuthority:
         now: datetime,
         sender: Callable[[], None],
         before_dispatch: Optional[Callable[[], None]] = None,
-        at_dispatch_boundary: Optional[Callable[[], None]] = None,
+        at_dispatch_boundary: Optional[Callable[[], datetime]] = None,
+        immediate_pre_transport: Optional[Callable[[], datetime]] = None,
     ) -> tuple[ExecutionStatus, ExecutionRecord]:
         connection = self._connect()
         try:
@@ -596,9 +597,25 @@ class DurableMandateAuthority:
             connection.close()
         if before_dispatch is not None:
             before_dispatch()
-        self.require_dispatch_allowed(mandate_id, prepared.scope, now)
+        dispatch_at = now
+        self.require_dispatch_allowed(mandate_id, prepared.scope, dispatch_at)
         if at_dispatch_boundary is not None:
-            at_dispatch_boundary()
+            dispatch_at = at_dispatch_boundary()
+        self.require_dispatch_allowed(
+            mandate_id,
+            prepared.scope,
+            dispatch_at,
+        )
+        immediate_at = (
+            dispatch_at
+            if immediate_pre_transport is None
+            else immediate_pre_transport()
+        )
+        self.require_dispatch_allowed(
+            mandate_id,
+            prepared.scope,
+            immediate_at,
+        )
         sender()
         return ExecutionStatus.IN_FLIGHT, record
 

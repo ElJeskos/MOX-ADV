@@ -34,8 +34,8 @@ class DurableInterruptState:
             os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path), timeout=0.25)
-        connection.execute("PRAGMA busy_timeout = 250")
+        connection = sqlite3.connect(str(self.path), timeout=0.05)
+        connection.execute("PRAGMA busy_timeout = 50")
         return connection
 
     def engage(

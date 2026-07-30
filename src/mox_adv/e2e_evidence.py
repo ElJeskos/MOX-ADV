@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import socket
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -952,41 +953,38 @@ def write_failed_e2e_artifacts(
             "",
         )
     )
-    _replace_failed_artifact(
-        workspace,
-        "events.jsonl",
-        "".join(canonical_json(event) + "\n" for event in events),
-    )
-    _replace_failed_artifact(
-        workspace,
-        "result.json",
-        json.dumps(
-            result,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
+    parent = workspace.path.parent
+    staging_path = Path(
+        tempfile.mkdtemp(
+            prefix=".failed-bundle-" + run_id + ".",
+            dir=str(parent),
         )
-        + "\n",
     )
-    _replace_failed_artifact(workspace, "report.md", report)
-    return workspace.path
-
-
-def _replace_failed_artifact(
-    workspace: RunWorkspace,
-    name: str,
-    text: str,
-) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".failed-" + name + ".",
-        dir=str(workspace.path),
+    stale_path = Path(
+        tempfile.mkdtemp(
+            prefix=".stale-bundle-" + run_id + ".",
+            dir=str(parent),
+        )
     )
+    os.rmdir(stale_path)
+    staging = RunWorkspace(staging_path)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_name, workspace.path / name)
+        staging.write_text(
+            "events.jsonl",
+            "".join(canonical_json(event) + "\n" for event in events),
+        )
+        staging.write_json("result.json", result)
+        staging.write_text("report.md", report)
+        os.replace(workspace.path, stale_path)
+        try:
+            os.replace(staging_path, workspace.path)
+        except BaseException:
+            os.replace(stale_path, workspace.path)
+            raise
+        shutil.rmtree(stale_path)
     finally:
-        if os.path.exists(temporary_name):
-            os.unlink(temporary_name)
+        if staging_path.exists():
+            shutil.rmtree(staging_path)
+        if stale_path.exists() and workspace.path.exists():
+            shutil.rmtree(stale_path)
+    return workspace.path

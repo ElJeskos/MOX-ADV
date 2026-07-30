@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping, Optional, Tuple
 
@@ -21,6 +21,8 @@ from mox_adv.control_state import (
     DurableControlState,
     ExecutionStatus,
     PreparedChange,
+    TerminalExecutionRequest,
+    TerminalNoWritePlan,
     TrustedScope,
 )
 from mox_adv.egress import EgressDenied, HttpEgressGuard
@@ -39,6 +41,7 @@ __all__ = [
     "ExecutionFacts",
     "ExecutionRequest",
     "PreparedChange",
+    "TerminalExecutionRequest",
     "TrustedScope",
 ]
 
@@ -308,9 +311,27 @@ class ApprovalExecutionService:
             self.clock,
         )
 
-    def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
+    def execute(
+        self,
+        request: ExecutionRequest | TerminalExecutionRequest,
+    ) -> ExecutionOutcome:
         try:
-            prepared = self.state.load_prepared_change(request.proposal_id)
+            plan = self.state.load_execution_plan(request.proposal_id)
+            if type(plan) is TerminalNoWritePlan:
+                if type(request) is not TerminalExecutionRequest:
+                    return ExecutionOutcome(
+                        ExecutionStatus.BLOCKED,
+                        "EXECUTION_REQUEST_TYPE_MISMATCH",
+                        None,
+                    )
+                return self._terminal_outcome(plan)
+            if type(request) is not ExecutionRequest:
+                return ExecutionOutcome(
+                    ExecutionStatus.BLOCKED,
+                    "EXECUTION_REQUEST_TYPE_MISMATCH",
+                    None,
+                )
+            prepared = plan
             completed = (
                 self._completed_outcome(prepared)
                 if request.execution_key == prepared.execution_key()
@@ -336,7 +357,10 @@ class ApprovalExecutionService:
             command = build_high_level_command(prepared, minimum, maximum)
             self.egress_guard.enforce_adapter(self.adapter, command)
             before = self.adapter.readback(prepared.target_key())
-            if before not in {prepared.current_value, prepared.target_value}:
+            if (
+                before != prepared.current_value
+                and before != prepared.target_value
+            ):
                 return ExecutionOutcome(
                     ExecutionStatus.BLOCKED,
                     "CURRENT_STATE_MISMATCH",
@@ -378,9 +402,14 @@ class ApprovalExecutionService:
                     at_dispatch_boundary=lambda: self.dispatch_boundary.authorize(
                         prepared.execution_key(),
                         prepared.target_key(),
-                        final_check=lambda: self.state.require_dispatch_allowed(
-                            prepared.scope
+                        final_check=lambda: self._revalidate_dispatch(
+                            prepared,
+                            request,
                         ),
+                    ),
+                    immediate_pre_transport=lambda: self._revalidate_dispatch(
+                        prepared,
+                        request,
                     ),
                 )
             except AdapterTimeout:
@@ -439,6 +468,12 @@ class ApprovalExecutionService:
                 None,
             )
         except ControlRejected as error:
+            execution_key = getattr(request, "execution_key", "")
+            if execution_key:
+                try:
+                    self.write_window.release(execution_key)
+                except ControlRejected:
+                    pass
             return ExecutionOutcome(
                 ExecutionStatus.BLOCKED,
                 error.reason_code,
@@ -446,7 +481,12 @@ class ApprovalExecutionService:
             )
         except sqlite3.Error:
             try:
-                execution = self.state.load_execution(request.execution_key)
+                execution_key = getattr(request, "execution_key", "")
+                execution = (
+                    None
+                    if not execution_key
+                    else self.state.load_execution(execution_key)
+                )
             except (ControlRejected, sqlite3.Error):
                 execution = None
             if execution is not None and execution.status == ExecutionStatus.IN_FLIGHT:
@@ -460,6 +500,46 @@ class ApprovalExecutionService:
                 "CONTROL_STATE_UNAVAILABLE",
                 None,
             )
+
+    @staticmethod
+    def _terminal_outcome(plan: TerminalNoWritePlan) -> ExecutionOutcome:
+        if plan.action == "KEEP":
+            return ExecutionOutcome(
+                ExecutionStatus.NO_CHANGE,
+                None,
+                None,
+            )
+        return ExecutionOutcome(
+            ExecutionStatus.BLOCKED,
+            plan.reason_code or "UNSUPPORTED_STATE",
+            None,
+        )
+
+    def _revalidate_dispatch(
+        self,
+        prepared: PreparedChange,
+        request: ExecutionRequest,
+    ) -> datetime:
+        evaluated_at = self.clock()
+        effective_request = self._trusted_request(
+            prepared,
+            request,
+            evaluated_at,
+        )
+        decision = self.policy.evaluate(prepared, effective_request)
+        if not decision.allowed:
+            raise ControlRejected(
+                decision.reason_code or "ACTION_POLICY_REJECTED",
+                "mutable execution preconditions changed before transport.",
+            )
+        observed = self.adapter.readback(prepared.target_key())
+        if observed != prepared.current_value:
+            raise ControlRejected(
+                "CURRENT_STATE_MISMATCH",
+                "target state changed before transport.",
+            )
+        self.state.require_dispatch_allowed(prepared.scope)
+        return evaluated_at
 
     def _completed_outcome(
         self,
@@ -498,7 +578,11 @@ class ApprovalExecutionService:
             prepared.proposal_id,
             evaluated_at,
         )
-        usage = self.state.execution_usage(prepared.scope, evaluated_at)
+        usage = self.state.execution_usage(
+            prepared.scope,
+            evaluated_at,
+            exclude_execution_key=prepared.execution_key(),
+        )
         try:
             current_fingerprint = self.adapter.current_fingerprint(
                 prepared.target_key()

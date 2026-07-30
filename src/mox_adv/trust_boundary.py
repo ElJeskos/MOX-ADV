@@ -251,8 +251,8 @@ class GuardedDispatchBoundary:
         self,
         execution_key: str,
         target_key: str,
-        final_check: Callable[[], None] | None = None,
-    ) -> None:
+        final_check: Callable[[], Any] | None = None,
+    ) -> Any:
         self.pre_write_audit.authorize(
             execution_key,
             target_key,
@@ -261,10 +261,11 @@ class GuardedDispatchBoundary:
         self.write_window.reserve(execution_key)
         try:
             if final_check is not None:
-                final_check()
+                return final_check()
         except BaseException:
             self.write_window.release(execution_key)
             raise
+        return None
 
 
 class SimulationAuditAnchorSigner:

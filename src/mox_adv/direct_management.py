@@ -4,8 +4,20 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+)
 
 from mox_adv.control_state import DurableControlState, TrustedScope
 
@@ -114,6 +126,20 @@ class RunObjectRegistry(Protocol):
         authority: ProductionPilotAuthority,
     ) -> bool: ...
 
+    def operation_belongs_to_active_saga(
+        self,
+        run_id: str,
+        operation_key: str,
+    ) -> bool: ...
+
+    def claim_direct_operation(
+        self,
+        request: DirectMethodRequest,
+        authority: Optional[ProductionPilotAuthority],
+        now: datetime,
+        final_check: Callable[[], None],
+    ) -> bool: ...
+
 
 class DirectManagementConnectorV1:
     """Expose every FR-002 Direct operation as an explicit typed method."""
@@ -126,6 +152,7 @@ class DirectManagementConnectorV1:
         authority: Optional[ProductionPilotAuthority] = None,
         control_state: Optional[DurableControlState] = None,
         trusted_scope: Optional[TrustedScope] = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         if type(control_state) is not DurableControlState:
             raise DirectStateTransitionRejected(
@@ -146,6 +173,7 @@ class DirectManagementConnectorV1:
         self._authority = authority
         self._control_state = control_state
         self._trusted_scope = trusted_scope
+        self._clock = clock
         self._allowed = {
             (str(item["service"]), str(item["method"]))
             for item in policy["api_matrix"]
@@ -188,9 +216,21 @@ class DirectManagementConnectorV1:
         self._require_state(run_id, "Campaigns", object_id, {"ON"}, "suspend")
         return self._single_write(run_id, "Campaigns", "suspend", object_id, {})
 
-    def campaigns_resume(self, run_id: str, object_id: str) -> Mapping[str, Any]:
+    def campaigns_resume(
+        self,
+        run_id: str,
+        object_id: str,
+        operation_key: Optional[str] = None,
+    ) -> Mapping[str, Any]:
         self._require_state(run_id, "Campaigns", object_id, {"SUSPENDED"}, "resume")
-        return self._single_write(run_id, "Campaigns", "resume", object_id, {})
+        return self._single_write(
+            run_id,
+            "Campaigns",
+            "resume",
+            object_id,
+            {},
+            operation_key,
+        )
 
     def campaigns_archive(self, run_id: str, object_id: str) -> Mapping[str, Any]:
         self._require_owned(run_id, "Campaigns", object_id, "archive")
@@ -201,7 +241,12 @@ class DirectManagementConnectorV1:
         self._require_state(run_id, "Campaigns", object_id, {"ARCHIVED"}, "unarchive")
         return self._single_write(run_id, "Campaigns", "unarchive", object_id, {})
 
-    def campaigns_delete(self, run_id: str, object_id: str) -> Mapping[str, Any]:
+    def campaigns_delete(
+        self,
+        run_id: str,
+        object_id: str,
+        operation_key: Optional[str] = None,
+    ) -> Mapping[str, Any]:
         self._require_owned(run_id, "Campaigns", object_id, "delete")
         self._require_state(
             run_id,
@@ -210,7 +255,14 @@ class DirectManagementConnectorV1:
             {"SUSPENDED", "ARCHIVED"},
             "delete",
         )
-        return self._single_write(run_id, "Campaigns", "delete", object_id, {})
+        return self._single_write(
+            run_id,
+            "Campaigns",
+            "delete",
+            object_id,
+            {},
+            operation_key,
+        )
 
     def adgroups_add(
         self,
@@ -241,9 +293,21 @@ class DirectManagementConnectorV1:
     ) -> Mapping[str, Any]:
         return self._single_write(run_id, "AdGroups", "update", object_id, changes)
 
-    def adgroups_delete(self, run_id: str, object_id: str) -> Mapping[str, Any]:
+    def adgroups_delete(
+        self,
+        run_id: str,
+        object_id: str,
+        operation_key: Optional[str] = None,
+    ) -> Mapping[str, Any]:
         self._require_owned(run_id, "AdGroups", object_id, "delete")
-        return self._single_write(run_id, "AdGroups", "delete", object_id, {})
+        return self._single_write(
+            run_id,
+            "AdGroups",
+            "delete",
+            object_id,
+            {},
+            operation_key,
+        )
 
     def ads_add(
         self,
@@ -295,20 +359,27 @@ class DirectManagementConnectorV1:
         self,
         run_id: str,
         object_ids: Iterable[str],
+        operation_key: Optional[str] = None,
     ) -> Tuple[Mapping[str, Any], ...]:
         ids = self._normalize_ids(object_ids)
         for object_id in ids:
             self._require_state(run_id, "Ads", object_id, {"DRAFT"}, "moderate")
         result = self._invoke(
             run_id,
-            self._operation_key(run_id, "Ads", "moderate", ids),
+            operation_key
+            or self._operation_key(run_id, "Ads", "moderate", ids),
             "Ads",
             "moderate",
             {"ids": list(ids)},
         )
         return result.readback
 
-    def ads_delete(self, run_id: str, object_id: str) -> Mapping[str, Any]:
+    def ads_delete(
+        self,
+        run_id: str,
+        object_id: str,
+        operation_key: Optional[str] = None,
+    ) -> Mapping[str, Any]:
         self._require_owned(run_id, "Ads", object_id, "delete")
         self._require_state(
             run_id,
@@ -317,7 +388,14 @@ class DirectManagementConnectorV1:
             {"DRAFT", "MODERATION", "SUSPENDED", "ARCHIVED"},
             "delete",
         )
-        return self._single_write(run_id, "Ads", "delete", object_id, {})
+        return self._single_write(
+            run_id,
+            "Ads",
+            "delete",
+            object_id,
+            {},
+            operation_key,
+        )
 
     def keywords_add(
         self,
@@ -356,10 +434,22 @@ class DirectManagementConnectorV1:
         self._require_state(run_id, "Keywords", object_id, {"SUSPENDED"}, "resume")
         return self._single_write(run_id, "Keywords", "resume", object_id, {})
 
-    def keywords_delete(self, run_id: str, object_id: str) -> Mapping[str, Any]:
+    def keywords_delete(
+        self,
+        run_id: str,
+        object_id: str,
+        operation_key: Optional[str] = None,
+    ) -> Mapping[str, Any]:
         self._require_owned(run_id, "Keywords", object_id, "delete")
         self._require_state(run_id, "Keywords", object_id, {"SUSPENDED"}, "delete")
-        return self._single_write(run_id, "Keywords", "delete", object_id, {})
+        return self._single_write(
+            run_id,
+            "Keywords",
+            "delete",
+            object_id,
+            {},
+            operation_key,
+        )
 
     def keyword_bids_get(
         self,
@@ -405,13 +495,16 @@ class DirectManagementConnectorV1:
         method: str,
         object_id: str,
         changes: Mapping[str, Any],
+        operation_key: Optional[str] = None,
     ) -> Mapping[str, Any]:
+        payload = {"id": object_id, "changes": copy.deepcopy(dict(changes))}
         result = self._invoke(
             run_id,
-            self._operation_key(run_id, service, method, (object_id,)),
+            operation_key
+            or self._operation_key(run_id, service, method, (object_id,)),
             service,
             method,
-            {"id": object_id, "changes": copy.deepcopy(dict(changes))},
+            payload,
         )
         if not result.readback:
             return {}
@@ -434,6 +527,10 @@ class DirectManagementConnectorV1:
                 + "."
                 + typed_method.value
             )
+        saga_operation = self._operation_belongs_to_active_saga(
+            run_id,
+            operation_key,
+        )
         object_ids = self._request_object_ids(typed_method, payload)
         if typed_method != DirectMethod.ADD:
             ownership_service = (
@@ -448,37 +545,47 @@ class DirectManagementConnectorV1:
                     object_id,
                     typed_method.value,
                 )
-            expected_key = self._operation_key(
-                run_id,
-                typed_service.value,
-                typed_method.value,
-                object_ids,
-            )
-            if operation_key != expected_key:
+            if (
+                not saga_operation
+                and operation_key
+                != self._operation_key(
+                    run_id,
+                    typed_service.value,
+                    typed_method.value,
+                    object_ids,
+                )
+            ):
                 raise DirectStateTransitionRejected(
                     "DIRECT_OPERATION_PLAN_MISMATCH"
                 )
         elif not operation_key:
             raise DirectStateTransitionRejected("DIRECT_OPERATION_PLAN_MISMATCH")
-        self._require_adapter_authority()
-        if typed_method != DirectMethod.GET:
-            self._require_dispatch_allowed()
-        result = self._adapter.invoke(
-            DirectMethodRequest(
-                run_id=run_id,
-                operation_key=operation_key,
-                service=typed_service,
-                method=typed_method,
-                payload=copy.deepcopy(dict(payload)),
-            )
+        production = self._require_adapter_authority()
+        request = DirectMethodRequest(
+            run_id=run_id,
+            operation_key=operation_key,
+            service=typed_service,
+            method=typed_method,
+            payload=copy.deepcopy(dict(payload)),
         )
+        claimed = self._claim_direct_operation(
+            request,
+            self._require_dispatch_allowed,
+        )
+        if typed_method != DirectMethod.GET and not claimed:
+            if production:
+                raise DirectStateTransitionRejected(
+                    "DIRECT_OPERATION_PLAN_MISMATCH"
+                )
+            self._require_dispatch_allowed()
+        result = self._adapter.invoke(request)
         if result.service != typed_service or result.method != typed_method:
             raise DirectStateTransitionRejected("DIRECT_RESPONSE_TYPE_MISMATCH")
         return result
 
-    def _require_adapter_authority(self) -> None:
+    def _require_adapter_authority(self) -> bool:
         if type(self._adapter) is FakeDirectManagementAdapter:
-            return
+            return False
         pilot = self._policy["bindings"]["pilot"]
         record = self._policy["record"]
         authority = self._authority
@@ -506,6 +613,39 @@ class DirectManagementConnectorV1:
             raise DirectStateTransitionRejected(
                 "DURABLE_DISPATCH_GUARD_REQUIRED"
             )
+        return True
+
+    def _operation_belongs_to_active_saga(
+        self,
+        run_id: str,
+        operation_key: str,
+    ) -> bool:
+        checker = getattr(
+            self._registry,
+            "operation_belongs_to_active_saga",
+            None,
+        )
+        return bool(
+            checker is not None
+            and checker(run_id, operation_key)
+        )
+
+    def _claim_direct_operation(
+        self,
+        request: DirectMethodRequest,
+        final_check: Callable[[], None],
+    ) -> bool:
+        claim = getattr(self._registry, "claim_direct_operation", None)
+        if claim is None:
+            return False
+        return bool(
+            claim(
+                request,
+                self._authority,
+                self._clock(),
+                final_check,
+            )
+        )
 
     def _require_dispatch_allowed(self) -> None:
         if type(self._adapter) is FakeDirectManagementAdapter:

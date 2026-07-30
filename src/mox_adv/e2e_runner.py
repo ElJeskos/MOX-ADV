@@ -7,7 +7,7 @@ import copy
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -659,6 +659,10 @@ def _analytics_optimization_workflow(
         raise AssertionError("The exact approval was not consumed.")
 
     blocked_prepared = _approval_prepared("proposal-e2e-kill-switch")
+    blocked_prepared = replace(
+        blocked_prepared,
+        scope=_scope("kill-switch-probe"),
+    )
     control_state.register_prepared_change(blocked_prepared)
     control_state.grant_approval(
         blocked_prepared.proposal_id,
@@ -668,7 +672,7 @@ def _analytics_optimization_workflow(
         execution_now,
     )
     control_state.engage_kill_switch(
-        "global",
+        "campaign:kill-switch-probe",
         "E2E verifies the next unsent command is blocked.",
         principal,
         execution_now,
@@ -686,13 +690,6 @@ def _analytics_optimization_workflow(
     ).execute(_approval_request(blocked_prepared))
     if blocked.status != "BLOCKED" or blocked_adapter.write_calls != 0:
         raise AssertionError("Kill switch did not block before fake dispatch.")
-    control_state.release_kill_switch(
-        "global",
-        "E2E resumes local fake-only validation.",
-        principal,
-        execution_now,
-    )
-
     autonomy_now = execution_now + timedelta(hours=73)
     signer = HMACMandateSigner(b"issue-33-local-e2e-mandate-key")
     authority = DurableMandateAuthority(

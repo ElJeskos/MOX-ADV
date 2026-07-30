@@ -26,6 +26,8 @@ from mox_adv.control_state import (
     AuthenticatedPrincipal,
     ControlRejected,
     DurableControlState,
+    ElevatedAuthenticatedPrincipal,
+    MacOSElevatedSecurityVerifier,
     PreparedChange,
     TrustedScope,
 )
@@ -45,8 +47,16 @@ class FixedAuthenticator:
             authentication="authenticated_macos_user",
         )
 
-    def elevated_reauthenticate(self) -> AuthenticatedPrincipal:
-        return self.authenticate()
+    def elevated_reauthenticate(self) -> ElevatedAuthenticatedPrincipal:
+        with mock.patch.object(
+            MacOSElevatedSecurityVerifier,
+            "verify",
+            return_value=True,
+        ):
+            return ElevatedAuthenticatedPrincipal.verified(
+                self.authenticate(),
+                MacOSElevatedSecurityVerifier(),
+            )
 
 
 class RejectingPreWriteAudit:
@@ -1057,7 +1067,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
                     control.release_kill_switch(
                         "campaign:campaign-1",
                         "Incident resolved.",
-                        self.principal,
+                        FixedAuthenticator().elevated_reauthenticate(),
                         NOW,
                     )
                     rechecked = service.recheck(make_request(prepared, mandate))

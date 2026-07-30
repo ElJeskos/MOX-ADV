@@ -421,17 +421,20 @@ class GoalLifecycleService:
         )
         if completed:
             return
-        publication = self.store.load_publication(candidate_id)
         if not publication_done:
-            current = self.site_adapter.publication_for_candidate(candidate_id)
-            if current is not None:
-                self._require_dispatch_allowed(candidate.counter_id)
-                self.site_adapter.rollback_publication(publication, run_id)
-            elif (
-                self.site_adapter.current_version(publication.site_zone)
-                != publication.previous_version
-            ):
-                raise GoalLifecycleRejected("SITE_ROLLBACK_PRECONDITION_FAILED")
+            publication = self.store.load_publication_optional(candidate_id)
+            if publication is not None:
+                current = self.site_adapter.publication_for_candidate(candidate_id)
+                if current is not None:
+                    self._require_dispatch_allowed(candidate.counter_id)
+                    self.site_adapter.rollback_publication(publication, run_id)
+                elif (
+                    self.site_adapter.current_version(publication.site_zone)
+                    != publication.previous_version
+                ):
+                    raise GoalLifecycleRejected(
+                        "SITE_ROLLBACK_PRECONDITION_FAILED"
+                    )
             self.store.mark_cleanup_publication_rolled_back(candidate_id)
         if not goal_done:
             if self.goal_adapter.goal_exists(

@@ -21,7 +21,10 @@ from mox_adv.campaign_lifecycle import (
 )
 from mox_adv.control_state import AuthenticatedPrincipal, DurableControlState
 from mox_adv.direct_management import (
+    DirectMethod,
+    DirectMethodRequest,
     DirectManagementConnectorV1,
+    DirectService,
     DirectStateTransitionRejected,
     FakeDirectManagementAdapter,
     ProductionPilotAuthority,
@@ -380,6 +383,27 @@ class CampaignLifecycleTests(unittest.TestCase):
             approver["authentication"],
         )
         self.store.begin_step(self.request.execution_key, "CAMPAIGN_ADD", NOW)
+        claimed = self.store.claim_direct_operation(
+            DirectMethodRequest(
+                run_id=self.request.run_id,
+                operation_key=self.request.execution_key + ":CAMPAIGN_ADD",
+                service=DirectService.CAMPAIGNS,
+                method=DirectMethod.ADD,
+                payload={
+                    "type": self.request.draft.campaign_type,
+                    "state": "SUSPENDED",
+                    "strategy": dict(self.request.draft.strategy),
+                    "geography": list(self.request.draft.geography),
+                    "schedule": dict(self.request.draft.schedule),
+                    "WeeklySpendLimit": self.request.draft.budget[
+                        "weekly_micros"
+                    ],
+                },
+            ),
+            None,
+            NOW,
+        )
+        self.assertTrue(claimed)
 
         result = self.service().execute(self.request, NOW)
 

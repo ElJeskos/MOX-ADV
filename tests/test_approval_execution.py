@@ -32,7 +32,9 @@ from mox_adv.control_state import (
     AuthenticatedPrincipal,
     ControlRejected,
     DurableControlState,
+    ElevatedAuthenticatedPrincipal,
     ExecutionStatus,
+    MacOSElevatedSecurityVerifier,
     MacOSLocalPrincipalAuthenticator,
 )
 from mox_adv.egress import (
@@ -61,18 +63,16 @@ class FixedAuthenticator:
             authentication="authenticated_macos_user",
         )
 
-    def elevated_reauthenticate(self) -> AuthenticatedPrincipal:
-        return self.authenticate()
-
-
-class RecordingElevatedVerifier:
-    def __init__(self, allowed: bool) -> None:
-        self.allowed = allowed
-        self.calls = 0
-
-    def verify(self, principal: AuthenticatedPrincipal) -> bool:
-        self.calls += 1
-        return self.allowed and principal.identity == "sviridov"
+    def elevated_reauthenticate(self) -> ElevatedAuthenticatedPrincipal:
+        with mock.patch.object(
+            MacOSElevatedSecurityVerifier,
+            "verify",
+            return_value=True,
+        ):
+            return ElevatedAuthenticatedPrincipal.verified(
+                self.authenticate(),
+                MacOSElevatedSecurityVerifier(),
+            )
 
 
 class RejectingPreWriteAudit:
@@ -199,7 +199,24 @@ class CommandContractTests(unittest.TestCase):
                 if "BUDGET" in action or "BID" in action:
                     diff["relative_step_percent"] = 10
                 elif action == "SET_AD_VARIANT":
-                    diff["variant_id"] = target
+                    current = {
+                        "variant_id": current,
+                        "title": "Prepared title A",
+                        "text": "Prepared text A",
+                    }
+                    target = {
+                        "variant_id": target,
+                        "title": "Prepared title B",
+                        "text": "Prepared text B",
+                    }
+                    diff.update(
+                        {
+                            "variant_id": target["variant_id"],
+                            "title": target["title"],
+                            "text": target["text"],
+                            "source_plan_hash": "sha256:" + "7" * 64,
+                        }
+                    )
                 else:
                     diff["target_state"] = target
                 prepared = replace(
@@ -221,6 +238,9 @@ class CommandContractTests(unittest.TestCase):
                 self.assertEqual(prepared.proposal_id, command.proposal_id)
                 self.assertEqual(prepared.execution_key(), command.execution_key)
                 self.assertTrue(command.readback_required)
+                if action == "SET_AD_VARIANT":
+                    self.assertEqual("Prepared title B", command.title)
+                    self.assertEqual("Prepared text B", command.text)
                 self.assertEqual(
                     "sha256:" + "2" * 64,
                     command.expected_fingerprint,
@@ -872,32 +892,38 @@ class KillSwitchAndCliTests(unittest.TestCase):
     def test_elevated_reauthentication_uses_a_separate_fail_closed_verifier(
         self,
     ) -> None:
-        allowed = RecordingElevatedVerifier(True)
-        with mock.patch(
-            "mox_adv.control_state.getpass.getuser",
-            return_value="sviridov",
-        ):
-            principal = MacOSLocalPrincipalAuthenticator(
-                elevated_verifier=allowed
-            ).elevated_reauthenticate()
-        self.assertEqual("sviridov", principal.identity)
-        self.assertEqual(1, allowed.calls)
-
-        denied = RecordingElevatedVerifier(False)
         with (
             mock.patch(
                 "mox_adv.control_state.getpass.getuser",
                 return_value="sviridov",
             ),
+            mock.patch(
+                "mox_adv.control_state.subprocess.run",
+                return_value=mock.Mock(returncode=0),
+            ) as allowed,
+        ):
+            principal = (
+                MacOSLocalPrincipalAuthenticator().elevated_reauthenticate()
+            )
+        self.assertEqual("sviridov", principal.identity)
+        self.assertEqual(1, allowed.call_count)
+
+        with (
+            mock.patch(
+                "mox_adv.control_state.getpass.getuser",
+                return_value="sviridov",
+            ),
+            mock.patch(
+                "mox_adv.control_state.subprocess.run",
+                return_value=mock.Mock(returncode=1),
+            ) as denied,
             self.assertRaisesRegex(
                 ControlRejected,
                 "ELEVATED_REAUTHENTICATION_FAILED",
             ),
         ):
-            MacOSLocalPrincipalAuthenticator(
-                elevated_verifier=denied
-            ).elevated_reauthenticate()
-        self.assertEqual(1, denied.calls)
+            MacOSLocalPrincipalAuthenticator().elevated_reauthenticate()
+        self.assertEqual(1, denied.call_count)
 
 
 class EgressGuardTests(unittest.TestCase):

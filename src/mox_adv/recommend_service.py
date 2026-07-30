@@ -38,6 +38,22 @@ class RecommendationOutcome:
     deduplicated: bool
     cost_warning: bool
 
+    @property
+    def decision_status(self) -> str:
+        if self.proposal is not None:
+            return self.proposal.status
+        if self.reason_code == "UNSUPPORTED_STATE":
+            return "NEEDS_HUMAN"
+        return "BLOCKED"
+
+    @property
+    def decision_action(self) -> Optional[str]:
+        if self.proposal is not None:
+            return str(self.proposal.actions[0]["action"])
+        if self.reason_code == "UNSUPPORTED_STATE":
+            return "REQUEST_HUMAN_HELP"
+        return None
+
 
 class RecommendationService:
     """Generate, validate, enrich, and persist one RECOMMEND proposal."""
@@ -98,12 +114,32 @@ class RecommendationService:
                 cost_warning=False,
             )
         try:
+            if not isinstance(created_at, str) or not isinstance(expires_at, str):
+                raise ValueError("Recommendation timestamps must be strings.")
             parsed_evaluation_at = datetime.fromisoformat(
                 created_at.replace("Z", "+00:00")
             )
-            if parsed_evaluation_at.tzinfo is None:
+            parsed_expiry = datetime.fromisoformat(
+                expires_at.replace("Z", "+00:00")
+            )
+            if (
+                parsed_evaluation_at.tzinfo is None
+                or parsed_expiry.tzinfo is None
+                or parsed_expiry <= parsed_evaluation_at
+            ):
                 raise ValueError("Recommendation evaluation time must be aware.")
             evaluation_at = parsed_evaluation_at.astimezone(timezone.utc)
+            if projection["campaign_state"] not in {"ON", "SUSPENDED"}:
+                return RecommendationOutcome(
+                    status="NEEDS_HUMAN",
+                    execution_status="BLOCKED",
+                    reason_code="UNSUPPORTED_STATE",
+                    proposal=None,
+                    provider=self._not_invoked_metadata(),
+                    canonical_hash="",
+                    deduplicated=False,
+                    cost_warning=False,
+                )
             reason_key = normalized_reason_key(projection["observed_facts"])
             active = self.store.load_active_by_reason(
                 snapshot_id,

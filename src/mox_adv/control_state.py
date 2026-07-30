@@ -9,7 +9,7 @@ import os
 import sqlite3
 import subprocess
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -82,6 +82,41 @@ class AuthenticatedPrincipal:
     authentication: str
 
 
+_ELEVATED_PRINCIPAL_SEAL = object()
+
+
+@dataclass(frozen=True)
+class ElevatedAuthenticatedPrincipal(AuthenticatedPrincipal):
+    _seal: object
+
+    @classmethod
+    def verified(
+        cls,
+        principal: AuthenticatedPrincipal,
+        verifier: "ElevatedReauthenticationVerifier",
+    ) -> "ElevatedAuthenticatedPrincipal":
+        if (
+            type(principal) is not AuthenticatedPrincipal
+            or type(verifier) is not MacOSElevatedSecurityVerifier
+            or not verifier.verify(principal)
+        ):
+            raise ControlRejected(
+                "ELEVATED_REAUTHENTICATION_FAILED",
+                "elevated reauthentication did not succeed.",
+            )
+        return cls(
+            identity=principal.identity,
+            authentication=principal.authentication,
+            _seal=_ELEVATED_PRINCIPAL_SEAL,
+        )
+
+    def is_verified(self) -> bool:
+        return (
+            type(self) is ElevatedAuthenticatedPrincipal
+            and self._seal is _ELEVATED_PRINCIPAL_SEAL
+        )
+
+
 class ElevatedReauthenticationVerifier(Protocol):
     def verify(self, principal: AuthenticatedPrincipal) -> bool: ...
 
@@ -114,6 +149,14 @@ class MacOSLocalPrincipalAuthenticator:
         expected_identity: str = "sviridov",
         elevated_verifier: Optional[ElevatedReauthenticationVerifier] = None,
     ) -> None:
+        if (
+            elevated_verifier is not None
+            and type(elevated_verifier) is not MacOSElevatedSecurityVerifier
+        ):
+            raise ControlRejected(
+                "ELEVATED_REAUTHENTICATION_FAILED",
+                "elevated verifier is not a trusted OS verifier.",
+            )
         self.expected_identity = expected_identity
         self.elevated_verifier = (
             MacOSElevatedSecurityVerifier()
@@ -133,14 +176,12 @@ class MacOSLocalPrincipalAuthenticator:
             authentication="authenticated_macos_user",
         )
 
-    def elevated_reauthenticate(self) -> AuthenticatedPrincipal:
+    def elevated_reauthenticate(self) -> ElevatedAuthenticatedPrincipal:
         principal = self.authenticate()
-        if not self.elevated_verifier.verify(principal):
-            raise ControlRejected(
-                "ELEVATED_REAUTHENTICATION_FAILED",
-                "macOS elevated reauthentication did not succeed.",
-            )
-        return principal
+        return ElevatedAuthenticatedPrincipal.verified(
+            principal,
+            self.elevated_verifier,
+        )
 
 
 class CampaignApprovalRepository:
@@ -342,6 +383,120 @@ class PreparedChange:
         )
 
 
+_PREPARED_AD_VARIANT_SEAL = object()
+
+
+@dataclass(frozen=True)
+class PreparedAdVariantCatalog:
+    source_plan_hash: str
+    variants: Tuple[Tuple[str, str, str], ...]
+    _seal: object = field(repr=False, compare=False)
+
+    @classmethod
+    def from_campaign_plan(
+        cls,
+        canonical_plan: Mapping[str, Any],
+    ) -> "PreparedAdVariantCatalog":
+        try:
+            if canonical_plan["schema_version"] != "campaign-creation-plan-v1":
+                raise KeyError("schema_version")
+            groups = canonical_plan["draft"]["groups"]
+            ads = groups[0]["ads"]
+            variants = {
+                item["variant_id"]: {
+                    "variant_id": item["variant_id"],
+                    "title": item["title"],
+                    "text": item["text"],
+                }
+                for item in ads
+            }
+        except (IndexError, KeyError, TypeError) as error:
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "campaign plan has no trusted ad variants.",
+            ) from error
+        if (
+            set(variants) != {"A", "B"}
+            or any(
+                type(value["variant_id"]) is not str
+                or type(value["title"]) is not str
+                or type(value["text"]) is not str
+                or not value["title"].strip()
+                or not value["text"].strip()
+                for value in variants.values()
+            )
+        ):
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "campaign plan ad variants are incomplete.",
+            )
+        return cls(
+            source_plan_hash=canonical_hash(canonical_plan),
+            variants=tuple(
+                sorted(
+                    (
+                        variant_id,
+                        value["title"],
+                        value["text"],
+                    )
+                    for variant_id, value in variants.items()
+                )
+            ),
+            _seal=_PREPARED_AD_VARIANT_SEAL,
+        )
+
+    def exact_copy(self, variant_id: str) -> Mapping[str, str]:
+        variants = {
+            item_id: {
+                "variant_id": item_id,
+                "title": title,
+                "text": text,
+            }
+            for item_id, title, text in self.variants
+        }
+        try:
+            value = variants[variant_id]
+        except KeyError as error:
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "requested ad variant is not prepared.",
+            ) from error
+        if (
+            type(self) is not PreparedAdVariantCatalog
+            or self._seal is not _PREPARED_AD_VARIANT_SEAL
+            or not self.source_plan_hash.startswith("sha256:")
+            or set(variants) != {"A", "B"}
+            or set(value) != {"variant_id", "title", "text"}
+            or value["variant_id"] != variant_id
+            or not value["title"].strip()
+            or not value["text"].strip()
+        ):
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "prepared ad variant catalog is invalid.",
+            )
+        return dict(value)
+
+
+@dataclass(frozen=True)
+class TerminalNoWritePlan:
+    proposal_id: str
+    proposal_hash: str
+    snapshot_id: str
+    policy_version: str
+    status: str
+    action: str
+    reason_code: Optional[str]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class TerminalExecutionRequest:
+    proposal_id: str
+
+
 @dataclass(frozen=True)
 class ApprovalRecord:
     approval_id: str
@@ -402,10 +557,10 @@ class DurableControlState:
             os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.path), timeout=0.25)
+        connection = sqlite3.connect(str(self.path), timeout=0.05)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 250")
+        connection.execute("PRAGMA busy_timeout = 50")
         return connection
 
     def _initialize(self) -> None:
@@ -419,6 +574,13 @@ class DurableControlState:
                     source TEXT NOT NULL DEFAULT 'FIXTURE',
                     proposal_json TEXT,
                     snapshot_json TEXT
+                );
+                CREATE TABLE IF NOT EXISTS terminal_no_write_plans (
+                    proposal_id TEXT PRIMARY KEY,
+                    canonical_json TEXT NOT NULL,
+                    canonical_hash TEXT NOT NULL,
+                    proposal_json TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS approvals (
                     approval_id TEXT PRIMARY KEY,
@@ -487,6 +649,11 @@ class DurableControlState:
                 BEFORE UPDATE ON prepared_changes
                 BEGIN
                     SELECT RAISE(ABORT, 'immutable prepared change');
+                END;
+                CREATE TRIGGER IF NOT EXISTS terminal_no_write_plans_no_update
+                BEFORE UPDATE ON terminal_no_write_plans
+                BEGIN
+                    SELECT RAISE(ABORT, 'immutable terminal plan');
                 END;
                 """
             )
@@ -660,7 +827,8 @@ class DurableControlState:
         policy: Mapping[str, Any],
         writer: str,
         at: datetime,
-    ) -> PreparedChange:
+        prepared_ad_variants: Optional[PreparedAdVariantCatalog] = None,
+    ) -> PreparedChange | TerminalNoWritePlan:
         """Load one immutable proposal and derive its executable plan server-side."""
 
         from mox_adv.proposal_store import (
@@ -706,8 +874,36 @@ class DurableControlState:
                 "proposal is not bound to the trusted snapshot.",
             )
         try:
-            action = OptimizationAction(str(proposal.actions[0]["action"]))
-        except (KeyError, ValueError) as error:
+            action_name = str(proposal.actions[0]["action"])
+        except KeyError as error:
+            raise ControlRejected(
+                "UNSUPPORTED_ACTION",
+                "proposal does not contain one executable action.",
+            ) from error
+        if action_name in {"KEEP", "REQUEST_HUMAN_HELP"}:
+            reason_code = (
+                None
+                if action_name == "KEEP"
+                else str(proposal.actions[0]["parameters"]["reason_code"])
+            )
+            terminal = TerminalNoWritePlan(
+                proposal_id=proposal.proposal_id,
+                proposal_hash=_canonical_hash(proposal.as_dict()),
+                snapshot_id=snapshot.snapshot_id,
+                policy_version=snapshot.policy_version,
+                status=proposal.status,
+                action=action_name,
+                reason_code=reason_code,
+            )
+            self._store_terminal_no_write_plan(
+                terminal,
+                proposal_json=_canonical(proposal.as_dict()),
+                snapshot_json=_canonical(snapshot.as_dict()),
+            )
+            return terminal
+        try:
+            action = OptimizationAction(action_name)
+        except ValueError as error:
             raise ControlRejected(
                 "UNSUPPORTED_ACTION",
                 "proposal does not contain one executable action.",
@@ -722,7 +918,18 @@ class DurableControlState:
             snapshot.campaign,
             action,
             expected_diff,
+            prepared_ad_variants,
         )
+        if action == OptimizationAction.SET_AD_VARIANT:
+            assert isinstance(target_value, Mapping)
+            assert prepared_ad_variants is not None
+            expected_diff = {
+                "operation": action.value,
+                "variant_id": target_value["variant_id"],
+                "title": target_value["title"],
+                "text": target_value["text"],
+                "source_plan_hash": prepared_ad_variants.source_plan_hash,
+            }
         prepared = PreparedChange(
             proposal_id=proposal.proposal_id,
             proposal_hash=_canonical_hash(proposal.as_dict()),
@@ -762,6 +969,7 @@ class DurableControlState:
         campaign: Any,
         action: OptimizationAction,
         expected_diff: Mapping[str, Any],
+        prepared_ad_variants: Optional[PreparedAdVariantCatalog] = None,
     ) -> tuple[Any, Any]:
         spec = ACTION_SPECS[action]
         if spec.family == ActionFamily.WEEKLY_BUDGET:
@@ -769,7 +977,13 @@ class DurableControlState:
         elif spec.family == ActionFamily.SEARCH_BID:
             current = campaign.current_search_bid_micros
         elif spec.family == ActionFamily.AD_VARIANT:
-            current = campaign.current_ad_variant
+            current_variant = campaign.current_ad_variant
+            if type(prepared_ad_variants) is not PreparedAdVariantCatalog:
+                raise ControlRejected(
+                    "PREPARED_AD_COPY_UNAVAILABLE",
+                    "ad variant execution requires a trusted campaign plan.",
+                )
+            current = prepared_ad_variants.exact_copy(current_variant)
         else:
             current = campaign.state
         if spec.relative_percent is not None:
@@ -782,12 +996,13 @@ class DurableControlState:
                 )
             target = calculate_relative_target(current, spec.relative_percent)
         elif spec.family == ActionFamily.AD_VARIANT:
-            target = expected_diff.get("variant_id")
-            if target == current:
+            target_variant = expected_diff.get("variant_id")
+            if target_variant == current["variant_id"]:
                 raise ControlRejected(
                     "IMMUTABLE_PROPOSAL_CONFLICT",
                     "proposal ad variant does not change current state.",
                 )
+            target = prepared_ad_variants.exact_copy(str(target_variant))
         else:
             if current != spec.source_state:
                 raise ControlRejected(
@@ -801,6 +1016,100 @@ class DurableControlState:
                     "proposal target state is not deterministic.",
                 )
         return current, target
+
+    def _store_terminal_no_write_plan(
+        self,
+        plan: TerminalNoWritePlan,
+        *,
+        proposal_json: str,
+        snapshot_json: str,
+    ) -> None:
+        canonical_json = _canonical(plan.as_dict())
+        digest = canonical_hash(plan.as_dict())
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT canonical_json, canonical_hash, proposal_json, snapshot_json "
+                "FROM terminal_no_write_plans WHERE proposal_id = ?",
+                (plan.proposal_id,),
+            ).fetchone()
+            values = (canonical_json, digest, proposal_json, snapshot_json)
+            if existing is not None:
+                if tuple(existing) != values:
+                    raise ControlRejected(
+                        "IMMUTABLE_PROPOSAL_CONFLICT",
+                        "terminal proposal evidence changed.",
+                    )
+                return
+            connection.execute(
+                "INSERT INTO terminal_no_write_plans "
+                "(proposal_id, canonical_json, canonical_hash, proposal_json, "
+                "snapshot_json) VALUES (?, ?, ?, ?, ?)",
+                (plan.proposal_id,) + values,
+            )
+
+    def load_terminal_no_write_plan(
+        self,
+        proposal_id: str,
+    ) -> TerminalNoWritePlan:
+        from mox_adv.recommend_contracts import _canonical_hash
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT canonical_json, canonical_hash, proposal_json, snapshot_json "
+                "FROM terminal_no_write_plans WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            raise ControlRejected(
+                "APPROVAL_NOT_FOUND",
+                "terminal proposal is not prepared.",
+            )
+        try:
+            value = json.loads(row["canonical_json"])
+            proposal = json.loads(row["proposal_json"])
+            snapshot = json.loads(row["snapshot_json"])
+            plan = TerminalNoWritePlan(**value)
+            action = proposal["actions"][0]
+            matches = (
+                canonical_hash(value) == row["canonical_hash"]
+                and plan.proposal_hash == _canonical_hash(proposal)
+                and proposal["proposal_id"] == plan.proposal_id
+                and proposal["snapshot_id"] == plan.snapshot_id
+                and snapshot["snapshot_id"] == plan.snapshot_id
+                and snapshot["policy_version"] == plan.policy_version
+                and action["action"] == plan.action
+                and proposal["expected_diff"]["operation"] == "NO_CHANGE"
+                and (
+                    plan.action == "KEEP"
+                    or (
+                        plan.action == "REQUEST_HUMAN_HELP"
+                        and action["parameters"]["reason_code"]
+                        == plan.reason_code
+                    )
+                )
+            )
+        except (IndexError, KeyError, TypeError, ValueError) as error:
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "terminal proposal evidence is invalid.",
+            ) from error
+        if not matches:
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "terminal proposal no longer matches trusted evidence.",
+            )
+        return plan
+
+    def load_execution_plan(
+        self,
+        proposal_id: str,
+    ) -> PreparedChange | TerminalNoWritePlan:
+        try:
+            return self.load_prepared_change(proposal_id)
+        except ControlRejected as error:
+            if error.reason_code != "APPROVAL_NOT_FOUND":
+                raise
+        return self.load_terminal_no_write_plan(proposal_id)
 
     def _store_prepared_change(
         self,
@@ -898,22 +1207,51 @@ class DurableControlState:
             elif spec.family == ActionFamily.SEARCH_BID:
                 snapshot_current = campaign["current_search_bid_micros"]
             elif spec.family == ActionFamily.AD_VARIANT:
-                snapshot_current = campaign["current_ad_variant"]
+                snapshot_current = prepared.current_value["variant_id"]
             else:
                 snapshot_current = campaign["state"]
+            proposal_diff = dict(proposal.get("expected_diff", {}))
+            prepared_diff = dict(prepared.expected_diff)
+            diff_matches = (
+                proposal_diff == prepared_diff
+                if spec.family != ActionFamily.AD_VARIANT
+                else (
+                    proposal_diff
+                    == {
+                        "operation": prepared.action.value,
+                        "variant_id": prepared.target_value["variant_id"],
+                    }
+                    and prepared_diff
+                    == {
+                        "operation": prepared.action.value,
+                        "variant_id": prepared.target_value["variant_id"],
+                        "title": prepared.target_value["title"],
+                        "text": prepared.target_value["text"],
+                        "source_plan_hash": prepared_diff.get(
+                            "source_plan_hash"
+                        ),
+                    }
+                    and str(prepared_diff["source_plan_hash"]).startswith(
+                        "sha256:"
+                    )
+                )
+            )
             matches = (
                 _canonical_hash(proposal) == prepared.proposal_hash
                 and proposal.get("proposal_id") == prepared.proposal_id
                 and proposal.get("snapshot_id") == prepared.snapshot_id
                 and len(actions) == 1
                 and actions[0].get("action") == prepared.action.value
-                and proposal.get("expected_diff")
-                == dict(prepared.expected_diff)
+                and diff_matches
                 and snapshot.get("snapshot_id") == prepared.snapshot_id
                 and snapshot.get("generated_at")
                 == prepared.snapshot_generated_at
                 and snapshot.get("policy_version") == prepared.policy_version
-                and snapshot_current == prepared.current_value
+                and (
+                    campaign["current_ad_variant"] == snapshot_current
+                    if spec.family == ActionFamily.AD_VARIANT
+                    else snapshot_current == prepared.current_value
+                )
                 and provenance["direct_report"]["watermark"]
                 == prepared.direct_watermark
                 and provenance["metrika_report"]["watermark"]
@@ -1049,11 +1387,13 @@ class DurableControlState:
         self,
         scope: TrustedScope,
         now: datetime,
+        *,
+        exclude_execution_key: Optional[str] = None,
     ) -> ExecutionUsage:
         cutoff = now.astimezone(timezone.utc) - timedelta(hours=24)
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT e.status, e.updated_at, p.canonical_json "
+                "SELECT e.execution_key, e.status, e.updated_at, p.canonical_json "
                 "FROM executions e JOIN prepared_changes p "
                 "ON p.proposal_id = e.proposal_id "
                 "WHERE e.status IN ('IN_FLIGHT', 'APPLIED', 'NO_CHANGE', "
@@ -1064,6 +1404,8 @@ class DurableControlState:
         monetary = 0
         latest: Optional[datetime] = None
         for row in rows:
+            if row["execution_key"] == exclude_execution_key:
+                continue
             prepared = PreparedChange.from_dict(json.loads(row["canonical_json"]))
             if prepared.scope != scope:
                 continue
@@ -1350,7 +1692,8 @@ class DurableControlState:
         approval: ApprovalRecord,
         now: datetime,
         sender: Callable[[], None],
-        at_dispatch_boundary: Optional[Callable[[], None]] = None,
+        at_dispatch_boundary: Optional[Callable[[], datetime]] = None,
+        immediate_pre_transport: Optional[Callable[[], datetime]] = None,
     ) -> Tuple[ExecutionStatus, ExecutionRecord]:
         """Commit authority and IN_FLIGHT before the immediate dispatch boundary."""
 
@@ -1494,12 +1837,20 @@ class DurableControlState:
                         "KILL_SWITCH_ACTIVE",
                         "durable kill switch blocks the unsent command.",
                     )
-            if at_dispatch_boundary is not None:
-                at_dispatch_boundary()
+            dispatch_at = (
+                now
+                if at_dispatch_boundary is None
+                else at_dispatch_boundary()
+            )
+            immediate_at = (
+                dispatch_at
+                if immediate_pre_transport is None
+                else immediate_pre_transport()
+            )
             self._consume_reserved_approval_for_dispatch(
                 prepared,
                 approval.approval_id,
-                now,
+                immediate_at,
             )
         except ControlRejected as error:
             self.release_approval_reservation(
@@ -1698,9 +2049,17 @@ class DurableControlState:
         self,
         scope: str,
         reason: str,
-        principal: AuthenticatedPrincipal,
+        principal: ElevatedAuthenticatedPrincipal,
         now: datetime,
     ) -> None:
+        if (
+            type(principal) is not ElevatedAuthenticatedPrincipal
+            or not principal.is_verified()
+        ):
+            raise ControlRejected(
+                "ELEVATED_REAUTHENTICATION_REQUIRED",
+                "kill-switch release requires verified elevated confirmation.",
+            )
         self._validate_incident_control(scope, reason, principal)
         with self._connect() as connection:
             connection.execute(

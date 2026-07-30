@@ -821,7 +821,13 @@ class DurableWriteWindowGate:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.path), isolation_level=None)
+        connection = sqlite3.connect(
+            str(self.path),
+            timeout=0.05,
+            isolation_level=None,
+        )
+        connection.execute("PRAGMA busy_timeout = 50")
+        return connection
 
     @staticmethod
     def _ensure_schema(connection: sqlite3.Connection) -> None:

@@ -29,7 +29,12 @@ from mox_adv.control_state import (
     AuthenticatedPrincipal,
     ControlRejected,
     DurableControlState,
+    ElevatedAuthenticatedPrincipal,
     ExecutionStatus,
+    MacOSElevatedSecurityVerifier,
+    PreparedAdVariantCatalog,
+    TerminalExecutionRequest,
+    TerminalNoWritePlan,
 )
 from mox_adv.direct_management import (
     DirectManagementConnectorV1,
@@ -101,6 +106,17 @@ class FixedAuthenticator:
             identity="sviridov",
             authentication="authenticated_macos_user",
         )
+
+    def elevated_reauthenticate(self) -> ElevatedAuthenticatedPrincipal:
+        with mock.patch.object(
+            MacOSElevatedSecurityVerifier,
+            "verify",
+            return_value=True,
+        ):
+            return ElevatedAuthenticatedPrincipal.verified(
+                self.authenticate(),
+                MacOSElevatedSecurityVerifier(),
+            )
 
 
 class WrongAuthenticator:
@@ -408,6 +424,38 @@ def publish_goal_candidate(
     )
 
 
+def campaign_components(root: Path):
+    policy = load_policy()
+    draft = validate_campaign_draft(
+        _campaign_payload(),
+        policy,
+        _campaign_safety(),
+    )
+    request = _campaign_request(draft)
+    store = CampaignSagaStore(
+        root / "campaign.sqlite3",
+        lifecycle_authority(policy),
+    )
+    _register_campaign_authority(store, request, policy)
+    adapter = FakeDirectManagementAdapter()
+    state = DurableControlState(root / "control.sqlite3")
+    connector = DirectManagementConnectorV1(
+        policy,
+        adapter,
+        store,
+        control_state=state,
+        trusted_scope=_scope("campaign-lifecycle"),
+        clock=lambda: CAMPAIGN_NOW,
+    )
+    service = CampaignLifecycleService(
+        policy,
+        store,
+        connector,
+        _campaign_safety(),
+    )
+    return policy, request, store, adapter, state, connector, service
+
+
 class ReviewRegressionTests(unittest.TestCase):
     def test_closed_loop_envelope_links_one_campaign_without_overclaiming(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -538,7 +586,7 @@ class ReviewRegressionTests(unittest.TestCase):
             state.release_kill_switch(
                 "global",
                 "Continue local regression validation.",
-                principal,
+                FixedAuthenticator().elevated_reauthenticate(),
                 NOW,
             )
             next_prepared = _approval_prepared("proposal-after-final-kill-check")
@@ -1287,7 +1335,7 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertTrue(report_exists)
         self.assertTrue(events_exist)
 
-    def test_failed_e2e_and_invalid_run_id_retain_safe_mandatory_artifacts(
+    def test_round2_failed_e2e_replaces_partial_success_bundle_atomically(
         self,
     ) -> None:
         def fail_after_partial_finalization(*args, **kwargs):
@@ -1299,6 +1347,23 @@ class ReviewRegressionTests(unittest.TestCase):
                 "events.jsonl",
                 '{"event_type":"e2e.completed"}\n',
             )
+            workspace.write_json(
+                "capability-evidence.json",
+                {"capabilities": [{"status": "PROVEN"}]},
+            )
+            workspace.write_json(
+                "signed-audit-anchor.json",
+                {"final_hash": "stale-success"},
+            )
+            workspace.write_json(
+                "proposal.json",
+                {"proposal_id": "stale-success"},
+            )
+            workspace.write_json(
+                "artifact-manifest.json",
+                {"artifacts": {"proposal.json": {}}},
+            )
+            workspace.write_text(".audit.sqlite3", "stale-success")
             raise RuntimeError("Injected partial finalization failure.")
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1362,12 +1427,19 @@ class ReviewRegressionTests(unittest.TestCase):
                 for run in (failed, partial, rejected)
                 for name in ("result.json", "report.md", "events.jsonl")
             )
+            partial_file_set = {
+                path.name for path in partial.iterdir() if path.is_file()
+            }
             rejected_is_contained = rejected.parent == root
         self.assertTrue(mandatory_artifacts_exist)
         self.assertEqual("FAILED", failed_result["status"])
         self.assertEqual("FAILED", partial_result["status"])
         self.assertIn("e2e.failed", partial_events)
         self.assertIn("Неуспешный", partial_report)
+        self.assertEqual(
+            {"result.json", "report.md", "events.jsonl"},
+            partial_file_set,
+        )
         self.assertEqual("INVALID_RUN_ID", rejected_result["blocking_code"])
         self.assertTrue(rejected_is_contained)
 
@@ -1454,6 +1526,480 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual("NOT_APPLICABLE", report.baseline["cpa_rub"])
         self.assertEqual("NOT_APPLICABLE", report.post_change["cpa_rub"])
         self.assertEqual("ESCALATE_TO_HUMAN", report.next_decision)
+
+    def test_round2_autonomy_requires_one_shared_durable_control_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            policy = load_policy()
+            state = DurableControlState(root / "proposal-state.sqlite3")
+            authority = DurableMandateAuthority(
+                root / "mandate-state.sqlite3",
+                policy,
+                HMACMandateSigner(b"round2-shared-state"),
+            )
+            adapter = FakeWriteAdapter()
+            with self.assertRaisesRegex(
+                ControlRejected,
+                "DURABLE_CONTROL_STATE_MISMATCH",
+            ):
+                BoundedAutonomyService(
+                    policy,
+                    state,
+                    authority,
+                    adapter,
+                    clock=lambda: NOW,
+                )
+        self.assertEqual(0, adapter.write_calls)
+
+    def test_round2_campaign_dispatch_binds_exact_canonical_payload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                policy,
+                request,
+                store,
+                adapter,
+                _,
+                connector,
+                service,
+            ) = campaign_components(Path(temporary))
+            approver = policy["principals"]["approver"]
+            store.start_or_load(
+                request,
+                request.canonical_plan(str(policy["policy_id"])),
+                CAMPAIGN_NOW,
+                str(approver["identity"]),
+                str(approver["authentication"]),
+            )
+            with self.assertRaisesRegex(
+                DirectStateTransitionRejected,
+                "DIRECT_OPERATION_PLAN_MISMATCH",
+            ):
+                connector.campaigns_add(
+                    request.run_id,
+                    request.execution_key + ":CAMPAIGN_ADD",
+                    {
+                        "type": request.draft.campaign_type,
+                        "state": "SUSPENDED",
+                        "strategy": dict(request.draft.strategy),
+                        "geography": list(request.draft.geography),
+                        "schedule": dict(request.draft.schedule),
+                        "WeeklySpendLimit": (
+                            request.draft.budget["weekly_micros"] + 1
+                        ),
+                    },
+                )
+            self.assertIsNone(
+                store.pending_dispatched_step(request.execution_key)
+            )
+            result = service.execute(request, CAMPAIGN_NOW, max_steps=1)
+        self.assertEqual(("CAMPAIGN_ADD",), result.completed_steps)
+        self.assertEqual(1, adapter.operation_count("Campaigns", "add"))
+
+    def test_round2_campaign_preflight_rejection_never_mints_marker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                _,
+                request,
+                store,
+                adapter,
+                _,
+                _,
+                service,
+            ) = campaign_components(Path(temporary))
+            partial = service.execute(request, CAMPAIGN_NOW, max_steps=6)
+            campaign = next(
+                item
+                for item in partial.created_objects
+                if item.service == "Campaigns"
+            )
+            adapter.set_state("Campaigns", campaign.object_id, "ON")
+            with self.assertRaisesRegex(
+                DirectStateTransitionRejected,
+                "INVALID_DIRECT_STATE_TRANSITION",
+            ):
+                service.execute(request, CAMPAIGN_NOW, max_steps=1)
+            self.assertIsNone(
+                store.pending_dispatched_step(request.execution_key)
+            )
+            adapter.set_state("Campaigns", campaign.object_id, "SUSPENDED")
+            resumed = service.execute(request, CAMPAIGN_NOW, max_steps=1)
+        self.assertEqual(7, len(resumed.completed_steps))
+        self.assertEqual(1, adapter.operation_count("Campaigns", "resume"))
+
+    def test_round2_dispatch_revalidates_live_fingerprint_after_audit(
+        self,
+    ) -> None:
+        class MutatingAudit:
+            def __init__(self, adapter, target_key):
+                self.adapter = adapter
+                self.target_key = target_key
+
+            def authorize(self, execution_key, target_key, occurred_at):
+                del execution_key, target_key, occurred_at
+                self.adapter.set_current_fingerprint(
+                    self.target_key,
+                    "sha256:" + "f" * 64,
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            policy, _, at, state, prepared = immutable_execution_context(root)
+            approval = state.grant_approval(
+                prepared.proposal_id,
+                at + timedelta(minutes=15),
+                "Approve only the unchanged immutable target.",
+                FixedAuthenticator().authenticate(),
+                at,
+            )
+            adapter = FakeWriteAdapter(
+                initial_state={prepared.target_key(): prepared.current_value},
+                current_fingerprints={
+                    prepared.target_key(): prepared.expected_fingerprint
+                },
+            )
+            outcome = ApprovalExecutionService(
+                policy,
+                state,
+                adapter,
+                clock=lambda: at,
+                pre_write_audit=MutatingAudit(
+                    adapter,
+                    prepared.target_key(),
+                ),
+            ).execute(_approval_request(prepared))
+            used = state.load_approval(approval.approval_id).used
+        self.assertEqual(ExecutionStatus.BLOCKED, outcome.status)
+        self.assertEqual("FINGERPRINT_MISMATCH", outcome.reason_code)
+        self.assertFalse(used)
+        self.assertEqual(0, adapter.write_calls)
+
+    def test_round2_dispatch_revalidates_approval_expiry_after_audit(
+        self,
+    ) -> None:
+        class AdvancingAudit:
+            def __init__(self, clock: AdvancingClock) -> None:
+                self.clock = clock
+
+            def authorize(self, execution_key, target_key, occurred_at):
+                del execution_key, target_key, occurred_at
+                self.clock.advance(minutes=2)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            policy, _, at, state, prepared = immutable_execution_context(root)
+            approval = state.grant_approval(
+                prepared.proposal_id,
+                at + timedelta(minutes=1),
+                "Approve only before the exact expiry boundary.",
+                FixedAuthenticator().authenticate(),
+                at,
+            )
+            adapter = FakeWriteAdapter(
+                initial_state={prepared.target_key(): prepared.current_value},
+                current_fingerprints={
+                    prepared.target_key(): prepared.expected_fingerprint
+                },
+            )
+            clock = AdvancingClock(at)
+            outcome = ApprovalExecutionService(
+                policy,
+                state,
+                adapter,
+                clock=clock,
+                pre_write_audit=AdvancingAudit(clock),
+            ).execute(_approval_request(prepared))
+            used = state.load_approval(approval.approval_id).used
+        self.assertEqual(ExecutionStatus.BLOCKED, outcome.status)
+        self.assertEqual("APPROVAL_NOT_APPLICABLE", outcome.reason_code)
+        self.assertFalse(used)
+        self.assertEqual(0, adapter.write_calls)
+
+    def test_round2_kill_switch_release_requires_elevated_capability(
+        self,
+    ) -> None:
+        class ForgedVerifier:
+            @staticmethod
+            def verify(principal: AuthenticatedPrincipal) -> bool:
+                return principal.identity == "sviridov"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            state = DurableControlState(Path(temporary) / "control.sqlite3")
+            principal = FixedAuthenticator().authenticate()
+            state.engage_kill_switch(
+                "global",
+                "Round 2 incident.",
+                principal,
+                NOW,
+            )
+            with self.assertRaisesRegex(
+                ControlRejected,
+                "ELEVATED_REAUTHENTICATION_REQUIRED",
+            ):
+                state.release_kill_switch(
+                    "global",
+                    "Ordinary authentication is insufficient.",
+                    principal,
+                    NOW,
+                )
+            self.assertTrue(state.kill_switch_active("global"))
+            with self.assertRaisesRegex(
+                ControlRejected,
+                "ELEVATED_REAUTHENTICATION_FAILED",
+            ):
+                ElevatedAuthenticatedPrincipal.verified(
+                    principal,
+                    ForgedVerifier(),
+                )
+            forged = ElevatedAuthenticatedPrincipal(
+                identity=principal.identity,
+                authentication=principal.authentication,
+                _seal=object(),
+            )
+            with self.assertRaisesRegex(
+                ControlRejected,
+                "ELEVATED_REAUTHENTICATION_REQUIRED",
+            ):
+                state.release_kill_switch(
+                    "global",
+                    "A forged capability is insufficient.",
+                    forged,
+                    NOW,
+                )
+            state.release_kill_switch(
+                "global",
+                "Verified elevated confirmation.",
+                FixedAuthenticator().elevated_reauthenticate(),
+                NOW,
+            )
+            active_after_release = state.kill_switch_active("global")
+        self.assertFalse(active_after_release)
+
+    def test_round2_keep_is_a_typed_terminal_plan_without_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = json.loads(
+                OBSERVE_FIXTURE.read_text(encoding="utf-8")
+            )
+            for row in fixture["direct_report"]["rows"]:
+                row["clicks"] = 2
+            for index, row in enumerate(fixture["metrika_report"]["rows"]):
+                row["goal_visits"] = 1 if index == 0 else 0
+            fixture_path = root / "insufficient.json"
+            fixture_path.write_text(
+                json.dumps(fixture, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            policy = load_policy()
+            snapshot = e2e_runner._build_snapshot(fixture_path)
+            evaluated_at = datetime.fromisoformat(snapshot.generated_at)
+            projection = projection_from_integrated_snapshot(
+                snapshot,
+                policy,
+                evaluated_at,
+            )
+            provider = DeterministicFakeModelProvider()
+            proposal_store = ImmutableProposalStore(root / "proposals")
+            recommendation = RecommendationService(
+                provider,
+                proposal_store,
+                policy,
+            ).recommend(
+                projection,
+                "round2-keep",
+                snapshot.snapshot_id,
+                campaign_fingerprint(snapshot),
+                evaluated_at.isoformat(),
+                (evaluated_at + timedelta(minutes=30)).isoformat(),
+            )
+            assert recommendation.proposal is not None
+            state = DurableControlState(root / "control.sqlite3")
+            plan = state.register_optimization_proposal(
+                proposal_store=proposal_store,
+                proposal_id=recommendation.proposal.proposal_id,
+                snapshot=snapshot,
+                policy=policy,
+                writer=str(
+                    policy["bindings"]["simulation"]["single_writer"]
+                ),
+                at=evaluated_at,
+            )
+            adapter = FakeWriteAdapter()
+            outcome = ApprovalExecutionService(
+                policy,
+                state,
+                adapter,
+                clock=lambda: evaluated_at,
+            ).execute(
+                TerminalExecutionRequest(
+                    proposal_id=recommendation.proposal.proposal_id
+                )
+            )
+        self.assertIs(type(plan), TerminalNoWritePlan)
+        self.assertEqual("KEEP", plan.action)
+        self.assertEqual(ExecutionStatus.NO_CHANGE, outcome.status)
+        self.assertEqual(0, adapter.write_calls)
+
+    def test_round2_unsupported_state_returns_human_help_contract(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            policy = load_policy()
+            fixture = json.loads(LLM_FIXTURE.read_text(encoding="utf-8"))
+            fixture["campaign_state"] = "ARCHIVED"
+            projection = build_sanitized_projection(fixture, policy)
+            provider = DeterministicFakeModelProvider()
+            outcome = RecommendationService(
+                provider,
+                ImmutableProposalStore(Path(temporary) / "proposals"),
+                policy,
+            ).recommend(
+                projection,
+                "round2-unsupported",
+                "sha256:" + "1" * 64,
+                "sha256:" + "2" * 64,
+                NOW.isoformat(),
+                (NOW + timedelta(minutes=30)).isoformat(),
+            )
+        self.assertEqual("NEEDS_HUMAN", outcome.decision_status)
+        self.assertEqual("REQUEST_HUMAN_HELP", outcome.decision_action)
+        self.assertEqual("UNSUPPORTED_STATE", outcome.reason_code)
+        self.assertEqual(0, provider.invocation_count)
+
+    def test_round2_ad_variant_binds_prepared_copy_and_exact_readback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            policy = load_policy()
+            state = DurableControlState(
+                Path(temporary) / "control.sqlite3"
+            )
+            campaign_plan = _campaign_request(
+                validate_campaign_draft(
+                    _campaign_payload(),
+                    policy,
+                    _campaign_safety(),
+                )
+            ).canonical_plan(str(policy["policy_id"]))
+            variants = PreparedAdVariantCatalog.from_campaign_plan(
+                campaign_plan
+            )
+            current = variants.exact_copy("A")
+            target = variants.exact_copy("B")
+            prepared = replace(
+                _approval_prepared("proposal-round2-ad-copy"),
+                action=OptimizationAction.SET_AD_VARIANT,
+                current_value=current,
+                target_value=target,
+                expected_diff={
+                    "operation": "SET_AD_VARIANT",
+                    "variant_id": "B",
+                    "title": target["title"],
+                    "text": target["text"],
+                    "source_plan_hash": variants.source_plan_hash,
+                },
+                risk="PREPARED_AD_COPY",
+            )
+            state.register_prepared_change(prepared)
+            state.grant_approval(
+                prepared.proposal_id,
+                NOW + timedelta(minutes=15),
+                "Approve the prepared B copy.",
+                FixedAuthenticator().authenticate(),
+                NOW,
+            )
+            base_request = _approval_request(prepared)
+            request = replace(
+                base_request,
+                facts=replace(
+                    base_request.facts,
+                    clicks=50,
+                    conversions=3,
+                    impressions=5_000,
+                    ctr_percent="0.5",
+                    campaign_state="ON",
+                ),
+            )
+            adapter = FakeWriteAdapter(
+                initial_state={prepared.target_key(): current}
+            )
+            outcome = ApprovalExecutionService(
+                policy,
+                state,
+                adapter,
+                clock=lambda: NOW,
+            ).execute(request)
+        self.assertEqual(ExecutionStatus.APPLIED, outcome.status)
+        self.assertEqual(target, outcome.observed_value)
+        self.assertEqual(1, adapter.write_calls)
+
+    def test_round2_cleanup_handles_rejected_unpublished_candidate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            (
+                policy,
+                store,
+                goal_adapter,
+                site_adapter,
+                service,
+            ) = goal_components(Path(temporary))
+            candidate = create_goal_candidate(
+                policy,
+                store,
+                service,
+                run_id="round2-unpublished",
+            )
+            service.decide_business_semantics(
+                candidate.candidate_id,
+                approved=False,
+                reviewer="sviridov",
+                now=GOAL_NOW,
+            )
+            service.cleanup_rejected_candidate(
+                candidate.candidate_id,
+                candidate.run_id,
+            )
+            exists = goal_adapter.goal_exists(
+                candidate.counter_id,
+                candidate.goal_id,
+            )
+        self.assertFalse(exists)
+        self.assertEqual(1, goal_adapter.delete_calls)
+        self.assertEqual(0, site_adapter.rollback_calls)
+
+    def test_round2_non_string_created_at_is_controlled_invalid_input(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            policy = load_policy()
+            projection = build_sanitized_projection(
+                json.loads(LLM_FIXTURE.read_text(encoding="utf-8")),
+                policy,
+            )
+            provider = DeterministicFakeModelProvider()
+            outcome = RecommendationService(
+                provider,
+                ImmutableProposalStore(Path(temporary) / "proposals"),
+                policy,
+            ).recommend(
+                projection,
+                "round2-created-at",
+                "sha256:" + "3" * 64,
+                "sha256:" + "4" * 64,
+                None,
+                (NOW + timedelta(minutes=30)).isoformat(),
+            )
+        self.assertEqual("BLOCKED", outcome.status)
+        self.assertEqual("INVALID_INPUT", outcome.reason_code)
+        self.assertEqual(0, provider.invocation_count)
 
     def test_monitoring_evaluates_freshness_with_post_read_clock(self) -> None:
         snapshot = e2e_runner._build_snapshot(OBSERVE_FIXTURE)

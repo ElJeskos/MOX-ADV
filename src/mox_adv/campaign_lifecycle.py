@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from mox_adv.control_state import (
@@ -23,6 +23,7 @@ from mox_adv.direct_management import (
     DirectManagementConnectorV1,
     DirectOutcomeUnknown,
     DirectService,
+    DirectStateTransitionRejected,
     ProductionPilotAuthority,
 )
 from mox_adv.lifecycle_authority import (
@@ -73,6 +74,17 @@ SAGA_STEPS = (
     CampaignSagaStep.MODERATION_READBACK,
     CampaignSagaStep.CAMPAIGN_LAUNCH,
     CampaignSagaStep.FULL_READBACK,
+)
+
+SAGA_WRITE_STEPS = frozenset(
+    {
+        CampaignSagaStep.CAMPAIGN_ADD,
+        CampaignSagaStep.AD_GROUP_ADD,
+        CampaignSagaStep.ADS_ADD,
+        CampaignSagaStep.KEYWORD_ADD,
+        CampaignSagaStep.MODERATION_SUBMIT,
+        CampaignSagaStep.CAMPAIGN_LAUNCH,
+    }
 )
 
 TERMINAL_STATES = {
@@ -404,10 +416,10 @@ class CampaignSagaStore:
         step_name: CampaignSagaStep,
         now: datetime,
     ) -> None:
+        del now
         step = CampaignSagaStep(step_name)
         ordinal = SAGA_STEPS.index(step)
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             completed_count = connection.execute(
                 "SELECT COUNT(*) FROM campaign_saga_steps "
                 "WHERE execution_key = ?",
@@ -415,21 +427,15 @@ class CampaignSagaStore:
             ).fetchone()[0]
             if completed_count != ordinal:
                 raise LifecycleRejected("SAGA_STEP_ORDER_VIOLATION")
-            existing = connection.execute(
-                "SELECT completed_at FROM campaign_saga_dispatches "
-                "WHERE execution_key = ? AND step_name = ?",
-                (execution_key, step.value),
+            pending = connection.execute(
+                "SELECT 1 FROM campaign_saga_dispatches "
+                "WHERE execution_key = ? AND completed_at IS NULL",
+                (execution_key,),
             ).fetchone()
-            if existing is not None:
-                if existing["completed_at"] is None:
-                    raise LifecycleRejected("SAGA_STEP_OUTCOME_REQUIRES_RECONCILIATION")
-                return
-            connection.execute(
-                "INSERT INTO campaign_saga_dispatches "
-                "(execution_key, ordinal, step_name, dispatched_at) "
-                "VALUES (?, ?, ?, ?)",
-                (execution_key, ordinal, step.value, _utc_text(now)),
-            )
+            if pending is not None:
+                raise LifecycleRejected(
+                    "SAGA_STEP_OUTCOME_REQUIRES_RECONCILIATION"
+                )
 
     def pending_dispatched_step(
         self,
@@ -720,14 +726,15 @@ class CampaignSagaStore:
                     now_text,
                 ),
             )
-            updated = connection.execute(
-                "UPDATE campaign_saga_dispatches SET completed_at = ? "
-                "WHERE execution_key = ? AND step_name = ? "
-                "AND completed_at IS NULL",
-                (now_text, request.execution_key, step.value),
-            ).rowcount
-            if updated != 1:
-                raise LifecycleRejected("SAGA_STEP_WAS_NOT_DISPATCHED")
+            if step in SAGA_WRITE_STEPS:
+                updated = connection.execute(
+                    "UPDATE campaign_saga_dispatches SET completed_at = ? "
+                    "WHERE execution_key = ? AND step_name = ? "
+                    "AND completed_at IS NULL",
+                    (now_text, request.execution_key, step.value),
+                ).rowcount
+                if updated != 1:
+                    raise LifecycleRejected("SAGA_STEP_WAS_NOT_DISPATCHED")
             connection.execute(
                 "UPDATE campaign_sagas SET updated_at = ? WHERE execution_key = ?",
                 (now_text, request.execution_key),
@@ -879,6 +886,253 @@ class CampaignSagaStore:
                 (run_id, service, object_id),
             ).fetchone()
         return row is not None
+
+    def operation_belongs_to_active_saga(
+        self,
+        run_id: str,
+        operation_key: str,
+    ) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT execution_key FROM campaign_sagas "
+                "WHERE run_id = ? AND status = 'IN_FLIGHT'",
+                (run_id,),
+            ).fetchone()
+        return bool(
+            row is not None
+            and (
+                operation_key.startswith(str(row["execution_key"]) + ":")
+            )
+        )
+
+    def claim_direct_operation(
+        self,
+        request: Any,
+        authority: Optional[ProductionPilotAuthority],
+        now: datetime,
+        final_check: Optional[Callable[[], None]] = None,
+    ) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            saga = connection.execute(
+                "SELECT * FROM campaign_sagas "
+                "WHERE run_id = ? AND status = 'IN_FLIGHT'",
+                (request.run_id,),
+            ).fetchone()
+            if saga is None:
+                return False
+            if ":COMPENSATE:" in request.operation_key:
+                return self._claim_compensation(
+                    connection,
+                    saga,
+                    request,
+                    authority,
+                    final_check,
+                )
+            completed_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM campaign_saga_steps "
+                    "WHERE execution_key = ?",
+                    (saga["execution_key"],),
+                ).fetchone()[0]
+            )
+            if completed_count >= len(SAGA_STEPS):
+                raise DirectStateTransitionRejected(
+                    "DIRECT_OPERATION_PLAN_MISMATCH"
+                )
+            step = SAGA_STEPS[completed_count]
+            if step not in SAGA_WRITE_STEPS:
+                return False
+            expected_service, expected_method, expected_payload = (
+                self._expected_write_operation(
+                    connection,
+                    saga,
+                    step,
+                )
+            )
+            expected_key = str(saga["execution_key"]) + ":" + step.value
+            if (
+                request.operation_key != expected_key
+                or request.service.value != expected_service
+                or request.method.value != expected_method
+                or _canonical(dict(request.payload))
+                != _canonical(expected_payload)
+            ):
+                raise DirectStateTransitionRejected(
+                    "DIRECT_OPERATION_PLAN_MISMATCH"
+                )
+            self._require_operation_authority(
+                connection,
+                saga,
+                authority,
+            )
+            existing = connection.execute(
+                "SELECT completed_at FROM campaign_saga_dispatches "
+                "WHERE execution_key = ? AND step_name = ?",
+                (saga["execution_key"], step.value),
+            ).fetchone()
+            if existing is not None:
+                raise LifecycleRejected(
+                    "SAGA_STEP_OUTCOME_REQUIRES_RECONCILIATION"
+                )
+            if final_check is not None:
+                final_check()
+            connection.execute(
+                "INSERT INTO campaign_saga_dispatches "
+                "(execution_key, ordinal, step_name, dispatched_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    saga["execution_key"],
+                    completed_count,
+                    step.value,
+                    _utc_text(now),
+                ),
+            )
+            return True
+
+    def _expected_write_operation(
+        self,
+        connection: sqlite3.Connection,
+        saga: sqlite3.Row,
+        step: CampaignSagaStep,
+    ) -> tuple[str, str, Dict[str, Any]]:
+        plan = json.loads(saga["canonical_plan"])
+        draft = plan["draft"]
+        group = draft["groups"][0]
+        rows = connection.execute(
+            "SELECT service, object_id FROM campaign_created_objects "
+            "WHERE run_id = ? AND compensated_at IS NULL ORDER BY rowid",
+            (saga["run_id"],),
+        ).fetchall()
+        ids: Dict[str, list[str]] = {}
+        for row in rows:
+            ids.setdefault(str(row["service"]), []).append(
+                str(row["object_id"])
+            )
+
+        def one(service: str) -> str:
+            values = ids.get(service, [])
+            if len(values) != 1:
+                raise DirectStateTransitionRejected(
+                    "DIRECT_OPERATION_PLAN_MISMATCH"
+                )
+            return values[0]
+
+        if step == CampaignSagaStep.CAMPAIGN_ADD:
+            return (
+                "Campaigns",
+                "add",
+                {
+                    "type": draft["campaign_type"],
+                    "state": "SUSPENDED",
+                    "strategy": dict(draft["strategy"]),
+                    "geography": list(draft["geography"]),
+                    "schedule": dict(draft["schedule"]),
+                    "WeeklySpendLimit": draft["budget"]["weekly_micros"],
+                },
+            )
+        if step == CampaignSagaStep.AD_GROUP_ADD:
+            return (
+                "AdGroups",
+                "add",
+                {
+                    "campaign_id": one("Campaigns"),
+                    "name": group["name"],
+                    "negative_keywords": list(group["negative_keywords"]),
+                },
+            )
+        if step == CampaignSagaStep.ADS_ADD:
+            return (
+                "Ads",
+                "add",
+                {
+                    "ad_group_id": one("AdGroups"),
+                    "items": [dict(item) for item in group["ads"]],
+                },
+            )
+        if step == CampaignSagaStep.KEYWORD_ADD:
+            return (
+                "Keywords",
+                "add",
+                {
+                    "ad_group_id": one("AdGroups"),
+                    "keyword": group["keywords"][0],
+                },
+            )
+        if step == CampaignSagaStep.MODERATION_SUBMIT:
+            return (
+                "Ads",
+                "moderate",
+                {"ids": list(ids.get("Ads", []))},
+            )
+        if step == CampaignSagaStep.CAMPAIGN_LAUNCH:
+            return (
+                "Campaigns",
+                "resume",
+                {"id": one("Campaigns"), "changes": {}},
+            )
+        raise DirectStateTransitionRejected("DIRECT_OPERATION_PLAN_MISMATCH")
+
+    def _claim_compensation(
+        self,
+        connection: sqlite3.Connection,
+        saga: sqlite3.Row,
+        request: Any,
+        authority: Optional[ProductionPilotAuthority],
+        final_check: Optional[Callable[[], None]],
+    ) -> bool:
+        object_id = request.payload.get("id")
+        expected_key = ":".join(
+            (
+                str(saga["execution_key"]),
+                "COMPENSATE",
+                request.service.value,
+                str(object_id),
+            )
+        )
+        owned = connection.execute(
+            "SELECT 1 FROM campaign_created_objects "
+            "WHERE run_id = ? AND service = ? AND object_id = ? "
+            "AND compensated_at IS NULL",
+            (saga["run_id"], request.service.value, object_id),
+        ).fetchone()
+        if (
+            request.method.value != "delete"
+            or dict(request.payload) != {"id": object_id, "changes": {}}
+            or request.operation_key != expected_key
+            or owned is None
+        ):
+            raise DirectStateTransitionRejected(
+                "DIRECT_OPERATION_PLAN_MISMATCH"
+            )
+        self._require_operation_authority(connection, saga, authority)
+        if final_check is not None:
+            final_check()
+        return True
+
+    @staticmethod
+    def _require_operation_authority(
+        connection: sqlite3.Connection,
+        saga: sqlite3.Row,
+        authority: Optional[ProductionPilotAuthority],
+    ) -> None:
+        if authority is None:
+            return
+        if (
+            not authority.armed
+            or authority.execution_key != saga["execution_key"]
+            or authority.proposal_id != saga["proposal_id"]
+            or not CampaignApprovalRepository.authority_is_valid(
+                connection,
+                approval_id=authority.approval_id,
+                proposal_id=authority.proposal_id,
+                binding_hash=authority.binding_hash,
+                execution_key=authority.execution_key,
+            )
+        ):
+            raise DirectStateTransitionRejected(
+                "DIRECT_OPERATION_PLAN_MISMATCH"
+            )
 
     def production_authority_is_valid(
         self,
@@ -1075,14 +1329,7 @@ class CampaignLifecycleService:
             CampaignSagaStep.CAMPAIGN_LAUNCH: self._step_campaign_launch,
             CampaignSagaStep.FULL_READBACK: self._step_full_readback,
         }
-        try:
-            handlers[step_name](request, now, by_service, group, operation_key)
-        except ControlRejected:
-            self.store.cancel_step_before_dispatch(
-                request.execution_key,
-                step_name,
-            )
-            raise
+        handlers[step_name](request, now, by_service, group, operation_key)
 
     def _complete_add_step(
         self,
@@ -1217,10 +1464,11 @@ class CampaignLifecycleService:
         group: Mapping[str, Any],
         operation_key: str,
     ) -> None:
-        del group, operation_key
+        del group
         response = self.connector.ads_moderate(
             request.run_id,
             (item.object_id for item in by_service["Ads"]),
+            operation_key,
         )
         self.store.complete_step(
             request,
@@ -1259,10 +1507,11 @@ class CampaignLifecycleService:
         group: Mapping[str, Any],
         operation_key: str,
     ) -> None:
-        del group, operation_key
+        del group
         response = self.connector.campaigns_resume(
             request.run_id,
             self._one(by_service, "Campaigns").object_id,
+            operation_key,
         )
         if response.get("state") != "ON":
             raise DirectAdapterFailure("CAMPAIGN_LAUNCH_READBACK_FAILED")
@@ -1424,7 +1673,7 @@ class CampaignLifecycleService:
         failed_compensations = []
         for item in reversed(created):
             try:
-                self._delete_created(request.run_id, item)
+                self._delete_created(request, item)
                 self.store.mark_compensated(
                     request.run_id,
                     item.service,
@@ -1443,11 +1692,27 @@ class CampaignLifecycleService:
             outcome_detail = detail
         self.store.finish(request.execution_key, status, outcome_detail, now)
 
-    def _delete_created(self, run_id: str, item: CreatedDirectObject) -> None:
+    def _delete_created(
+        self,
+        request: CampaignCreationRequest,
+        item: CreatedDirectObject,
+    ) -> None:
         methods = {
             "Campaigns": self.connector.campaigns_delete,
             "AdGroups": self.connector.adgroups_delete,
             "Ads": self.connector.ads_delete,
             "Keywords": self.connector.keywords_delete,
         }
-        methods[item.service.value](run_id, item.object_id)
+        operation_key = ":".join(
+            (
+                request.execution_key,
+                "COMPENSATE",
+                item.service.value,
+                item.object_id,
+            )
+        )
+        methods[item.service.value](
+            request.run_id,
+            item.object_id,
+            operation_key,
+        )
