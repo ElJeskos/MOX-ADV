@@ -8,10 +8,9 @@ timestamp: "2026-07-29T14:22:56Z"
 
 # Normative Specification
 
-The repository currently describes a pre-implementation prototype through `requirements.md` version 2.7, dated 2026-07-29.
-That document is the final unified specification intended for customer validation before Gates 1 through 4.
-Its sections 1 through 22 are normative.
-Appendix A is provenance and review traceability, not a second source of requirements.
+The sole normative source is `requirements-v2-prototype.md` version `2.0-prototype`.
+The pre-existing `requirements.md` version 2.7 and OKF summaries derived from it are stale superseded artifacts.
+They do not add acceptance criteria, permissions, gates, or product scope.
 
 The specification makes readiness evidence part of the contract:
 
@@ -23,6 +22,6 @@ An OKF concept may summarize these rules but must not introduce a new acceptance
 
 # Citations
 
-[1] [`requirements.md`](../../requirements.md), sections 1, 17, 18, 20, and 21.
+[1] [`requirements-v2-prototype.md`](../../requirements-v2-prototype.md)
 
 [2] [Source Authority](source-authority.md)

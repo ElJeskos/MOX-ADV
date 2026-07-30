@@ -27,6 +27,6 @@ The final report must include every mandatory capability and cannot treat a miss
 
 # Citations
 
-[1] [`requirements.md`](../../requirements.md), sections 6.2, 13, 17 through 21, and `FR-CAM-008`.
+[1] [`requirements-v2-prototype.md`](../../requirements-v2-prototype.md)
 
 [2] [External Write Safety](../runbooks/external-write-safety.md)

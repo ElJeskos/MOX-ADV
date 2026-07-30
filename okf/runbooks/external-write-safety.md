@@ -42,6 +42,6 @@ Use the exact normative preconditions and reason codes in the cited requirements
 
 # Citations
 
-[1] [`requirements.md`](../../requirements.md), `FR-CAM-003`, `FR-CAM-005` through `FR-CAM-007`, `FR-CTL-002` through `FR-CTL-006`, `FR-AUD-003`, and `NFR-005`.
+[1] [`requirements-v2-prototype.md`](../../requirements-v2-prototype.md)
 
 [2] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)

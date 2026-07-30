@@ -12,6 +12,7 @@ from unittest import mock
 from mox_adv.e2e_evidence import (
     CAPABILITY_EVIDENCE_PATHS,
     REQUIRED_CAPABILITIES,
+    REQUIRED_DIRECT_METHODS,
     ExternalEgressBlocked,
     ReadOnlyEgressRecorder,
     final_capability_evidence,
@@ -91,6 +92,46 @@ def sample_artifacts() -> dict[str, dict[str, Any]]:
             "next_decision": "KEEP_CHANGE",
             "evidence_type": "SIMULATED",
             "capability_status": "NOT_PROVEN",
+        },
+        "direct-matrix-evidence.json": {
+            "schema_version": "direct-method-matrix-evidence-v1",
+            "run_id": "direct-matrix-sample",
+            "method_count": len(REQUIRED_DIRECT_METHODS),
+            "methods": [
+                {
+                    "fixture_id": (
+                        "DIRECT_" + service.upper() + "_" + method.upper()
+                    ),
+                    "service": service,
+                    "method": method,
+                    "request_response_evidence": [
+                        {
+                            "request": {"fixture": service + "." + method},
+                            "response": {
+                                "readback": [{"id": "campaign-1"}],
+                            },
+                        }
+                    ],
+                    "readback_or_deletion_check": "READBACK_CAPTURED",
+                    "cleanup_record": {
+                        "run_id": "direct-matrix-sample",
+                        "status": "REMOVED",
+                    },
+                    "evidence_type": "SIMULATED",
+                    "capability_status": "NOT_PROVEN",
+                }
+                for service, method in sorted(REQUIRED_DIRECT_METHODS)
+            ],
+            "cleanup_record": {
+                "remaining_object_ids": [],
+                "status": "COMPLETED",
+            },
+            "external_write_sent": False,
+            "evidence_type": "SIMULATED",
+            "capability_status": "NOT_PROVEN",
+            "limitation": (
+                "Sealed fake evidence does not prove production behavior."
+            ),
         },
     }
 
@@ -410,6 +451,7 @@ class FinalEvidenceTests(unittest.TestCase):
                 "monitoring-evidence.json",
                 "lifecycle-evidence.json",
                 "closed-loop-envelope.json",
+                "direct-matrix-evidence.json",
                 "artifact-manifest.json",
             }
             self.assertTrue(required.issubset({path.name for path in first.iterdir()}))
@@ -487,6 +529,26 @@ class FinalEvidenceTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "digest changed"):
                 verify_e2e_artifact_manifest(first)
+
+    def test_direct_matrix_rejects_any_missing_method_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifacts = sample_artifacts()
+            matrix = artifacts["direct-matrix-evidence.json"]
+            matrix["methods"].pop()
+            matrix["method_count"] -= 1
+            with self.assertRaisesRegex(
+                ValueError,
+                "stage artifacts are inconsistent",
+            ):
+                write_final_e2e_artifacts(
+                    Path(temporary),
+                    run_id="missing-direct-method",
+                    policy_version="mox-adv-gate0-2026-07-29",
+                    checks=({"name": "local", "status": "PASSED"},),
+                    egress=ReadOnlyEgressRecorder(load_policy()),
+                    supplemental_artifacts=artifacts,
+                    run_summary=sample_run_summary(),
+                )
 
 
 if __name__ == "__main__":

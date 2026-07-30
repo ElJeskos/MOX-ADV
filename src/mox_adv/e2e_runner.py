@@ -11,8 +11,9 @@ from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Callable
 
+from mox_adv.application_control import ApplicationWriteBoundary
 from mox_adv.approval_execution import (
     ApprovalExecutionService,
     ExecutionFacts,
@@ -55,6 +56,7 @@ from mox_adv.direct_management import (
 from mox_adv.e2e_browser import exercise_goal_event
 from mox_adv.e2e_evidence import (
     ReadOnlyEgressRecorder,
+    record_completed_stage_artifacts,
     write_failed_e2e_artifacts,
     write_final_e2e_artifacts,
 )
@@ -80,6 +82,7 @@ from mox_adv.impact import (
     ImpactObservation,
 )
 from mox_adv.lifecycle_authority import LifecycleAuthorityService
+from mox_adv.model_cost import DurableModelCostLedger
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.monitoring import MonitoringRead, MonitoringScheduler, MonitoringStore
 from mox_adv.observe import (
@@ -362,7 +365,15 @@ def _register_campaign_authority(
     request: CampaignCreationRequest,
     policy: Mapping[str, Any],
 ) -> None:
-    store.register_creation_reservation(_campaign_reservation(), CAMPAIGN_NOW)
+    store.register_creation_reservation(
+        replace(
+            _campaign_reservation(),
+            reservation_id=request.reservation_id,
+            scope_binding=request.account,
+            proposal_id=request.proposal_id,
+        ),
+        CAMPAIGN_NOW,
+    )
     store.register_campaign_approval(
         CampaignApproval(
             approval_id=request.approval_id,
@@ -557,7 +568,21 @@ class _FixedClock:
 def _analytics_optimization_workflow(
     working: Path,
     policy: Mapping[str, Any],
+    cost_ledger: DurableModelCostLedger,
+    write_boundary: ApplicationWriteBoundary | None = None,
+    stage_recorder: (
+        Callable[[str, Mapping[str, Mapping[str, Any]]], None] | None
+    ) = None,
 ) -> tuple[Mapping[str, Mapping[str, Any]], Mapping[str, Any]]:
+    write_boundary = (
+        ApplicationWriteBoundary.for_isolated_test(
+            working / "control.sqlite3",
+            policy,
+            tests_now,
+        )
+        if write_boundary is None
+        else write_boundary
+    )
     linked_fixture = json.loads(OBSERVE_FIXTURE.read_text(encoding="utf-8"))
     linked_fixture["direct_state"]["current_weekly_budget_micros"] = 2_700_000_000
     for row in linked_fixture["direct_report"]["rows"]:
@@ -586,6 +611,23 @@ def _analytics_optimization_workflow(
     if snapshot.snapshot_id != observe_result["snapshot_id"]:
         raise AssertionError("OBSERVE snapshot linkage changed.")
     execution_now = datetime.fromisoformat(snapshot.generated_at)
+    observe_evidence = {
+        "source": observe_result["source"],
+        "snapshot_id": observe_result["snapshot_id"],
+        "campaign": snapshot.scope.campaign,
+        "period_start": observe_result["snapshot"]["period_start"],
+        "period_end": observe_result["snapshot"]["period_end"],
+        "provenance": observe_result["snapshot"]["provenance"],
+        "metrics": observe_result["snapshot"]["metrics"],
+        "comparability_status": observe_result["snapshot"]["comparability_status"],
+        "confidence_status": observe_result["snapshot"]["confidence_status"],
+        "external_write_sent": observe_result["external_write_sent"],
+    }
+    if stage_recorder is not None:
+        stage_recorder(
+            "observe",
+            {"observe-evidence.json": observe_evidence},
+        )
     projection = projection_from_integrated_snapshot(
         snapshot,
         policy,
@@ -597,6 +639,7 @@ def _analytics_optimization_workflow(
         provider,
         proposal_store,
         policy,
+        cost_ledger,
     )
     recommendation = recommendation_service.recommend(
         projection=projection,
@@ -608,6 +651,11 @@ def _analytics_optimization_workflow(
     )
     if recommendation.status != "READY" or recommendation.proposal is None:
         raise AssertionError("RECOMMEND did not produce a valid proposal.")
+    if stage_recorder is not None:
+        stage_recorder(
+            "recommend",
+            {"proposal.json": recommendation.proposal.as_dict()},
+        )
     if recommendation_service.cost_ledger is None:
         raise AssertionError("RECOMMEND cost ledger was not configured.")
     cost_usage = recommendation_service.cost_ledger.usage()
@@ -619,7 +667,7 @@ def _analytics_optimization_workflow(
     )
 
     principal = _FixedAuthenticator().authenticate()
-    control_state = DurableControlState(working / "control.sqlite3")
+    control_state = write_boundary.state
     prepared = control_state.register_optimization_proposal(
         proposal_store=proposal_store,
         proposal_id=recommendation.proposal.proposal_id,
@@ -657,6 +705,11 @@ def _analytics_optimization_workflow(
     used_approval = control_state.load_approval(approval.approval_id)
     if used_approval.used_at is None:
         raise AssertionError("The exact approval was not consumed.")
+    if stage_recorder is not None:
+        stage_recorder(
+            "approval",
+            {"approval.json": asdict(used_approval)},
+        )
 
     blocked_prepared = _approval_prepared("proposal-e2e-kill-switch")
     blocked_prepared = replace(
@@ -758,6 +811,11 @@ def _analytics_optimization_workflow(
     )
     if impact.status != "OBSERVED_POST_CHANGE":
         raise AssertionError("Impact evaluation did not complete.")
+    if stage_recorder is not None:
+        stage_recorder(
+            "impact",
+            {"impact_report.json": impact.as_dict()},
+        )
 
     change_diff = {
         "approval_required": {
@@ -779,18 +837,6 @@ def _analytics_optimization_workflow(
             "readback": autonomy_result.observed_value,
             "status": autonomy_result.status,
         },
-    }
-    observe_evidence = {
-        "source": observe_result["source"],
-        "snapshot_id": observe_result["snapshot_id"],
-        "campaign": snapshot.scope.campaign,
-        "period_start": observe_result["snapshot"]["period_start"],
-        "period_end": observe_result["snapshot"]["period_end"],
-        "provenance": observe_result["snapshot"]["provenance"],
-        "metrics": observe_result["snapshot"]["metrics"],
-        "comparability_status": observe_result["snapshot"]["comparability_status"],
-        "confidence_status": observe_result["snapshot"]["confidence_status"],
-        "external_write_sent": observe_result["external_write_sent"],
     }
     monitoring_evidence = asdict(monitoring)
     closed_loop_envelope = {
@@ -818,6 +864,15 @@ def _analytics_optimization_workflow(
         "monitoring-evidence.json": monitoring_evidence,
         "closed-loop-envelope.json": closed_loop_envelope,
     }
+    if stage_recorder is not None:
+        stage_recorder(
+            "analytics_optimization",
+            {
+                "change_diff.json": change_diff,
+                "monitoring-evidence.json": monitoring_evidence,
+                "closed-loop-envelope.json": closed_loop_envelope,
+            },
+        )
     run_summary = {
         "source": observe_result["source"],
         "snapshot_id": observe_result["snapshot_id"],
@@ -891,8 +946,30 @@ def _campaign_goal_workflow(
     working: Path,
     policy: Mapping[str, Any],
     egress: ReadOnlyEgressRecorder,
+    write_boundary: ApplicationWriteBoundary | None = None,
+    stage_recorder: (
+        Callable[[str, Mapping[str, Mapping[str, Any]]], None] | None
+    ) = None,
 ) -> Mapping[str, Any]:
-    control_state = DurableControlState(working / "control.sqlite3")
+    write_boundary = (
+        ApplicationWriteBoundary.for_isolated_test(
+            working / "control.sqlite3",
+            policy,
+            tests_now,
+        )
+        if write_boundary is None
+        else write_boundary
+    )
+    direct_matrix = _direct_matrix_workflow(
+        working / "direct-matrix",
+        policy,
+        write_boundary,
+    )
+    if stage_recorder is not None:
+        stage_recorder(
+            "direct_matrix",
+            {"direct-matrix-evidence.json": direct_matrix},
+        )
     lifecycle_authority = LifecycleAuthorityService(
         policy,
         _FixedAuthenticator(),
@@ -905,7 +982,7 @@ def _campaign_goal_workflow(
     )
     request = _campaign_request(draft)
     campaign_store = CampaignSagaStore(
-        working / "campaign.sqlite3",
+        write_boundary.state.path,
         lifecycle_authority,
     )
     _register_campaign_authority(campaign_store, request, policy)
@@ -917,7 +994,7 @@ def _campaign_goal_workflow(
             policy,
             campaign_adapter,
             campaign_store,
-            control_state=control_state,
+            write_boundary=write_boundary,
             trusted_scope=_scope("campaign-lifecycle"),
         ),
         _campaign_safety(),
@@ -934,7 +1011,15 @@ def _campaign_goal_workflow(
         working / "campaign-rollback.sqlite3",
         lifecycle_authority,
     )
-    _register_campaign_authority(rollback_store, request, policy)
+    rollback_request = replace(
+        request,
+        run_id=request.run_id + "-rollback",
+        execution_key=request.execution_key + "-rollback",
+        proposal_id=request.proposal_id + "-rollback",
+        approval_id=request.approval_id + "-rollback",
+        reservation_id=request.reservation_id + "-rollback",
+    )
+    _register_campaign_authority(rollback_store, rollback_request, policy)
     rollback_adapter = FakeDirectManagementAdapter(fail_on=("Ads", "moderate"))
     rollback = CampaignLifecycleService(
         policy,
@@ -943,11 +1028,11 @@ def _campaign_goal_workflow(
             policy,
             rollback_adapter,
             rollback_store,
-            control_state=control_state,
+            write_boundary=write_boundary,
             trusted_scope=_scope("campaign-lifecycle-rollback"),
         ),
         _campaign_safety(),
-    ).execute(request, CAMPAIGN_NOW)
+    ).execute(rollback_request, CAMPAIGN_NOW)
     if rollback.status != "PARTIALLY_APPLIED":
         raise AssertionError("Campaign compensation path did not run.")
     if rollback_adapter.object_ids():
@@ -973,7 +1058,7 @@ def _campaign_goal_workflow(
         goal_adapter,
         site_adapter,
         _FixedAuthenticator(),
-        control_state,
+        write_boundary,
     )
     run_id = "goal-run-e2e"
     proposal_id = "goal-proposal-e2e"
@@ -1083,7 +1168,7 @@ def _campaign_goal_workflow(
     if goal_adapter.delete_calls != 1 or site_adapter.rollback_calls != 1:
         raise AssertionError("Goal cleanup did not stay in fake rollback.")
 
-    return {
+    lifecycle_evidence = {
         "campaign_status": campaign_result.status.value,
         "campaign_completed_steps": [
             str(item) for item in campaign_result.completed_steps
@@ -1099,7 +1184,174 @@ def _campaign_goal_workflow(
             "fake_goal_deletes": 1,
             "fake_site_rollbacks": 1,
         },
+        "direct_matrix": direct_matrix,
         "external_write_sent": False,
+    }
+    if stage_recorder is not None:
+        persisted = dict(lifecycle_evidence)
+        persisted.pop("direct_matrix")
+        stage_recorder(
+            "campaign_goal_lifecycle",
+            {"lifecycle-evidence.json": persisted},
+        )
+    return lifecycle_evidence
+
+
+def _direct_matrix_workflow(
+    working: Path,
+    policy: Mapping[str, Any],
+    write_boundary: ApplicationWriteBoundary,
+) -> Mapping[str, Any]:
+    store = CampaignSagaStore(working / "matrix.sqlite3")
+    adapter = FakeDirectManagementAdapter()
+    connector = DirectManagementConnectorV1(
+        policy,
+        adapter,
+        store,
+        write_boundary=write_boundary,
+    )
+    run_id = "direct-matrix-e2e"
+
+    campaign = connector.campaigns_add(
+        run_id,
+        "matrix:campaign:add",
+        {"type": "UNIFIED_CAMPAIGN", "state": "SUSPENDED"},
+    )[0]
+    store.register_created_objects(
+        run_id,
+        "matrix:campaign:add",
+        (campaign,),
+    )
+    connector.campaigns_get(run_id, campaign.object_id)
+    connector.campaigns_update(
+        run_id,
+        campaign.object_id,
+        {"WeeklySpendLimit": 600_000_000},
+    )
+    connector.campaigns_resume(run_id, campaign.object_id)
+    connector.campaigns_suspend(run_id, campaign.object_id)
+    connector.campaigns_archive(run_id, campaign.object_id)
+    connector.campaigns_unarchive(run_id, campaign.object_id)
+
+    group = connector.adgroups_add(
+        run_id,
+        "matrix:adgroup:add",
+        {"campaign_id": campaign.object_id, "name": "Fixture group"},
+    )[0]
+    store.register_created_objects(run_id, "matrix:adgroup:add", (group,))
+    connector.adgroups_get(run_id, group.object_id)
+    connector.adgroups_update(
+        run_id,
+        group.object_id,
+        {"Name": "Updated fixture group"},
+    )
+
+    ads = connector.ads_add(
+        run_id,
+        "matrix:ads:add",
+        {
+            "ad_group_id": group.object_id,
+            "items": [
+                {"variant_id": "A", "title": "Title A", "text": "Text A"},
+                {"variant_id": "B", "title": "Title B", "text": "Text B"},
+            ],
+        },
+    )
+    store.register_created_objects(run_id, "matrix:ads:add", ads)
+    ad_id = ads[0].object_id
+    connector.ads_get(run_id, tuple(item.object_id for item in ads))
+    connector.ads_update(
+        run_id,
+        ad_id,
+        {"Title": "Prepared title B", "Text": "Prepared text B"},
+    )
+    connector.ads_moderate(run_id, (ad_id,))
+    connector.ads_resume(run_id, ad_id)
+    connector.ads_suspend(run_id, ad_id)
+    connector.ads_archive(run_id, ad_id)
+    connector.ads_unarchive(run_id, ad_id)
+
+    keyword = connector.keywords_add(
+        run_id,
+        "matrix:keyword:add",
+        {"ad_group_id": group.object_id, "keyword": "lead service"},
+    )[0]
+    store.register_created_objects(run_id, "matrix:keyword:add", (keyword,))
+    connector.keywords_get(run_id, keyword.object_id)
+    connector.keywords_update(
+        run_id,
+        keyword.object_id,
+        {"UserParam1": "prepared"},
+    )
+    connector.keyword_bids_set(
+        run_id,
+        keyword.object_id,
+        {"SearchBid": 90_000_000},
+    )
+    connector.keyword_bids_get(run_id, keyword.object_id)
+    connector.keywords_resume(run_id, keyword.object_id)
+    connector.keywords_suspend(run_id, keyword.object_id)
+    connector.keywords_delete(run_id, keyword.object_id)
+
+    for ad in ads:
+        connector.ads_delete(run_id, ad.object_id)
+    connector.adgroups_delete(run_id, group.object_id)
+    connector.campaigns_delete(run_id, campaign.object_id)
+
+    required = {
+        (str(item["service"]), str(item["method"]))
+        for item in policy["api_matrix"]
+        if item["system"] == "DIRECT"
+        and item["service"]
+        in {"Campaigns", "AdGroups", "Ads", "Keywords", "KeywordBids"}
+    }
+    records = adapter.evidence_records()
+    observed = {
+        (str(item["service"]), str(item["method"])) for item in records
+    }
+    if required != observed or adapter.object_ids():
+        raise AssertionError("Direct matrix simulation is incomplete.")
+    methods = []
+    for service, method in sorted(required):
+        matching = [
+            item
+            for item in records
+            if item["service"] == service and item["method"] == method
+        ]
+        methods.append(
+            {
+                "fixture_id": "DIRECT_" + service.upper() + "_" + method.upper(),
+                "service": service,
+                "method": method,
+                "request_response_evidence": matching,
+                "readback_or_deletion_check": (
+                    "DELETION_CONFIRMED"
+                    if method == "delete"
+                    else "READBACK_CAPTURED"
+                ),
+                "cleanup_record": {
+                    "run_id": run_id,
+                    "status": "REMOVED",
+                },
+                "evidence_type": "SIMULATED",
+                "capability_status": "NOT_PROVEN",
+            }
+        )
+    return {
+        "schema_version": "direct-method-matrix-evidence-v1",
+        "run_id": run_id,
+        "method_count": len(methods),
+        "methods": methods,
+        "cleanup_record": {
+            "remaining_object_ids": [],
+            "status": "COMPLETED",
+        },
+        "external_write_sent": False,
+        "evidence_type": "SIMULATED",
+        "capability_status": "NOT_PROVEN",
+        "limitation": (
+            "Sealed fake evidence does not prove controlled production pilot behavior."
+        ),
     }
 
 
@@ -1125,21 +1377,46 @@ def run_readonly_e2e(runs_root: Path, run_id: str) -> Path:
         )
     workspace = RunWorkspace.create(runs_root, run_id)
     egress = ReadOnlyEgressRecorder(policy)
+    cost_ledger = DurableModelCostLedger.for_application(runs_root, policy)
     try:
         with TemporaryDirectory(
             prefix=".work-",
             dir=workspace.path,
         ) as temporary:
             work = Path(temporary)
+            write_boundary = ApplicationWriteBoundary.for_isolated_test(
+                work / "control.sqlite3",
+                policy,
+                tests_now,
+            )
+            stage_recorder = lambda stage, artifacts: (
+                record_completed_stage_artifacts(
+                    workspace,
+                    stage=stage,
+                    artifacts=artifacts,
+                )
+            )
             with egress.enforce_python_sockets():
                 analytics_artifacts, summary = _analytics_optimization_workflow(
                     work,
                     policy,
+                    cost_ledger,
+                    write_boundary,
+                    stage_recorder,
                 )
                 supplemental = dict(analytics_artifacts)
                 run_summary = dict(summary)
-                lifecycle = _campaign_goal_workflow(work, policy, egress)
-        supplemental["lifecycle-evidence.json"] = lifecycle
+                lifecycle = _campaign_goal_workflow(
+                    work,
+                    policy,
+                    egress,
+                    write_boundary,
+                    stage_recorder,
+                )
+        lifecycle_evidence = dict(lifecycle)
+        direct_matrix = lifecycle_evidence.pop("direct_matrix")
+        supplemental["lifecycle-evidence.json"] = lifecycle_evidence
+        supplemental["direct-matrix-evidence.json"] = direct_matrix
         execution = dict(run_summary["execution"])
         final_state = dict(execution["final_object_state"])
         final_state.update(

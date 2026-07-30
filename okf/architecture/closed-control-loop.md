@@ -32,6 +32,6 @@ It is optional and is never the core contract, source of authority, or security 
 
 # Citations
 
-[1] [`requirements.md`](../../requirements.md), sections 2, 5, `FR-MON-008`, `FR-MON-009`, and `FR-CTL-007`.
+[1] [`requirements-v2-prototype.md`](../../requirements-v2-prototype.md)
 
 [2] [Core Contracts and State](../implementation/core-contracts-and-state.md)

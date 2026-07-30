@@ -11,7 +11,9 @@ from pathlib import Path
 from unittest import mock
 
 from mox_adv import e2e_runner
+from mox_adv.application_control import ApplicationWriteBoundary
 from mox_adv.approval_execution import ApprovalExecutionService
+from mox_adv.audit import AuditWriteBlocked
 from mox_adv.autonomy import (
     BoundedAutonomyService,
     DurableMandateAuthority,
@@ -37,7 +39,9 @@ from mox_adv.control_state import (
     TerminalNoWritePlan,
 )
 from mox_adv.direct_management import (
+    CreatedDirectObject,
     DirectManagementConnectorV1,
+    DirectService,
     DirectStateTransitionRejected,
     FakeDirectManagementAdapter,
 )
@@ -78,7 +82,7 @@ from mox_adv.goal_lifecycle import (
 )
 from mox_adv.impact import ImpactEvaluator, load_impact_fixture
 from mox_adv.lifecycle_authority import LifecycleAuthorityService
-from mox_adv.model_cost import DurableModelCostLedger
+from mox_adv.model_cost import DurableModelCostLedger, ModelCostRejected
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.monitoring import MonitoringRead, MonitoringScheduler, MonitoringStore
 from mox_adv.observe import run_observe_fixture
@@ -89,7 +93,9 @@ from mox_adv.recommend_projection import (
     campaign_fingerprint,
     projection_from_integrated_snapshot,
 )
-from mox_adv.recommend_service import RecommendationService
+from mox_adv.recommend_service import (
+    RecommendationService as RuntimeRecommendationService,
+)
 from scripts.validate_gate0 import validate_policy
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,6 +104,39 @@ LLM_FIXTURE = ROOT / "fixtures" / "llm" / "LLM_EFFECTIVE_BUDGET_PRESSURE.json"
 
 def load_policy() -> dict:
     return json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+
+
+def isolated_write_boundary(
+    path: Path,
+    policy: dict | None = None,
+    clock=lambda: NOW,
+) -> ApplicationWriteBoundary:
+    return ApplicationWriteBoundary.for_isolated_test(
+        path,
+        load_policy() if policy is None else policy,
+        clock,
+    )
+
+
+def RecommendationService(
+    provider,
+    store,
+    policy=None,
+    cost_ledger=None,
+):
+    return RuntimeRecommendationService(
+        provider,
+        store,
+        policy,
+        (
+            cost_ledger
+            if cost_ledger is not None or policy is None
+            else DurableModelCostLedger.for_isolated_test(
+                store.root / ".isolated-model-cost.sqlite3",
+                policy,
+            )
+        ),
+    )
 
 
 class FixedAuthenticator:
@@ -204,6 +243,39 @@ class MalformedBoundaryProvider(MeteredInvalidProvider):
         return object()
 
 
+class PreparedAdVariantProvider(DeterministicFakeModelProvider):
+    def generate(self, projection) -> ModelResponse:
+        response = super().generate(projection)
+        payload = copy.deepcopy(response.payload)
+        payload["status"] = "INEFFECTIVE"
+        payload["actions"][0]["action"] = "SET_AD_VARIANT"
+        payload["actions"][0]["parameters"] = {"variant_id": "B"}
+        payload["expected_diff"] = {
+            "operation": "SET_AD_VARIANT",
+            "variant_id": "B",
+        }
+        return ModelResponse(
+            payload=payload,
+            provider=response.provider,
+            model_id=response.model_id,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost_rub=response.cost_rub,
+            duration_ms=response.duration_ms,
+        )
+
+
+class RejectingApplicationAudit:
+    def authorize(
+        self,
+        execution_key: str,
+        target_key: str,
+        occurred_at: datetime,
+    ) -> None:
+        del execution_key, target_key, occurred_at
+        raise AuditWriteBlocked("AUDIT_EVIDENCE_UNAVAILABLE")
+
+
 class SpoofedDirectAdapter:
     is_fake = True
 
@@ -284,7 +356,7 @@ def lifecycle_authority(policy: dict) -> LifecycleAuthorityService:
 def goal_components(
     root: Path,
     *,
-    control_state: DurableControlState | None = None,
+    write_boundary: ApplicationWriteBoundary | None = None,
 ):
     policy = load_policy()
     authority_service = lifecycle_authority(policy)
@@ -299,10 +371,14 @@ def goal_components(
             simulation["pilot_site_zone"]: "pilot-page-v1",
         }
     )
-    shared_control_state = (
-        DurableControlState(root / "control.sqlite3")
-        if control_state is None
-        else control_state
+    shared_boundary = (
+        isolated_write_boundary(
+            root / "control.sqlite3",
+            policy,
+            lambda: GOAL_NOW,
+        )
+        if write_boundary is None
+        else write_boundary
     )
     service = GoalLifecycleService(
         policy,
@@ -310,7 +386,7 @@ def goal_components(
         goal_adapter,
         site_adapter,
         FixedAuthenticator(),
-        shared_control_state,
+        shared_boundary,
     )
     return policy, store, goal_adapter, site_adapter, service
 
@@ -438,12 +514,16 @@ def campaign_components(root: Path):
     )
     _register_campaign_authority(store, request, policy)
     adapter = FakeDirectManagementAdapter()
-    state = DurableControlState(root / "control.sqlite3")
+    write_boundary = isolated_write_boundary(
+        root / "control.sqlite3",
+        policy,
+        lambda: CAMPAIGN_NOW,
+    )
     connector = DirectManagementConnectorV1(
         policy,
         adapter,
         store,
-        control_state=state,
+        write_boundary=write_boundary,
         trusted_scope=_scope("campaign-lifecycle"),
         clock=lambda: CAMPAIGN_NOW,
     )
@@ -453,15 +533,29 @@ def campaign_components(root: Path):
         connector,
         _campaign_safety(),
     )
-    return policy, request, store, adapter, state, connector, service
+    return (
+        policy,
+        request,
+        store,
+        adapter,
+        write_boundary.state,
+        connector,
+        service,
+    )
 
 
 class ReviewRegressionTests(unittest.TestCase):
     def test_closed_loop_envelope_links_one_campaign_without_overclaiming(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            policy = load_policy()
             artifacts, summary = _analytics_optimization_workflow(
-                Path(temporary),
-                load_policy(),
+                root,
+                policy,
+                DurableModelCostLedger.for_isolated_test(
+                    root / "model-cost.sqlite3",
+                    policy,
+                ),
             )
         envelope = artifacts["closed-loop-envelope.json"]
         proposal = artifacts["proposal.json"]
@@ -555,6 +649,105 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual("FINGERPRINT_MISMATCH", outcome.reason_code)
         self.assertEqual(ExecutionStatus.APPLIED, applied.status)
         self.assertEqual(1, adapter.write_calls)
+
+    def test_ad_variant_plan_loads_only_from_executor_control_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            policy = load_policy()
+            snapshot, _ = linked_snapshot(root)
+            evaluated_at = datetime.fromisoformat(snapshot.generated_at)
+            projection = projection_from_integrated_snapshot(
+                snapshot,
+                policy,
+                evaluated_at,
+            )
+            proposal_store = ImmutableProposalStore(root / "proposals")
+            recommendation = RecommendationService(
+                PreparedAdVariantProvider(),
+                proposal_store,
+                policy,
+            ).recommend(
+                projection=projection,
+                run_id="trusted-ad-copy",
+                snapshot_id=snapshot.snapshot_id,
+                expected_fingerprint=campaign_fingerprint(snapshot),
+                created_at=evaluated_at.isoformat(),
+                expires_at=(
+                    evaluated_at + timedelta(minutes=30)
+                ).isoformat(),
+            )
+            assert recommendation.proposal is not None
+            with self.assertRaisesRegex(
+                ControlRejected,
+                "PREPARED_AD_COPY_UNAVAILABLE",
+            ):
+                DurableControlState(
+                    root / "unbound-control.sqlite3"
+                ).register_optimization_proposal(
+                    proposal_store=proposal_store,
+                    proposal_id=recommendation.proposal.proposal_id,
+                    snapshot=snapshot,
+                    policy=policy,
+                    writer=str(
+                        policy["bindings"]["simulation"]["single_writer"]
+                    ),
+                    at=evaluated_at,
+                )
+            boundary = isolated_write_boundary(
+                root / "control.sqlite3",
+                policy,
+                lambda: CAMPAIGN_NOW,
+            )
+            state = boundary.state
+            draft = validate_campaign_draft(
+                _campaign_payload(),
+                policy,
+                _campaign_safety(),
+            )
+            request = _campaign_request(draft)
+            campaign_store = CampaignSagaStore(
+                state.path,
+                lifecycle_authority(policy),
+            )
+            _register_campaign_authority(campaign_store, request, policy)
+            approver = policy["principals"]["approver"]
+            campaign_store.start_or_load(
+                request,
+                request.canonical_plan(str(policy["policy_id"])),
+                CAMPAIGN_NOW,
+                str(approver["identity"]),
+                str(approver["authentication"]),
+            )
+            campaign_store.register_created_objects(
+                request.run_id,
+                request.execution_key,
+                (
+                    CreatedDirectObject(
+                        DirectService.CAMPAIGNS,
+                        snapshot.scope.campaign,
+                        "UNIFIED_CAMPAIGN",
+                    ),
+                ),
+            )
+            prepared = state.register_optimization_proposal(
+                proposal_store=proposal_store,
+                proposal_id=recommendation.proposal.proposal_id,
+                snapshot=snapshot,
+                policy=policy,
+                writer=str(
+                    policy["bindings"]["simulation"]["single_writer"]
+                ),
+                at=evaluated_at,
+            )
+        self.assertEqual("B", prepared.target_value["variant_id"])
+        self.assertEqual(
+            "Lead service alternative",
+            prepared.target_value["title"],
+        )
+        self.assertEqual(
+            "Request a consultation",
+            prepared.target_value["text"],
+        )
 
     def test_kill_switch_rechecked_after_audit_without_consuming_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -727,8 +920,9 @@ class ReviewRegressionTests(unittest.TestCase):
                 policy,
                 spoofed,
                 CampaignSagaStore(Path(temporary) / "registry.sqlite3"),
-                control_state=DurableControlState(
-                    Path(temporary) / "control.sqlite3"
+                write_boundary=isolated_write_boundary(
+                    Path(temporary) / "control.sqlite3",
+                    policy,
                 ),
             )
             with self.assertRaisesRegex(
@@ -751,8 +945,9 @@ class ReviewRegressionTests(unittest.TestCase):
                     FakeSitePublishAdapter(
                         {"sim-test-site-zone": "test-page-v1"}
                     ),
-                    control_state=DurableControlState(
-                        Path(temporary) / "control.sqlite3"
+                    write_boundary=isolated_write_boundary(
+                        Path(temporary) / "control.sqlite3",
+                        policy,
                     ),
                 )
         self.assertEqual(0, spoofed.calls)
@@ -767,8 +962,9 @@ class ReviewRegressionTests(unittest.TestCase):
                 policy,
                 adapter,
                 CampaignSagaStore(Path(temporary) / "registry.sqlite3"),
-                control_state=DurableControlState(
-                    Path(temporary) / "control.sqlite3"
+                write_boundary=isolated_write_boundary(
+                    Path(temporary) / "control.sqlite3",
+                    policy,
                 ),
             )
             run_id = "ownership-run"
@@ -908,7 +1104,10 @@ class ReviewRegressionTests(unittest.TestCase):
                 }
             ]
             provider = MeteredInvalidProvider()
-            ledger = DurableModelCostLedger(root / "cost.sqlite3", policy)
+            ledger = DurableModelCostLedger.for_isolated_test(
+                root / "cost.sqlite3",
+                policy,
+            )
             projection = build_sanitized_projection(
                 json.loads(LLM_FIXTURE.read_text(encoding="utf-8")),
                 policy,
@@ -940,7 +1139,7 @@ class ReviewRegressionTests(unittest.TestCase):
                 expires_at="2026-07-29T09:31:00+00:00",
             )
             malformed_provider = MalformedBoundaryProvider()
-            malformed_ledger = DurableModelCostLedger(
+            malformed_ledger = DurableModelCostLedger.for_isolated_test(
                 root / "malformed-cost.sqlite3",
                 policy,
             )
@@ -975,6 +1174,45 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual("0", malformed_usage.reserved_cost_rub)
         self.assertEqual(1, malformed_provider.invocation_count)
         self.assertEqual([], validate_policy(load_policy(), profile="simulation"))
+
+    def test_model_cost_cap_is_shared_across_proposal_stores(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            policy = load_policy()
+            first = DurableModelCostLedger.for_application(root, policy)
+            second = DurableModelCostLedger.for_application(root, policy)
+            first.record_synthetic_cost("application-cap", "2000")
+            provider = DeterministicFakeModelProvider()
+            projection = build_sanitized_projection(
+                json.loads(LLM_FIXTURE.read_text(encoding="utf-8")),
+                policy,
+            )
+            outcome = RuntimeRecommendationService(
+                provider,
+                ImmutableProposalStore(root / "second-proposal-store"),
+                policy,
+                second,
+            ).recommend(
+                projection=projection,
+                run_id="shared-application-ledger",
+                snapshot_id="sha256:" + "a" * 64,
+                expected_fingerprint="sha256:" + "b" * 64,
+                created_at=NOW.isoformat(),
+                expires_at=(NOW + timedelta(minutes=30)).isoformat(),
+            )
+            with self.assertRaisesRegex(
+                ModelCostRejected,
+                "APPLICATION_MODEL_COST_LEDGER_REQUIRED",
+            ):
+                RuntimeRecommendationService(
+                    DeterministicFakeModelProvider(),
+                    ImmutableProposalStore(root / "unbound-proposal-store"),
+                    policy,
+                )
+            usage = second.usage()
+        self.assertEqual("2000", usage.charged_cost_rub)
+        self.assertEqual("MODEL_COST_LIMIT_EXHAUSTED", outcome.reason_code)
+        self.assertEqual(0, provider.invocation_count)
 
     def test_site_publication_accepts_mandate_and_records_verified_principal(
         self,
@@ -1063,7 +1301,12 @@ class ReviewRegressionTests(unittest.TestCase):
             request = _campaign_request(draft)
             store = CampaignSagaStore(root / "campaign.sqlite3", authority_service)
             _register_campaign_authority(store, request, policy)
-            state = DurableControlState(root / "control.sqlite3")
+            boundary = isolated_write_boundary(
+                root / "control.sqlite3",
+                policy,
+                lambda: CAMPAIGN_NOW,
+            )
+            state = boundary.state
             principal = FixedAuthenticator().authenticate()
             state.engage_kill_switch(
                 "global",
@@ -1079,12 +1322,15 @@ class ReviewRegressionTests(unittest.TestCase):
                     policy,
                     adapter,
                     store,
-                    control_state=state,
+                    write_boundary=boundary,
                     trusted_scope=_scope("campaign-lifecycle"),
                 ),
                 _campaign_safety(),
             )
-            with self.assertRaisesRegex(ControlRejected, "KILL_SWITCH_ACTIVE"):
+            with self.assertRaisesRegex(
+                DirectStateTransitionRejected,
+                "KILL_SWITCH_ACTIVE",
+            ):
                 service.execute(request, CAMPAIGN_NOW)
             with sqlite3.connect(str(store.path)) as connection:
                 reservation_status = connection.execute(
@@ -1114,7 +1360,12 @@ class ReviewRegressionTests(unittest.TestCase):
                 lifecycle_authority(policy),
             )
             _register_campaign_authority(store, request, policy)
-            state = DurableControlState(root / "control.sqlite3")
+            boundary = isolated_write_boundary(
+                root / "control.sqlite3",
+                policy,
+                lambda: CAMPAIGN_NOW,
+            )
+            state = boundary.state
             adapter = FakeDirectManagementAdapter()
             service = CampaignLifecycleService(
                 policy,
@@ -1123,7 +1374,7 @@ class ReviewRegressionTests(unittest.TestCase):
                     policy,
                     adapter,
                     store,
-                    control_state=state,
+                    write_boundary=boundary,
                     trusted_scope=_scope("campaign-lifecycle"),
                 ),
                 _campaign_safety(),
@@ -1146,7 +1397,10 @@ class ReviewRegressionTests(unittest.TestCase):
                     "require_dispatch_allowed",
                     side_effect=reject_second_dispatch,
                 ),
-                self.assertRaisesRegex(ControlRejected, "KILL_SWITCH_ACTIVE"),
+                self.assertRaisesRegex(
+                    DirectStateTransitionRejected,
+                    "KILL_SWITCH_ACTIVE",
+                ),
             ):
                 service.execute(request, CAMPAIGN_NOW)
             approval_status = store.campaign_approval_status(request.approval_id)
@@ -1181,8 +1435,10 @@ class ReviewRegressionTests(unittest.TestCase):
                     policy,
                     adapter,
                     store,
-                    control_state=DurableControlState(
-                        root / "control.sqlite3"
+                    write_boundary=isolated_write_boundary(
+                        root / "control.sqlite3",
+                        policy,
+                        lambda: CAMPAIGN_NOW,
                     ),
                     trusted_scope=_scope("campaign-lifecycle"),
                 ),
@@ -1209,22 +1465,43 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual("CAMPAIGN_ADD", pending_step)
         self.assertEqual(1, len(adapter.calls))
 
-    def test_global_kill_switch_blocks_goal_fake_and_releases_reservations(
+    def test_global_kill_switch_blocks_direct_and_goal_from_one_boundary(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            state = DurableControlState(root / "control.sqlite3")
+            policy = load_policy()
+            boundary = isolated_write_boundary(
+                root / "control.sqlite3",
+                policy,
+            )
+            state = boundary.state
             principal = FixedAuthenticator().authenticate()
             state.engage_kill_switch(
                 "global",
-                "Block the next goal fake dispatch.",
+                "Block every write boundary.",
                 principal,
                 NOW,
             )
-            policy, store, adapter, _, service = goal_components(
+            direct_adapter = FakeDirectManagementAdapter()
+            direct = DirectManagementConnectorV1(
+                policy,
+                direct_adapter,
+                CampaignSagaStore(root / "direct.sqlite3"),
+                write_boundary=boundary,
+            )
+            with self.assertRaisesRegex(
+                DirectStateTransitionRejected,
+                "KILL_SWITCH_ACTIVE",
+            ):
+                direct.campaigns_add(
+                    "global-kill",
+                    "global-kill:campaign:add",
+                    {"type": "UNIFIED_CAMPAIGN"},
+                )
+            policy, store, goal_adapter, _, service = goal_components(
                 root,
-                control_state=state,
+                write_boundary=boundary,
             )
             proposal_id, reservation_id, authority_id = register_goal_creation(
                 policy,
@@ -1247,9 +1524,62 @@ class ReviewRegressionTests(unittest.TestCase):
                 )
             reservation_status = store.reservation_status(reservation_id)
             authority_status = store.authority_status(authority_id)
-        self.assertEqual(0, adapter.add_calls)
+        self.assertEqual([], direct_adapter.calls)
+        self.assertEqual(0, goal_adapter.add_calls)
         self.assertEqual("AVAILABLE", reservation_status)
         self.assertEqual("ACTIVE", authority_status)
+
+    def test_prewrite_audit_failure_blocks_direct_and_goal_adapters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            policy = load_policy()
+            boundary = ApplicationWriteBoundary.for_isolated_test(
+                root / "control.sqlite3",
+                policy,
+                lambda: NOW,
+                pre_write_audit=RejectingApplicationAudit(),
+            )
+            direct_adapter = FakeDirectManagementAdapter()
+            direct = DirectManagementConnectorV1(
+                policy,
+                direct_adapter,
+                CampaignSagaStore(root / "direct.sqlite3"),
+                write_boundary=boundary,
+            )
+            with self.assertRaisesRegex(
+                DirectStateTransitionRejected,
+                "AUDIT_EVIDENCE_UNAVAILABLE",
+            ):
+                direct.campaigns_add(
+                    "audit-block",
+                    "audit-block:campaign:add",
+                    {"type": "UNIFIED_CAMPAIGN"},
+                )
+            policy, store, goal_adapter, _, goal_service = goal_components(
+                root,
+                write_boundary=boundary,
+            )
+            proposal_id, reservation_id, authority_id = register_goal_creation(
+                policy,
+                store,
+                run_id="audit-block",
+            )
+            with self.assertRaisesRegex(
+                GoalLifecycleRejected,
+                "AUDIT_EVIDENCE_UNAVAILABLE",
+            ):
+                goal_service.create_candidate(
+                    run_id="audit-block",
+                    proposal_id=proposal_id,
+                    reservation_id=reservation_id,
+                    authority_id=authority_id,
+                    counter_id="sim-test-counter",
+                    credential_profile="METRIKA_TEST_WRITE",
+                    payload=_goal_payload(),
+                    now=GOAL_NOW,
+                )
+        self.assertEqual([], direct_adapter.calls)
+        self.assertEqual(0, goal_adapter.add_calls)
 
     def test_kill_switch_preserves_direct_readback_but_blocks_write(
         self,
@@ -1264,7 +1594,10 @@ class ReviewRegressionTests(unittest.TestCase):
                 policy,
                 adapter,
                 store,
-                control_state=state,
+                write_boundary=isolated_write_boundary(
+                    state.path,
+                    policy,
+                ),
             )
             run_id = "kill-switch-readback"
             created = connector.campaigns_add(
@@ -1291,7 +1624,7 @@ class ReviewRegressionTests(unittest.TestCase):
                 (created[0].object_id,),
             )
             with self.assertRaisesRegex(
-                ControlRejected,
+                DirectStateTransitionRejected,
                 "KILL_SWITCH_ACTIVE",
             ):
                 connector.campaigns_update(
@@ -1338,6 +1671,24 @@ class ReviewRegressionTests(unittest.TestCase):
     def test_round2_failed_e2e_replaces_partial_success_bundle_atomically(
         self,
     ) -> None:
+        def complete_observe_stage(*args, **kwargs):
+            recorder = (
+                args[4]
+                if len(args) > 4
+                else kwargs["stage_recorder"]
+            )
+            recorder(
+                "observe",
+                {
+                    "observe-evidence.json": {
+                        "source": "LOCAL_FIXTURE",
+                        "snapshot_id": "snapshot-completed",
+                        "campaign": "sim-campaign",
+                    }
+                },
+            )
+            return {}, {"execution": {"final_object_state": {}}}
+
         def fail_after_partial_finalization(*args, **kwargs):
             del args
             workspace = kwargs["workspace"]
@@ -1382,10 +1733,7 @@ class ReviewRegressionTests(unittest.TestCase):
                 mock.patch.object(
                     e2e_runner,
                     "_analytics_optimization_workflow",
-                    return_value=(
-                        {},
-                        {"execution": {"final_object_state": {}}},
-                    ),
+                    side_effect=complete_observe_stage,
                 ),
                 mock.patch.object(
                     e2e_runner,
@@ -1395,6 +1743,7 @@ class ReviewRegressionTests(unittest.TestCase):
                         "campaign_rollback_status": "PARTIALLY_APPLIED",
                         "goal_technical_status": "VERIFIED",
                         "goal_semantic_status": "REJECTED",
+                        "direct_matrix": {},
                     },
                 ),
                 mock.patch.object(
@@ -1430,6 +1779,9 @@ class ReviewRegressionTests(unittest.TestCase):
             partial_file_set = {
                 path.name for path in partial.iterdir() if path.is_file()
             }
+            completed_stage_artifacts = partial_result[
+                "completed_stage_artifacts"
+            ]
             rejected_is_contained = rejected.parent == root
         self.assertTrue(mandatory_artifacts_exist)
         self.assertEqual("FAILED", failed_result["status"])
@@ -1437,8 +1789,18 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertIn("e2e.failed", partial_events)
         self.assertIn("Неуспешный", partial_report)
         self.assertEqual(
-            {"result.json", "report.md", "events.jsonl"},
+            {
+                "result.json",
+                "report.md",
+                "events.jsonl",
+                "observe-evidence.json",
+                "completed-stage-evidence.json",
+            },
             partial_file_set,
+        )
+        self.assertEqual(
+            ["observe-evidence.json"],
+            completed_stage_artifacts,
         )
         self.assertEqual("INVALID_RUN_ID", rejected_result["blocking_code"])
         self.assertTrue(rejected_is_contained)

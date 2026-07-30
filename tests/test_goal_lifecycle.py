@@ -7,7 +7,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mox_adv.control_state import AuthenticatedPrincipal, DurableControlState
+from mox_adv.application_control import ApplicationWriteBoundary
+from mox_adv.control_state import AuthenticatedPrincipal
 from mox_adv.goal_lifecycle import (
     AuthorityKind,
     CreationReservation,
@@ -77,9 +78,12 @@ class GoalLifecycleTests(unittest.TestCase):
             Path(self.temporary_directory.name) / "goals.sqlite3",
             self.authority_service,
         )
-        self.control_state = DurableControlState(
-            Path(self.temporary_directory.name) / "control.sqlite3"
+        self.write_boundary = ApplicationWriteBoundary.for_isolated_test(
+            Path(self.temporary_directory.name) / "control.sqlite3",
+            self.policy,
+            lambda: NOW,
         )
+        self.control_state = self.write_boundary.state
         simulation = self.policy["bindings"]["simulation"]
         self.goal_adapter = FakeMetrikaGoalAdapter(
             (simulation["test_counter"], simulation["pilot_counter"])
@@ -96,7 +100,7 @@ class GoalLifecycleTests(unittest.TestCase):
             self.goal_adapter,
             self.site_adapter,
             FakeSemanticAuthenticator(),
-            self.control_state,
+            self.write_boundary,
         )
 
     def create_test_candidate(
@@ -523,7 +527,7 @@ class GoalLifecycleTests(unittest.TestCase):
             self.goal_adapter,
             self.site_adapter,
             FakeSemanticAuthenticator(authentication="caller_supplied_string"),
-            self.control_state,
+            self.write_boundary,
         )
         with self.assertRaisesRegex(RuntimeError, "SEMANTIC_REVIEWER_INVALID"):
             spoofed_service.decide_business_semantics(

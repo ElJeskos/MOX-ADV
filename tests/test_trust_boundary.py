@@ -33,6 +33,7 @@ from mox_adv.egress import (
     EgressDenied,
     HttpEgressGuard,
 )
+from mox_adv.model_cost import DurableModelCostLedger
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_service import RecommendationService
@@ -139,6 +140,10 @@ class InjectionBoundaryTests(unittest.TestCase):
                 provider,
                 ImmutableProposalStore(Path(directory)),
                 policy,
+                DurableModelCostLedger.for_isolated_test(
+                    Path(directory) / "model-cost.sqlite3",
+                    policy,
+                ),
             )
             for path in paths:
                 fixture = load_json(path)

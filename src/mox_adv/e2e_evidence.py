@@ -84,10 +84,12 @@ CAPABILITY_EVIDENCE_PATHS = {
     "TOOL_CONTRACT": (
         "change_diff.json",
         "lifecycle-evidence.json",
+        "direct-matrix-evidence.json",
         "external-egress.jsonl",
     ),
     "ORIGINAL_INTEGRATION_COVERAGE": (
         "lifecycle-evidence.json",
+        "direct-matrix-evidence.json",
         "external-egress.jsonl",
     ),
     "SAFETY_CORE": (
@@ -116,6 +118,40 @@ REQUIRED_SUPPLEMENTAL_ARTIFACTS = frozenset(
         "monitoring-evidence.json",
         "lifecycle-evidence.json",
         "closed-loop-envelope.json",
+        "direct-matrix-evidence.json",
+    }
+)
+REQUIRED_DIRECT_METHODS = frozenset(
+    {
+        ("Campaigns", "add"),
+        ("Campaigns", "get"),
+        ("Campaigns", "update"),
+        ("Campaigns", "suspend"),
+        ("Campaigns", "resume"),
+        ("Campaigns", "archive"),
+        ("Campaigns", "unarchive"),
+        ("Campaigns", "delete"),
+        ("AdGroups", "add"),
+        ("AdGroups", "get"),
+        ("AdGroups", "update"),
+        ("AdGroups", "delete"),
+        ("Ads", "add"),
+        ("Ads", "get"),
+        ("Ads", "update"),
+        ("Ads", "suspend"),
+        ("Ads", "resume"),
+        ("Ads", "archive"),
+        ("Ads", "unarchive"),
+        ("Ads", "moderate"),
+        ("Ads", "delete"),
+        ("Keywords", "add"),
+        ("Keywords", "get"),
+        ("Keywords", "update"),
+        ("Keywords", "suspend"),
+        ("Keywords", "resume"),
+        ("Keywords", "delete"),
+        ("KeywordBids", "get"),
+        ("KeywordBids", "set"),
     }
 )
 REQUIRED_RUN_SUMMARY_FIELDS = frozenset(
@@ -589,9 +625,18 @@ def _validate_run_summary(
     impact = supplemental_artifacts["impact_report.json"]
     observe = supplemental_artifacts["observe-evidence.json"]
     envelope = supplemental_artifacts["closed-loop-envelope.json"]
+    direct_matrix = supplemental_artifacts["direct-matrix-evidence.json"]
     approval_change = change_diff.get("approval_required", {})
     impact_baseline = impact.get("baseline", {})
     impact_post = impact.get("post_change", {})
+    matrix_methods = direct_matrix.get("methods")
+    if not isinstance(matrix_methods, list):
+        raise ValueError("The final Direct matrix evidence is invalid.")
+    observed_direct_methods = {
+        (item.get("service"), item.get("method"))
+        for item in matrix_methods
+        if isinstance(item, Mapping)
+    }
     if (
         proposal.get("proposal_id") != run_summary["proposal_id"]
         or proposal.get("snapshot_id") != run_summary["snapshot_id"]
@@ -618,6 +663,21 @@ def _validate_run_summary(
         or envelope.get("next_decision") != impact.get("next_decision")
         or envelope.get("evidence_type") != "SIMULATED"
         or envelope.get("capability_status") != "NOT_PROVEN"
+        or direct_matrix.get("evidence_type") != "SIMULATED"
+        or direct_matrix.get("capability_status") != "NOT_PROVEN"
+        or direct_matrix.get("external_write_sent") is not False
+        or direct_matrix.get("method_count")
+        != len(matrix_methods)
+        or observed_direct_methods != REQUIRED_DIRECT_METHODS
+        or any(
+            not isinstance(item, Mapping)
+            or item.get("evidence_type") != "SIMULATED"
+            or item.get("capability_status") != "NOT_PROVEN"
+            or not item.get("fixture_id")
+            or not item.get("request_response_evidence")
+            or not item.get("cleanup_record")
+            for item in matrix_methods
+        )
     ):
         raise ValueError("The final E2E stage artifacts are inconsistent.")
 
@@ -628,6 +688,113 @@ def _artifact_digest(path: Path) -> Mapping[str, Any]:
         "sha256": hashlib.sha256(content).hexdigest(),
         "size_bytes": len(content),
     }
+
+
+def record_completed_stage_artifacts(
+    workspace: RunWorkspace,
+    *,
+    stage: str,
+    artifacts: Mapping[str, Mapping[str, Any]],
+) -> None:
+    if not stage or not artifacts:
+        raise ValueError("Completed stage evidence must be named and non-empty.")
+    invalid = set(artifacts).difference(REQUIRED_SUPPLEMENTAL_ARTIFACTS)
+    if invalid:
+        raise ValueError("Completed stage evidence contains an unknown artifact.")
+    registry_path = workspace.path / "completed-stage-evidence.json"
+    if registry_path.exists():
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    else:
+        registry = {
+            "schema_version": "readonly-e2e-completed-stages-v1",
+            "stages": {},
+        }
+    if (
+        not isinstance(registry, Mapping)
+        or registry.get("schema_version")
+        != "readonly-e2e-completed-stages-v1"
+        or not isinstance(registry.get("stages"), Mapping)
+    ):
+        raise ValueError("Completed stage evidence registry is invalid.")
+    stages = {
+        str(name): dict(value)
+        for name, value in registry["stages"].items()
+        if isinstance(value, Mapping)
+    }
+    recorded = {}
+    for name, value in artifacts.items():
+        workspace.write_json(name, value)
+        recorded[name] = _artifact_digest(workspace.path / name)
+    stages[stage] = recorded
+    workspace.write_json(
+        "completed-stage-evidence.json",
+        {
+            "schema_version": "readonly-e2e-completed-stages-v1",
+            "stages": stages,
+        },
+    )
+
+
+def _verified_completed_stage_artifacts(
+    workspace: RunWorkspace,
+) -> tuple[Mapping[str, Any], tuple[str, ...]]:
+    registry_path = workspace.path / "completed-stage-evidence.json"
+    if not registry_path.exists():
+        return (
+            {
+                "schema_version": "readonly-e2e-completed-stages-v1",
+                "stages": {},
+            },
+            (),
+        )
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return (
+            {
+                "schema_version": "readonly-e2e-completed-stages-v1",
+                "stages": {},
+            },
+            (),
+        )
+    if (
+        not isinstance(registry, Mapping)
+        or registry.get("schema_version")
+        != "readonly-e2e-completed-stages-v1"
+        or not isinstance(registry.get("stages"), Mapping)
+    ):
+        return (
+            {
+                "schema_version": "readonly-e2e-completed-stages-v1",
+                "stages": {},
+            },
+            (),
+        )
+    verified_stages: dict[str, dict[str, Any]] = {}
+    paths: set[str] = set()
+    for stage, recorded in registry["stages"].items():
+        if not isinstance(stage, str) or not isinstance(recorded, Mapping):
+            continue
+        verified = {}
+        for name, digest in recorded.items():
+            path = workspace.path / str(name)
+            if (
+                name in REQUIRED_SUPPLEMENTAL_ARTIFACTS
+                and isinstance(digest, Mapping)
+                and path.is_file()
+                and dict(digest) == _artifact_digest(path)
+            ):
+                verified[str(name)] = dict(digest)
+                paths.add(str(name))
+        if verified:
+            verified_stages[stage] = verified
+    return (
+        {
+            "schema_version": "readonly-e2e-completed-stages-v1",
+            "stages": verified_stages,
+        },
+        tuple(sorted(paths)),
+    )
 
 
 def _write_artifact_manifest(
@@ -797,6 +964,21 @@ def write_final_e2e_artifacts(
         capabilities=capabilities,
     )
 
+    stable_run_summary = {
+        key: value
+        for key, value in run_summary.items()
+        if key not in {"duration_ms", "stage_durations_ms"}
+    }
+    stable_model_cost = dict(run_summary["model_cost"])
+    for field in (
+        "charged_cost_rub",
+        "reserved_cost_rub",
+        "call_count",
+        "warning",
+        "exhausted",
+    ):
+        stable_model_cost.pop(field)
+    stable_run_summary["model_cost"] = stable_model_cost
     semantic = {
         "schema_version": "readonly-e2e-stability-v1",
         "policy_version": policy_version,
@@ -809,11 +991,7 @@ def write_final_e2e_artifacts(
         "browser_interceptions": [dict(item) for item in egress.browser_interceptions],
         "browser_websocket_attempts": list(egress.browser_websocket_attempts),
         "external_write_sent": False,
-        "run_summary": {
-            key: value
-            for key, value in run_summary.items()
-            if key not in {"duration_ms", "stage_durations_ms"}
-        },
+        "run_summary": stable_run_summary,
         "supplemental_artifacts": {
             name: dict(supplemental_artifacts[name])
             for name in sorted(supplemental_artifacts)
@@ -931,6 +1109,9 @@ def write_failed_e2e_artifacts(
             "reason_code": reason_code,
         },
     )
+    completed_registry, completed_paths = _verified_completed_stage_artifacts(
+        workspace
+    )
     result = {
         "schema_version": "readonly-e2e-result-v1",
         "policy_version": policy_version,
@@ -941,6 +1122,7 @@ def write_failed_e2e_artifacts(
         "external_write_sent": False,
         "external_event_sent": False,
         "blocking_code": reason_code,
+        "completed_stage_artifacts": list(completed_paths),
     }
     report = "\n".join(
         (
@@ -975,6 +1157,13 @@ def write_failed_e2e_artifacts(
         )
         staging.write_json("result.json", result)
         staging.write_text("report.md", report)
+        for name in completed_paths:
+            shutil.copy2(workspace.path / name, staging.path / name)
+        if completed_paths:
+            staging.write_json(
+                "completed-stage-evidence.json",
+                completed_registry,
+            )
         os.replace(workspace.path, stale_path)
         try:
             os.replace(staging_path, workspace.path)

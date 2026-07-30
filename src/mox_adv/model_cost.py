@@ -13,6 +13,8 @@ from typing import Any, Mapping
 
 from mox_adv.recommend_contracts import ProviderMetadata
 
+_MODEL_COST_LEDGER_SEAL = object()
+
 
 class ModelCostRejected(RuntimeError):
     def __init__(self, reason_code: str) -> None:
@@ -60,8 +62,47 @@ class ModelCostUsage:
 class DurableModelCostLedger:
     """Atomically cap model calls using one persisted tariff configuration."""
 
-    def __init__(self, path: Path, policy: Mapping[str, Any]) -> None:
+    @classmethod
+    def for_application(
+        cls,
+        application_root: Path,
+        policy: Mapping[str, Any],
+    ) -> "DurableModelCostLedger":
+        return cls(
+            application_root / ".mox-adv-state" / "model-cost.sqlite3",
+            policy,
+            scope="APPLICATION",
+            seal=_MODEL_COST_LEDGER_SEAL,
+        )
+
+    @classmethod
+    def for_isolated_test(
+        cls,
+        path: Path,
+        policy: Mapping[str, Any],
+    ) -> "DurableModelCostLedger":
+        return cls(
+            path,
+            policy,
+            scope="ISOLATED_TEST",
+            seal=_MODEL_COST_LEDGER_SEAL,
+        )
+
+    def __init__(
+        self,
+        path: Path,
+        policy: Mapping[str, Any],
+        *,
+        scope: str,
+        seal: object,
+    ) -> None:
+        if (
+            seal is not _MODEL_COST_LEDGER_SEAL
+            or scope not in {"APPLICATION", "ISOLATED_TEST"}
+        ):
+            raise ModelCostRejected("MODEL_COST_LEDGER_FACTORY_REQUIRED")
         self.path = path
+        self.scope = scope
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.limit = _decimal(policy["limits"]["llm_total_cost_rub"], "limit")
         self.warning_percent = _decimal(

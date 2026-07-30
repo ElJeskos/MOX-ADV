@@ -29,6 +29,6 @@ The prototype proves measurement and control safety, not causal uplift.
 
 # Citations
 
-[1] [`requirements.md`](../../requirements.md), sections 2 and 3.
+[1] [`requirements-v2-prototype.md`](../../requirements-v2-prototype.md)
 
 [2] [Closed Control Loop](../architecture/closed-control-loop.md)

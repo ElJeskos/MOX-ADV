@@ -9,7 +9,7 @@ timestamp: "2026-07-29T14:10:28Z"
 # Core Contracts and State
 
 Every model-visible and persisted contract is versioned and closed to unknown fields.
-Machine-readable JSON Schemas in `schemas/` must match the normative model definitions in `requirements.md`; the requirements win until an approved new version changes them.
+Machine-readable JSON Schemas in `schemas/` must match `requirements-v2-prototype.md`; that sole normative source wins until an approved revision supersedes it.
 Identifiers, timestamps, money, limits, and evidence references are validated outside the LLM.
 
 The central immutable records are:
@@ -35,6 +35,6 @@ Side-effecting tool requests must become persisted Proposals before the executor
 
 # Citations
 
-[1] [`requirements.md`](../../requirements.md), sections 7, 8, 10, 12, 13, and 16.
+[1] [`requirements-v2-prototype.md`](../../requirements-v2-prototype.md)
 
 [2] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)

@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mox_adv.control_state import AuthenticatedPrincipal, DurableControlState
+from mox_adv.application_control import ApplicationWriteBoundary
+from mox_adv.control_state import AuthenticatedPrincipal
 from mox_adv.goal_lifecycle import (
     AuthorityKind,
     CreationReservation,
@@ -112,7 +113,11 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
                 }
             ),
             FakeSemanticAuthenticator(),
-            DurableControlState(store.path),
+            ApplicationWriteBoundary.for_isolated_test(
+                store.path,
+                self.policy,
+                lambda: NOW,
+            ),
         )
 
     def register_creation(

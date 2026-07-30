@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from mox_adv.application_control import ApplicationWriteBoundary
 from mox_adv.campaign_lifecycle import (
     CampaignApproval,
     CampaignCreationRequest,
@@ -36,6 +37,17 @@ from mox_adv.recommend_contracts import CampaignDraftV1
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "config" / "gate0-policy.json"
 NOW = datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc)
+
+
+def isolated_write_boundary(
+    path: Path,
+    policy: dict[str, object],
+) -> ApplicationWriteBoundary:
+    return ApplicationWriteBoundary.for_isolated_test(
+        path,
+        policy,
+        lambda: NOW,
+    )
 
 
 class FixedAuthenticator:
@@ -213,6 +225,10 @@ class CampaignLifecycleTests(unittest.TestCase):
         self.adapter = FakeDirectManagementAdapter()
         self.store = CampaignSagaStore(self.database, self.authority_service)
         self.control_state = DurableControlState(self.database)
+        self.write_boundary = isolated_write_boundary(
+            self.database,
+            self.policy,
+        )
         self.store.register_creation_reservation(make_reservation(), NOW)
         self.draft = validate_campaign_draft(
             draft_payload(),
@@ -242,7 +258,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 CampaignSagaStore(self.database, self.authority_service),
-                control_state=self.control_state,
+                write_boundary=self.write_boundary,
             ),
             safety_bindings=safety_bindings(),
         )
@@ -337,7 +353,10 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 expired_store,
-                control_state=DurableControlState(expired_database),
+                write_boundary=isolated_write_boundary(
+                    expired_database,
+                    self.policy,
+                ),
             ),
             safety_bindings=safety_bindings(),
         )
@@ -345,7 +364,7 @@ class CampaignLifecycleTests(unittest.TestCase):
             expired_service.execute(self.request, NOW)
         self.assertEqual([], self.adapter.calls)
 
-    def test_unknown_write_result_blocks_restart_without_blind_retry(self) -> None:
+    def test_unknown_write_result_reconciles_without_blind_retry(self) -> None:
         adapter = FakeDirectManagementAdapter(timeout_after=("Campaigns", "add"))
         service = CampaignLifecycleService(
             self.policy,
@@ -354,7 +373,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 adapter,
                 self.store,
-                control_state=self.control_state,
+                write_boundary=self.write_boundary,
             ),
             safety_bindings(),
         )
@@ -363,12 +382,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         calls_after_unknown = tuple(adapter.calls)
         second = service.execute(self.request, NOW)
 
-        self.assertEqual(CampaignSagaState.UNKNOWN_RESULT, first.status)
-        self.assertEqual(CampaignSagaState.UNKNOWN_RESULT, second.status)
+        self.assertEqual(CampaignSagaState.APPLIED, first.status)
+        self.assertEqual(CampaignSagaState.ALREADY_PROCESSED, second.status)
         self.assertEqual(calls_after_unknown, tuple(adapter.calls))
         self.assertEqual(1, adapter.operation_count("Campaigns", "add"))
         self.assertEqual(
-            "RESERVED",
+            "USED",
             self.store.campaign_approval_status(self.request.approval_id),
         )
 
@@ -420,7 +439,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 adapter,
                 self.store,
-                control_state=self.control_state,
+                write_boundary=self.write_boundary,
             ),
             safety_bindings(),
         )
@@ -450,7 +469,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 adapter,
                 self.store,
-                control_state=self.control_state,
+                write_boundary=self.write_boundary,
             ),
             safety_bindings(),
         )
@@ -471,7 +490,10 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 store,
-                control_state=DurableControlState(other_database),
+                write_boundary=isolated_write_boundary(
+                    other_database,
+                    self.policy,
+                ),
             ),
             safety_bindings(),
         )
@@ -505,7 +527,10 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 unbound_store,
-                control_state=DurableControlState(unbound_database),
+                write_boundary=isolated_write_boundary(
+                    unbound_database,
+                    self.policy,
+                ),
             ),
             safety_bindings(),
         )
@@ -542,7 +567,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 adapter,
                 self.store,
-                control_state=self.control_state,
+                write_boundary=self.write_boundary,
             ),
             safety_bindings(),
         )
@@ -567,11 +592,15 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
         )
         self.adapter = FakeDirectManagementAdapter()
         self.control_state = DurableControlState(self.store.path)
+        self.write_boundary = isolated_write_boundary(
+            self.store.path,
+            self.policy,
+        )
         self.connector = DirectManagementConnectorV1(
             self.policy,
             self.adapter,
             self.store,
-            control_state=self.control_state,
+            write_boundary=self.write_boundary,
         )
         self.run_id = "matrix-run-1"
 
@@ -813,7 +842,7 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
                 binding_hash="sha256:" + "1" * 64,
                 armed=True,
             ),
-            control_state=self.control_state,
+            write_boundary=self.write_boundary,
         )
 
         with self.assertRaises(DirectStateTransitionRejected):

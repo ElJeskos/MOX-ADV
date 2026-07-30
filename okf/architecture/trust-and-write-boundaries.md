@@ -35,6 +35,6 @@ An unknown result blocks further actions until human reconciliation.
 
 # Citations
 
-[1] [`requirements.md`](../../requirements.md), sections 5, 6, `FR-CAM-005` through `FR-CAM-007`, `FR-CTL-002` through `FR-CTL-005`, and `NFR-002` through `NFR-005`.
+[1] [`requirements-v2-prototype.md`](../../requirements-v2-prototype.md)
 
 [2] [External Write Safety](../runbooks/external-write-safety.md)

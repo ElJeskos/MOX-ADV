@@ -19,7 +19,9 @@ from typing import (
     Tuple,
 )
 
-from mox_adv.control_state import DurableControlState, TrustedScope
+from mox_adv.application_control import ApplicationWriteBoundary
+from mox_adv.audit import AuditWriteBlocked
+from mox_adv.control_state import ControlRejected, TrustedScope
 
 
 class DirectStateTransitionRejected(RuntimeError):
@@ -95,6 +97,12 @@ class DirectMethodResult:
 
 
 @dataclass(frozen=True)
+class DirectReconciliationResult:
+    status: str
+    result: Optional[DirectMethodResult]
+
+
+@dataclass(frozen=True)
 class ProductionPilotAuthority:
     account: str
     credential_profile: str
@@ -111,6 +119,8 @@ class DirectManagementAdapter(Protocol):
     def invoke(self, request: DirectMethodRequest) -> DirectMethodResult: ...
 
     def inspect(self, service: str, object_id: str) -> Mapping[str, Any]: ...
+
+    def reconcile(self, operation_key: str) -> Optional[DirectMethodResult]: ...
 
 
 class RunObjectRegistry(Protocol):
@@ -140,6 +150,11 @@ class RunObjectRegistry(Protocol):
         final_check: Callable[[], None],
     ) -> bool: ...
 
+    def cancel_direct_operation_claim(
+        self,
+        request: DirectMethodRequest,
+    ) -> None: ...
+
 
 class DirectManagementConnectorV1:
     """Expose every FR-002 Direct operation as an explicit typed method."""
@@ -150,11 +165,11 @@ class DirectManagementConnectorV1:
         adapter: DirectManagementAdapter,
         registry: RunObjectRegistry,
         authority: Optional[ProductionPilotAuthority] = None,
-        control_state: Optional[DurableControlState] = None,
+        write_boundary: Optional[ApplicationWriteBoundary] = None,
         trusted_scope: Optional[TrustedScope] = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
-        if type(control_state) is not DurableControlState:
+        if type(write_boundary) is not ApplicationWriteBoundary:
             raise DirectStateTransitionRejected(
                 "DURABLE_DISPATCH_GUARD_REQUIRED"
             )
@@ -171,7 +186,7 @@ class DirectManagementConnectorV1:
         self._adapter = adapter
         self._registry = registry
         self._authority = authority
-        self._control_state = control_state
+        self._write_boundary = write_boundary
         self._trusted_scope = trusted_scope
         self._clock = clock
         self._allowed = {
@@ -568,16 +583,12 @@ class DirectManagementConnectorV1:
             method=typed_method,
             payload=copy.deepcopy(dict(payload)),
         )
-        claimed = self._claim_direct_operation(
-            request,
-            self._require_dispatch_allowed,
-        )
-        if typed_method != DirectMethod.GET and not claimed:
-            if production:
+        if typed_method != DirectMethod.GET:
+            claimed = self._authorize_write(request)
+            if not claimed and production:
                 raise DirectStateTransitionRejected(
                     "DIRECT_OPERATION_PLAN_MISMATCH"
                 )
-            self._require_dispatch_allowed()
         result = self._adapter.invoke(request)
         if result.service != typed_service or result.method != typed_method:
             raise DirectStateTransitionRejected("DIRECT_RESPONSE_TYPE_MISMATCH")
@@ -606,9 +617,10 @@ class DirectManagementConnectorV1:
                 "PRODUCTION_CONNECTOR_DISABLED: validated pilot authority is absent."
             )
         if (
-            self._control_state is None
+            self._write_boundary is None
             or self._trusted_scope is None
             or self._trusted_scope.account != authority.account
+            or self._write_boundary.simulation_only
         ):
             raise DirectStateTransitionRejected(
                 "DURABLE_DISPATCH_GUARD_REQUIRED"
@@ -647,19 +659,39 @@ class DirectManagementConnectorV1:
             )
         )
 
-    def _require_dispatch_allowed(self) -> None:
-        if type(self._adapter) is FakeDirectManagementAdapter:
-            if self._control_state is None or self._trusted_scope is None:
-                raise DirectStateTransitionRejected(
-                    "DURABLE_DISPATCH_GUARD_REQUIRED"
-                )
-            self._control_state.require_dispatch_allowed(self._trusted_scope)
-            return
-        assert self._control_state is not None
-        assert self._trusted_scope is not None
+    def _authorize_write(self, request: DirectMethodRequest) -> bool:
+        if self._write_boundary is None or self._trusted_scope is None:
+            raise DirectStateTransitionRejected(
+                "DURABLE_DISPATCH_GUARD_REQUIRED"
+            )
         try:
-            self._control_state.require_dispatch_allowed(self._trusted_scope)
-        except RuntimeError as error:
+            return bool(
+                self._write_boundary.authorize(
+                    request.operation_key,
+                    ":".join(
+                        (
+                            request.run_id,
+                            request.service.value,
+                            request.method.value,
+                        )
+                    ),
+                    self._trusted_scope,
+                    final_check=lambda: self._claim_direct_operation(
+                        request,
+                        lambda: self._write_boundary.require_dispatch_allowed(
+                            self._trusted_scope
+                        ),
+                    ),
+                )
+            )
+        except (AuditWriteBlocked, ControlRejected, RuntimeError) as error:
+            cancel = getattr(
+                self._registry,
+                "cancel_direct_operation_claim",
+                None,
+            )
+            if cancel is not None:
+                cancel(request)
             raise DirectStateTransitionRejected(str(error)) from error
 
     def _require_owned(
@@ -718,7 +750,26 @@ class DirectManagementConnectorV1:
         if not run_id or not operation_key:
             raise DirectStateTransitionRejected("DIRECT_OPERATION_PLAN_MISMATCH")
         self._require_adapter_authority()
-        self._require_dispatch_allowed()
+        assert self._write_boundary is not None
+        assert self._trusted_scope is not None
+        try:
+            self._write_boundary.require_dispatch_allowed(self._trusted_scope)
+        except ControlRejected as error:
+            raise DirectStateTransitionRejected(str(error)) from error
+
+    def reconcile(
+        self,
+        request: DirectMethodRequest,
+    ) -> DirectReconciliationResult:
+        reconcile = getattr(self._adapter, "reconcile", None)
+        if reconcile is None:
+            return DirectReconciliationResult("UNKNOWN_RESULT", None)
+        result = reconcile(request.operation_key)
+        if result is None:
+            return DirectReconciliationResult("UNKNOWN_RESULT", None)
+        if result.service != request.service or result.method != request.method:
+            raise DirectStateTransitionRejected("DIRECT_RESPONSE_TYPE_MISMATCH")
+        return DirectReconciliationResult("APPLIED", result)
 
     @staticmethod
     def _request_object_ids(
@@ -781,6 +832,7 @@ class FakeDirectManagementAdapter:
         self._sequence: Dict[str, int] = {}
         self._idempotent_results: Dict[str, DirectMethodResult] = {}
         self._timed_out_keys: set[str] = set()
+        self._evidence: List[Mapping[str, Any]] = []
 
     def invoke(self, request: DirectMethodRequest) -> DirectMethodResult:
         if request.operation_key in self._idempotent_results:
@@ -813,8 +865,40 @@ class FakeDirectManagementAdapter:
                 "FAKE_DIRECT_COMPENSATION_FAILED: " + request.service.value
             )
         result = self._apply(request)
-        if request.method == DirectMethod.ADD:
+        if request.method != DirectMethod.GET:
             self._idempotent_results[request.operation_key] = result
+        self._evidence.append(
+            {
+                "fixture_id": (
+                    "DIRECT_"
+                    + request.service.value.upper()
+                    + "_"
+                    + request.method.value.upper()
+                ),
+                "run_id": request.run_id,
+                "operation_key": request.operation_key,
+                "service": request.service.value,
+                "method": request.method.value,
+                "request": copy.deepcopy(dict(request.payload)),
+                "response": {
+                    "created_objects": [
+                        {
+                            "service": item.service.value,
+                            "object_id": item.object_id,
+                            "actual_type": item.actual_type,
+                        }
+                        for item in result.created_objects
+                    ],
+                    "readback": [
+                        copy.deepcopy(dict(item)) for item in result.readback
+                    ],
+                },
+                "deletion_confirmed": (
+                    request.method == DirectMethod.DELETE
+                    and not result.readback
+                ),
+            }
+        )
         if operation == self.timeout_after and request.operation_key not in self._timed_out_keys:
             self._timed_out_keys.add(request.operation_key)
             raise DirectOutcomeUnknown(
@@ -824,6 +908,12 @@ class FakeDirectManagementAdapter:
                 + request.method.value
             )
         return result
+
+    def reconcile(self, operation_key: str) -> Optional[DirectMethodResult]:
+        return self._idempotent_results.get(operation_key)
+
+    def evidence_records(self) -> Tuple[Mapping[str, Any], ...]:
+        return tuple(copy.deepcopy(self._evidence))
 
     def inspect(self, service: str, object_id: str) -> Mapping[str, Any]:
         typed_service = DirectService(service)
@@ -952,7 +1042,14 @@ class FakeDirectManagementAdapter:
                     actual_type=actual_type,
                 )
             )
-        return self._result(request, created=tuple(created))
+        readback = tuple(
+            self.inspect(request.service, item.object_id) for item in created
+        )
+        return self._result(
+            request,
+            created=tuple(created),
+            readback=readback,
+        )
 
     def _read(self, request: DirectMethodRequest) -> DirectMethodResult:
         readback = tuple(

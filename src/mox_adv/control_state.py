@@ -818,6 +818,33 @@ class DurableControlState:
             snapshot_json=None,
         )
 
+    def register_terminal_fixture_plan(
+        self,
+        plan: TerminalNoWritePlan,
+    ) -> None:
+        if plan.action != "KEEP" or plan.status != "INSUFFICIENT_DATA":
+            raise ControlRejected(
+                "INVALID_INPUT",
+                "fixture terminal plan is not an approved no-write case.",
+            )
+        self._store_terminal_no_write_plan(
+            plan,
+            proposal_json=_canonical(
+                {
+                    "proposal_id": plan.proposal_id,
+                    "proposal_hash": plan.proposal_hash,
+                    "action": plan.action,
+                    "status": plan.status,
+                }
+            ),
+            snapshot_json=_canonical(
+                {
+                    "snapshot_id": plan.snapshot_id,
+                    "policy_version": plan.policy_version,
+                }
+            ),
+        )
+
     def register_optimization_proposal(
         self,
         *,
@@ -827,7 +854,6 @@ class DurableControlState:
         policy: Mapping[str, Any],
         writer: str,
         at: datetime,
-        prepared_ad_variants: Optional[PreparedAdVariantCatalog] = None,
     ) -> PreparedChange | TerminalNoWritePlan:
         """Load one immutable proposal and derive its executable plan server-side."""
 
@@ -914,6 +940,22 @@ class DurableControlState:
                 "IMMUTABLE_PROPOSAL_CONFLICT",
                 "proposal expected diff does not match its action.",
             )
+        prepared_ad_variants = None
+        if action == OptimizationAction.SET_AD_VARIANT:
+            try:
+                campaign_plan = self._load_trusted_campaign_plan(
+                    snapshot.scope.campaign,
+                    snapshot.scope.account,
+                    snapshot.policy_version,
+                )
+                prepared_ad_variants = PreparedAdVariantCatalog.from_campaign_plan(
+                    campaign_plan
+                )
+            except ControlRejected as error:
+                raise ControlRejected(
+                    "PREPARED_AD_COPY_UNAVAILABLE",
+                    "trusted campaign plan validation failed.",
+                ) from error
         current_value, target_value = self._derive_target(
             snapshot.campaign,
             action,
@@ -963,6 +1005,54 @@ class DurableControlState:
             snapshot_json=_canonical(snapshot.as_dict()),
         )
         return prepared
+
+    def _load_trusted_campaign_plan(
+        self,
+        campaign_id: str,
+        account: str,
+        policy_version: str,
+    ) -> Mapping[str, Any]:
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT s.plan_hash, s.canonical_plan "
+                    "FROM campaign_created_objects o "
+                    "JOIN campaign_sagas s "
+                    "ON s.execution_key = o.execution_key "
+                    "WHERE o.service = 'Campaigns' AND o.object_id = ? "
+                    "AND o.compensated_at IS NULL "
+                    "AND s.status IN ('IN_FLIGHT', 'APPLIED')",
+                    (campaign_id,),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "trusted campaign storage is unavailable.",
+            ) from error
+        if len(rows) != 1:
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "trusted campaign plan was not found.",
+            )
+        try:
+            plan = json.loads(rows[0]["canonical_plan"])
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "trusted campaign plan is invalid.",
+            ) from error
+        if (
+            not isinstance(plan, Mapping)
+            or rows[0]["plan_hash"] != canonical_hash(plan)
+            or plan.get("schema_version") != "campaign-creation-plan-v1"
+            or plan.get("account") != account
+            or plan.get("policy_id") != policy_version
+        ):
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "trusted campaign plan hash is invalid.",
+            )
+        return dict(plan)
 
     @staticmethod
     def _derive_target(

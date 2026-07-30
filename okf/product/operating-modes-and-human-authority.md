@@ -31,6 +31,6 @@ The kill switch has priority over both and fails closed when its state is unavai
 
 # Citations
 
-[1] [`requirements.md`](../../requirements.md), sections 4, 8.5, 8.6, 12, and 15.
+[1] [`requirements-v2-prototype.md`](../../requirements-v2-prototype.md)
 
 [2] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)

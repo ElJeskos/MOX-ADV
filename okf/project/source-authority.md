@@ -13,9 +13,9 @@ Facts governed by a live normative or executable source retain that source's aut
 
 Apply the following authority rules:
 
-1. `requirements.md` version 2.7 is the normative product and acceptance specification until an approved revision supersedes it.
-2. Accepted ADRs record architectural decisions when they exist, while machine-readable schemas, implementation, tests, and runbooks must implement the normative contract without silently changing it.
-3. At Gate 0, the live `api-matrix.yaml` becomes authoritative for verified API versions, endpoints, methods, object types, headers, and platform limits when the external Yandex contract has changed since the requirements were checked.
+1. `requirements-v2-prototype.md` version `2.0-prototype` is the sole normative product and acceptance specification for this prototype.
+2. `requirements.md` version 2.7 and OKF material derived from it are stale superseded artifacts and must not expand scope or alter implementation.
+3. Accepted ADRs record architectural decisions when they exist, while machine-readable schemas, implementation, tests, and runbooks must implement the normative contract without silently changing it.
 4. `AGENTS.md` and `docs/agents/` govern agent workflow, not product behavior.
 5. A derived OKF statement never overrides the live source from which it was synthesized.
 
@@ -24,6 +24,6 @@ Do not resolve a conflict by editing the OKF summary alone.
 
 # Citations
 
-[1] [Normative requirements](../../requirements.md)
+[1] [Normative prototype requirements](../../requirements-v2-prototype.md)
 
 [2] [Initial source map](../references/initial-source-map.md)

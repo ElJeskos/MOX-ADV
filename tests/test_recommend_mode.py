@@ -8,6 +8,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mox_adv.model_cost import DurableModelCostLedger
 from mox_adv.recommend import (
     CampaignDraftV1,
     DeterministicFakeModelProvider,
@@ -16,7 +17,7 @@ from mox_adv.recommend import (
     ModelResponse,
     OptimizationProposalV1,
     ProposalConflictError,
-    RecommendationService,
+    RecommendationService as RuntimeRecommendationService,
     SchemaValidationError,
     build_sanitized_projection,
 )
@@ -29,6 +30,27 @@ SCHEMA_ROOT = ROOT / "schemas"
 
 def load_policy() -> dict[str, object]:
     return json.loads(POLICY.read_text(encoding="utf-8"))
+
+
+def RecommendationService(
+    provider,
+    store,
+    policy=None,
+    cost_ledger=None,
+):
+    return RuntimeRecommendationService(
+        provider,
+        store,
+        policy,
+        (
+            cost_ledger
+            if cost_ledger is not None or policy is None
+            else DurableModelCostLedger.for_isolated_test(
+                store.root / ".isolated-model-cost.sqlite3",
+                policy,
+            )
+        ),
+    )
 
 
 def load_fixture(name: str) -> dict[str, object]:

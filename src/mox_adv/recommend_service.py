@@ -67,18 +67,12 @@ class RecommendationService:
     ) -> None:
         self.provider = provider
         self.store = store
-        self.cost_ledger = (
-            cost_ledger
-            if cost_ledger is not None
-            else (
-                None
-                if policy is None
-                else DurableModelCostLedger(
-                    store.root / ".model-cost.sqlite3",
-                    policy,
-                )
-            )
-        )
+        if (
+            policy is not None
+            and type(cost_ledger) is not DurableModelCostLedger
+        ):
+            raise ModelCostRejected("APPLICATION_MODEL_COST_LEDGER_REQUIRED")
+        self.cost_ledger = cost_ledger
 
     def recommend(
         self,
