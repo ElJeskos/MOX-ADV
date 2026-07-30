@@ -36,7 +36,10 @@ python3 scripts/migrate_yandex_production_read.py
 ```
 
 The command validates the complete legacy JSON schema and all three required Yandex environment values before writing anything.
-It refuses to run if any split output already exists, preserves the legacy `.env` permissions on both provider-specific environment files, and keeps both legacy inputs unchanged.
+It refuses to start a new transaction if any split output already exists without its marker, preserves the legacy `.env` permissions on both provider-specific environment files, and keeps both legacy inputs unchanged.
 If the process is interrupted after its transaction marker is durable, rerunning the same command verifies completed files and safely installs only the missing outputs.
 Recovery refuses changed legacy inputs or mismatched outputs and never overwrites them.
+The command never removes an installed output during error handling, so an external replacement cannot be deleted by rollback.
+After success, the durable marker remains as a transaction receipt and makes repeated verification of the same migration idempotent.
+An abrupt operating-system termination can leave a mode-preserving hidden transaction temporary file; recovery does not scan and delete such paths because it cannot prove that another process has not replaced them.
 There is no runtime fallback to the retired combined files.

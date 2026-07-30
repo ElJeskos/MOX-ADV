@@ -13,6 +13,7 @@ import sys
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -67,6 +68,26 @@ MIGRATION_LOCK_NAME = ".mox-adv-production-read-migration.lock"
 
 class MigrationError(RuntimeError):
     """Describe a refusal without exposing configuration or credential values."""
+
+
+class MigrationRollbackConflict(MigrationError):
+    """Preserve a path that no longer belongs to this migration."""
+
+
+@dataclass(frozen=True)
+class OwnedPath:
+    path: Path
+    device: int
+    inode: int
+
+    @classmethod
+    def capture(cls, path: Path) -> OwnedPath:
+        metadata = os.lstat(path)
+        return cls(
+            path=path,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+        )
 
 
 def _reject_duplicate_keys(
@@ -290,7 +311,7 @@ def _read_marker(path: Path) -> str:
     return digest
 
 
-def _claim_marker(path: Path, transaction_digest: str) -> None:
+def _claim_marker(path: Path, transaction_digest: str) -> OwnedPath:
     temporary_path = _prepare_temporary_file(
         path,
         _marker_bytes(transaction_digest),
@@ -299,6 +320,12 @@ def _claim_marker(path: Path, transaction_digest: str) -> None:
     )
     try:
         os.link(temporary_path, path)
+        source = os.lstat(temporary_path)
+        ownership = OwnedPath.capture(path)
+        if source.st_dev != ownership.device or source.st_ino != ownership.inode:
+            raise MigrationRollbackConflict(
+                "The migration transaction marker was concurrently replaced."
+            )
         _fsync_directory(path.parent)
     except FileExistsError as error:
         raise MigrationError(
@@ -311,6 +338,7 @@ def _claim_marker(path: Path, transaction_digest: str) -> None:
     finally:
         if _path_exists(temporary_path):
             temporary_path.unlink()
+    return ownership
 
 
 def _matches_expected_output(
@@ -350,40 +378,44 @@ def _verify_existing_transaction_outputs(
     return existing
 
 
+def _path_is_owned(owned: OwnedPath) -> bool:
+    try:
+        current = os.lstat(owned.path)
+    except OSError:
+        return False
+    return current.st_dev == owned.device and current.st_ino == owned.inode
+
+
 def _install_missing_outputs(
     outputs: Mapping[Path, tuple[bytes, int]],
     existing: set[Path],
     transaction_digest: str,
-) -> list[Path]:
-    temporary_paths: dict[Path, Path] = {}
-    installed_paths: list[Path] = []
-    try:
-        for target, (content, mode) in outputs.items():
-            if target in existing:
-                continue
-            temporary_paths[target] = _prepare_temporary_file(
-                target,
-                content,
-                mode,
-                prefix=(".mox-adv-production-read-" + transaction_digest + "-"),
-            )
-        for target, temporary_path in temporary_paths.items():
+) -> None:
+    for target, (content, mode) in outputs.items():
+        if target in existing:
+            continue
+        temporary_path = _prepare_temporary_file(
+            target,
+            content,
+            mode,
+            prefix=(".mox-adv-production-read-" + transaction_digest + "-"),
+        )
+        try:
+            source = os.lstat(temporary_path)
             os.link(temporary_path, target)
-            installed_paths.append(target)
-            temporary_path.unlink()
+            ownership = OwnedPath.capture(target)
+            if source.st_dev != ownership.device or source.st_ino != ownership.inode:
+                raise MigrationRollbackConflict(
+                    "A migration output was concurrently replaced."
+                )
             _fsync_directory(target.parent)
-    except Exception as error:
-        for temporary_path in temporary_paths.values():
+        except Exception as error:
+            if isinstance(error, MigrationError):
+                raise
+            raise MigrationError("Migration could not install all outputs.") from error
+        finally:
             if _path_exists(temporary_path):
                 temporary_path.unlink()
-        for installed_path in installed_paths:
-            if _path_exists(installed_path):
-                installed_path.unlink()
-                _fsync_directory(installed_path.parent)
-        if isinstance(error, MigrationError):
-            raise
-        raise MigrationError("Migration could not install all outputs.") from error
-    return installed_paths
 
 
 @contextmanager
@@ -393,26 +425,15 @@ def _migration_lock(project_root: Path) -> Iterator[BinaryIO]:
         stream = path.open("a+b")
     except OSError as error:
         raise MigrationError("Migration could not acquire its lock.") from error
-    acquired = False
     try:
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            acquired = True
         except BlockingIOError as error:
             raise MigrationError(
                 "Another migration process is already running."
             ) from error
         yield stream
     finally:
-        if acquired and _path_exists(path):
-            try:
-                locked = os.fstat(stream.fileno())
-                current = os.lstat(path)
-                if locked.st_dev == current.st_dev and locked.st_ino == current.st_ino:
-                    path.unlink()
-                    _fsync_directory(project_root)
-            except OSError:
-                pass
         stream.close()
 
 
@@ -468,47 +489,25 @@ def _validate_outputs(
                 temporary_path.unlink()
 
 
-def _cleanup_transaction_temporaries(
-    outputs: Mapping[Path, tuple[bytes, int]],
-    transaction_digest: str,
-) -> None:
-    pattern = ".mox-adv-production-read-" + transaction_digest + "-*"
-    expected = {(content, mode) for content, mode in outputs.values()}
-    expected.add((_marker_bytes(transaction_digest), 0o600))
-    for directory in {path.parent for path in outputs}:
-        removed = False
-        for path in directory.glob(pattern):
-            if path.is_symlink() or not path.is_file():
-                continue
-            try:
-                candidate = (
-                    path.read_bytes(),
-                    stat.S_IMODE(path.stat().st_mode),
-                )
-                if candidate in expected:
-                    path.unlink()
-                    removed = True
-            except OSError:
-                continue
-        if removed:
-            _fsync_directory(directory)
-
-
 def _run_transaction(
     project_root: Path,
     outputs: Mapping[Path, tuple[bytes, int]],
 ) -> None:
     marker_path = project_root / TRANSACTION_MARKER_NAME
     digest = _transaction_digest(project_root, outputs)
-    _cleanup_transaction_temporaries(outputs, digest)
     if _path_exists(marker_path):
         if marker_path.is_symlink() or not marker_path.is_file():
             raise MigrationError(
                 "The migration transaction marker is not a regular file."
             )
+        marker_ownership = OwnedPath.capture(marker_path)
         if _read_marker(marker_path) != digest:
             raise MigrationError(
                 "The migration transaction does not match the current legacy inputs."
+            )
+        if not _path_is_owned(marker_ownership):
+            raise MigrationRollbackConflict(
+                "The migration transaction marker was concurrently replaced."
             )
         existing = _verify_existing_transaction_outputs(outputs)
     else:
@@ -519,31 +518,19 @@ def _run_transaction(
                 + ", ".join(str(path) for path in existing_paths)
                 + "."
             )
-        _claim_marker(marker_path, digest)
+        marker_ownership = _claim_marker(marker_path, digest)
         existing = set()
 
-    try:
-        installed = _install_missing_outputs(outputs, existing, digest)
-    except Exception:
-        if not existing and _path_exists(marker_path):
-            marker_path.unlink()
-            _fsync_directory(project_root)
-        raise
-    try:
-        verified = _verify_existing_transaction_outputs(outputs)
-        if verified != set(outputs):
-            raise MigrationError(
-                "Migration transaction did not produce every expected output."
-            )
-    except Exception:
-        for path in installed:
-            if _path_exists(path):
-                path.unlink()
-                _fsync_directory(path.parent)
-        raise
-    _cleanup_transaction_temporaries(outputs, digest)
-    marker_path.unlink()
-    _fsync_directory(project_root)
+    _install_missing_outputs(outputs, existing, digest)
+    verified = _verify_existing_transaction_outputs(outputs)
+    if verified != set(outputs):
+        raise MigrationError(
+            "Migration transaction did not produce every expected output."
+        )
+    if not _path_is_owned(marker_ownership):
+        raise MigrationRollbackConflict(
+            "Migration preserved a concurrently replaced transaction marker."
+        )
 
 
 def migrate(project_root: Path) -> None:
@@ -618,7 +605,6 @@ def migrate(project_root: Path) -> None:
             ),
         }
         transaction_digest = _transaction_digest(project_root, outputs)
-        _cleanup_transaction_temporaries(outputs, transaction_digest)
         _validate_outputs(outputs, transaction_digest)
         _run_transaction(project_root, outputs)
 

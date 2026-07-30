@@ -232,6 +232,13 @@ class YandexProductionReadMigrationTests(unittest.TestCase):
                 legacy_environment_bytes,
                 legacy_environment.read_bytes(),
             )
+            marker = project_root / MIGRATION_NAMESPACE["TRANSACTION_MARKER_NAME"]
+            self.assertTrue(marker.is_file())
+
+            repeated = run_migration(project_root)
+
+            self.assertEqual(0, repeated.returncode, repeated.stderr)
+            self.assertTrue(marker.is_file())
 
     def test_command_refuses_any_existing_output_without_partial_writes(
         self,
@@ -320,9 +327,12 @@ class YandexProductionReadMigrationTests(unittest.TestCase):
             self.assertNotEqual(0, completed.returncode)
             assert_no_split_outputs(self, project_root)
 
-    def test_partial_install_failure_rolls_back_every_output(self) -> None:
+    def test_partial_install_failure_leaves_a_recoverable_transaction(
+        self,
+    ) -> None:
         run_transaction = MIGRATION_NAMESPACE["_run_transaction"]
         migration_error = MIGRATION_NAMESPACE["MigrationError"]
+        marker_name = MIGRATION_NAMESPACE["TRANSACTION_MARKER_NAME"]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             outputs = {
@@ -348,11 +358,112 @@ class YandexProductionReadMigrationTests(unittest.TestCase):
                 with self.assertRaises(migration_error):
                     run_transaction(root, outputs)
 
-            self.assertTrue(all(not path.exists() for path in outputs))
+            self.assertTrue((root / "first.json").is_file())
+            self.assertFalse((root / "second.json").exists())
+            self.assertFalse((root / "third.json").exists())
+            self.assertTrue((root / marker_name).is_file())
             self.assertEqual(
-                [],
-                list(root.glob(".mox-adv-production-read-*")),
+                {marker_name},
+                {path.name for path in root.glob(".mox-adv-production-read-*")},
             )
+
+            run_transaction(root, outputs)
+
+            self.assertTrue(all(path.is_file() for path in outputs))
+            self.assertTrue((root / marker_name).is_file())
+
+    def test_install_failure_preserves_concurrently_replaced_output(
+        self,
+    ) -> None:
+        run_transaction = MIGRATION_NAMESPACE["_run_transaction"]
+        migration_error = MIGRATION_NAMESPACE["MigrationError"]
+        marker_name = MIGRATION_NAMESPACE["TRANSACTION_MARKER_NAME"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            replacement = root / "first.json"
+            outputs = {
+                replacement: (b"first\n", 0o600),
+                root / "second.json": (b"second\n", 0o600),
+                root / "third.json": (b"third\n", 0o600),
+            }
+            real_link = os.link
+            link_count = 0
+
+            def replace_first_then_fail_second(
+                source: Path,
+                target: Path,
+            ) -> None:
+                nonlocal link_count
+                link_count += 1
+                if link_count == 3:
+                    replacement.unlink()
+                    replacement.write_text(
+                        "external-replacement\n",
+                        encoding="utf-8",
+                    )
+                    raise OSError("simulated later install failure")
+                real_link(source, target)
+
+            with (
+                mock.patch.object(
+                    MIGRATION_NAMESPACE["os"],
+                    "link",
+                    side_effect=replace_first_then_fail_second,
+                ),
+                self.assertRaises(migration_error),
+            ):
+                run_transaction(root, outputs)
+
+            self.assertEqual(
+                "external-replacement\n",
+                replacement.read_text(encoding="utf-8"),
+            )
+            self.assertTrue((root / marker_name).is_file())
+
+    def test_verification_failure_preserves_concurrently_replaced_output(
+        self,
+    ) -> None:
+        run_transaction = MIGRATION_NAMESPACE["_run_transaction"]
+        migration_error = MIGRATION_NAMESPACE["MigrationError"]
+        marker_name = MIGRATION_NAMESPACE["TRANSACTION_MARKER_NAME"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            replacement = root / "first.json"
+            outputs = {
+                replacement: (b"first\n", 0o600),
+                root / "second.json": (b"second\n", 0o600),
+            }
+
+            def replace_before_verification(
+                values: object,
+            ) -> set[Path]:
+                del values
+                replacement.unlink()
+                replacement.write_text(
+                    "external-replacement\n",
+                    encoding="utf-8",
+                )
+                raise migration_error("simulated verification failure")
+
+            with (
+                mock.patch.dict(
+                    run_transaction.__globals__,
+                    {
+                        "_verify_existing_transaction_outputs": (
+                            replace_before_verification
+                        )
+                    },
+                ),
+                self.assertRaises(migration_error),
+            ):
+                run_transaction(root, outputs)
+
+            self.assertEqual(
+                "external-replacement\n",
+                replacement.read_text(encoding="utf-8"),
+            )
+            self.assertTrue((root / "second.json").is_file())
+            self.assertTrue((root / marker_name).is_file())
 
     def test_interrupted_transaction_resumes_exactly_without_overwrite(
         self,
@@ -377,10 +488,13 @@ class YandexProductionReadMigrationTests(unittest.TestCase):
             self.assertTrue(
                 all(path.is_file() for path in split_output_paths(project_root))
             )
-            self.assertFalse(marker.exists())
+            self.assertTrue(marker.is_file())
             self.assertEqual(
-                [],
-                list(project_root.glob(".mox-adv-production-read-*")),
+                {
+                    MIGRATION_NAMESPACE["MIGRATION_LOCK_NAME"],
+                    MIGRATION_NAMESPACE["TRANSACTION_MARKER_NAME"],
+                },
+                {path.name for path in project_root.glob(".mox-adv-production-read-*")},
             )
             self.assertEqual(
                 [],
