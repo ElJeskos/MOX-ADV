@@ -140,7 +140,7 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
             goal_lifecycle_provider=self.provider,
             clock=lambda: NOW,
         )
-        self.adapter = HttpJsonModuleAdapterV1(
+        self.adapter = HttpJsonModuleAdapterV1.for_embedded(
             self.module,
             environment=ExecutionEnvironment.TEST,
         )
@@ -496,7 +496,7 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
             goal_lifecycle_provider=provider,
             clock=lambda: NOW,
         )
-        adapter = HttpJsonModuleAdapterV1(
+        adapter = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         )

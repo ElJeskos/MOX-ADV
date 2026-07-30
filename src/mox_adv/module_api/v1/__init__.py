@@ -5,6 +5,7 @@ from mox_adv.module_api.v1.adapters import (
     HttpJsonResponseV1,
     InProcessModuleAdapterV1,
     ModuleV1,
+    analysis_request_fingerprint_v1,
 )
 from mox_adv.module_api.v1.campaign_creation_contracts import (
     CAMPAIGN_CREATION_COMMAND_SCHEMA_VERSION,
@@ -84,6 +85,14 @@ from mox_adv.module_api.v1.provider_observations import (
     MetrikaProviderObservationV1,
     ProviderObservationV1,
 )
+from mox_adv.module_api.v1.replay_store import (
+    AnalysisReplayConflictError,
+    AnalysisReplayPendingError,
+    AnalysisReplayStoreV1,
+    InMemoryAnalysisReplayStoreV1,
+    SqliteAnalysisReplayStoreV1,
+    StoredAnalysisResponseV1,
+)
 
 __all__ = [
     "EXTERNAL_EVIDENCE_SCHEMA_VERSION",
@@ -152,6 +161,13 @@ __all__ = [
     "PlanDirectActionCommandV1",
     "ProviderObservationV1",
     "PublishGoalEventCommandV1",
+    "AnalysisReplayConflictError",
+    "AnalysisReplayPendingError",
+    "AnalysisReplayStoreV1",
+    "analysis_request_fingerprint_v1",
+    "InMemoryAnalysisReplayStoreV1",
+    "SqliteAnalysisReplayStoreV1",
+    "StoredAnalysisResponseV1",
     "StoredConnectionRefV1",
     "VerifyGoalDeliveryCommandV1",
 ]

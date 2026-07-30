@@ -124,6 +124,9 @@
           "400": {
             "$ref": "#/components/responses/ContractError"
           },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyConflict"
+          },
           "422": {
             "$ref": "#/components/responses/ModuleRejection"
           },
@@ -138,6 +141,16 @@
     "responses": {
       "ContractError": {
         "description": "The request does not satisfy ModuleRequestV1.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ModuleResultV1"
+            }
+          }
+        }
+      },
+      "IdempotencyConflict": {
+        "description": "The idempotency key is already bound to a different request.",
         "content": {
           "application/json": {
             "schema": {

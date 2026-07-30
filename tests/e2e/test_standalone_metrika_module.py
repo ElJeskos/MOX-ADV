@@ -176,7 +176,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
             decision_records=decision_records,
         )
-        adapter = HttpJsonModuleAdapterV1(
+        adapter = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         )
@@ -234,7 +234,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             provider_reader=reader,
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
         )
-        adapter = HttpJsonModuleAdapterV1(
+        adapter = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         )
@@ -288,7 +288,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -318,7 +318,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -342,7 +342,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -371,7 +371,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -401,7 +401,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -422,7 +422,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -446,7 +446,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -471,7 +471,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -500,7 +500,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -540,7 +540,7 @@ from mox_adv.modules.metrika import MetrikaModuleV1
 module = MetrikaModuleV1(
     clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 )
-response = HttpJsonModuleAdapterV1(
+response = HttpJsonModuleAdapterV1.for_embedded(
     module,
     environment=ExecutionEnvironment.PRODUCTION,
 ).handle(json.loads({payload!r}))
@@ -625,7 +625,7 @@ request = json.loads(__import__("os").environ["METRIKA_REQUEST"])
 module = MetrikaModuleV1(
     clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 )
-response = HttpJsonModuleAdapterV1(
+response = HttpJsonModuleAdapterV1.for_embedded(
     module,
     environment=ExecutionEnvironment.PRODUCTION,
 ).handle(request)
