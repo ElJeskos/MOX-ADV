@@ -52,6 +52,12 @@ class AuthorizedDirectReadProviderV1(Protocol):
         query: DirectCampaignStateReadQuery,
     ) -> DirectCampaignStateBlock: ...
 
+    def authorizes_change_author(
+        self,
+        connection_id: str,
+        author: str,
+    ) -> bool: ...
+
 
 class BoundDirectReadProviderV1:
     """Bind typed readers to one stored connection, account, and campaign."""
@@ -62,12 +68,14 @@ class BoundDirectReadProviderV1:
         connection_id: str,
         account_id: str,
         campaign_id: str,
+        trusted_change_author: str,
         report_reader: DirectReportReaderV1,
         state_reader: DirectStateReaderV1,
     ) -> None:
         self._connection_id = connection_id
         self._account_id = account_id
         self._campaign_id = campaign_id
+        self._trusted_change_author = trusted_change_author
         self._report_reader = report_reader
         self._state_reader = state_reader
 
@@ -86,6 +94,17 @@ class BoundDirectReadProviderV1:
     ) -> DirectCampaignStateBlock:
         self._authorize(connection_id, query.account, query.campaign)
         return self._state_reader.read_campaign_state(query)
+
+    def authorizes_change_author(
+        self,
+        connection_id: str,
+        author: str,
+    ) -> bool:
+        if connection_id != self._connection_id:
+            raise DirectReadAuthorizationError(
+                "The stored connection does not authorize this Direct scope."
+            )
+        return author == self._trusted_change_author
 
     def _authorize(
         self,
@@ -118,6 +137,8 @@ class DirectObservationV1:
     current_search_bid_micros: int
     ad_variant: str
     object_config_version: str
+    last_change_author: Optional[str]
+    last_change_occurred_at: Optional[datetime]
     conversions: Optional[int]
     observed_at: datetime
     provenance: Tuple[ModuleProvenanceV1, ...]
@@ -135,6 +156,8 @@ class DirectStateValuesV1:
     current_search_bid_micros: int
     ad_variant: str
     object_config_version: str
+    last_change_author: str
+    last_change_occurred_at: datetime
 
 
 class DirectObservationReaderV1:
@@ -198,7 +221,7 @@ class DirectObservationReaderV1:
             self._string(metrics["budget_period_end"], "budget_period_end"),
             "budget_period_end",
         )
-        self._validate_budget_period(budget_start, budget_end)
+        self._validate_budget_period(budget_start, budget_end, now)
         return DirectObservationV1(
             impressions=self._count(metrics["impressions"], "impressions"),
             clicks=self._count(metrics["clicks"], "clicks"),
@@ -209,7 +232,7 @@ class DirectObservationReaderV1:
             group_state=self._string(metrics["group_state"], "group_state"),
             ad_state=self._string(metrics["ad_state"], "ad_state"),
             strategy=self._string(metrics["strategy"], "strategy"),
-            current_weekly_budget_micros=self._count(
+            current_weekly_budget_micros=self._positive_count(
                 metrics["current_weekly_budget_micros"],
                 "current_weekly_budget_micros",
             ),
@@ -224,6 +247,8 @@ class DirectObservationReaderV1:
                 metrics["object_config_version"],
                 "object_config_version",
             ),
+            last_change_author=None,
+            last_change_occurred_at=None,
             conversions=(
                 None
                 if "conversions" not in metrics
@@ -277,7 +302,20 @@ class DirectObservationReaderV1:
             report,
             request,
         )
-        state_values = self._validated_state(state, request)
+        state_values = self._validated_state(state, request, now)
+        try:
+            authorized_change = self._provider_reader.authorizes_change_author(
+                request.connection_ref.connection_id,
+                state_values.last_change_author,
+            )
+        except DirectReadAuthorizationError:
+            raise
+        except Exception as error:
+            raise DirectProviderUnavailable from error
+        if not authorized_change:
+            raise DirectReadAuthorizationError(
+                "The provider state contains an unknown external change."
+            )
         report_retrieved = self._timestamp(
             report.retrieved_at,
             "provider_report.retrieved_at",
@@ -328,6 +366,8 @@ class DirectObservationReaderV1:
             current_search_bid_micros=state_values.current_search_bid_micros,
             ad_variant=state_values.ad_variant,
             object_config_version=state_values.object_config_version,
+            last_change_author=state_values.last_change_author,
+            last_change_occurred_at=state_values.last_change_occurred_at,
         )
 
     @classmethod
@@ -438,6 +478,7 @@ class DirectObservationReaderV1:
         cls,
         state: DirectCampaignStateBlock,
         request: ModuleRequestV1,
+        now: datetime,
     ) -> DirectStateValuesV1:
         if not isinstance(state, DirectCampaignStateBlock):
             raise ValueError(
@@ -458,8 +499,8 @@ class DirectObservationReaderV1:
             state.budget_period_end,
             "provider_state.budget_period_end",
         )
-        cls._validate_budget_period(budget_start, budget_end)
-        cls._timestamp(
+        cls._validate_budget_period(budget_start, budget_end, now)
+        last_change_occurred_at = cls._timestamp(
             state.last_change_occurred_at,
             "provider_state.last_change_occurred_at",
         )
@@ -471,7 +512,7 @@ class DirectObservationReaderV1:
             group_state=cls._string(state.group_state, "group_state"),
             ad_state=cls._string(state.ad_state, "ad_state"),
             strategy=cls._string(state.strategy, "strategy"),
-            current_weekly_budget_micros=cls._count(
+            current_weekly_budget_micros=cls._positive_count(
                 state.current_weekly_budget_micros,
                 "current_weekly_budget_micros",
             ),
@@ -486,6 +527,11 @@ class DirectObservationReaderV1:
                 state.object_config_version,
                 "object_config_version",
             ),
+            last_change_author=cls._string(
+                state.last_change_author,
+                "last_change_author",
+            ),
+            last_change_occurred_at=last_change_occurred_at,
         )
 
     @staticmethod
@@ -493,6 +539,13 @@ class DirectObservationReaderV1:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(name + " must be a non-negative integer.")
         return value
+
+    @classmethod
+    def _positive_count(cls, value: object, name: str) -> int:
+        parsed = cls._count(value, name)
+        if parsed == 0:
+            raise ValueError("The current weekly budget must be positive.")
+        return parsed
 
     @staticmethod
     def _string(value: object, name: str) -> str:
@@ -524,9 +577,15 @@ class DirectObservationReaderV1:
             raise ValueError(field + " must be an ISO date.") from error
 
     @staticmethod
-    def _validate_budget_period(start: datetime, end: datetime) -> None:
+    def _validate_budget_period(
+        start: datetime,
+        end: datetime,
+        now: datetime,
+    ) -> None:
         if end - start != timedelta(days=7):
             raise ValueError("The weekly budget period must span seven days.")
+        if start > now:
+            raise ValueError("The weekly budget period has not started.")
 
     @staticmethod
     def _validate_provenance(

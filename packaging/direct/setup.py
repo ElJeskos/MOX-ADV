@@ -13,9 +13,11 @@ PACKAGE_MODULES = {
         "__init__",
         "contracts",
         "direct_analysis",
+        "direct_conclusions",
         "direct_metrics",
         "direct_provider",
         "environment",
+        "module_analysis",
     },
     "mox_adv.module_api": {"__init__"},
     "mox_adv.module_api.v1": {

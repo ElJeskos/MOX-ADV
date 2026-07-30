@@ -16,6 +16,7 @@ PACKAGE_MODULES = {
         "metrika_analysis",
         "metrika_metrics",
         "metrika_provider",
+        "module_analysis",
     },
     "mox_adv.module_api": {"__init__"},
     "mox_adv.module_api.v1": {

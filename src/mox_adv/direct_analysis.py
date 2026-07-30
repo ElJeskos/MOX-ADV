@@ -2,23 +2,26 @@
 
 from __future__ import annotations
 
-import hashlib
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
-from typing import Callable, Literal, Mapping, Optional, Tuple
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
+from typing import Callable, Mapping, Optional, Tuple
 
-from mox_adv.direct_metrics import (
-    NOT_APPLICABLE,
-    DirectMetric,
-    calculate_direct_metrics,
+from mox_adv.direct_conclusions import (
+    direct_hypotheses,
+    evaluate_direct_conditions,
 )
+from mox_adv.direct_metrics import DirectMetric, calculate_direct_metrics
 from mox_adv.direct_provider import (
     AuthorizedDirectReadProviderV1,
     DirectObservationV1,
     DirectObservationReaderV1,
     DirectProviderUnavailable,
     DirectReadAuthorizationError,
+)
+from mox_adv.module_analysis import (
+    failed_provider_read,
+    normalized_utc_now,
+    terminal_module_result,
+    validate_closed_period,
 )
 from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
@@ -28,14 +31,9 @@ from mox_adv.module_api.v1 import (
     ModuleDecisionRecordStoreV1,
     ModuleDecisionV1,
     ModuleErrorV1,
-    ModuleHypothesisV1,
     ModuleIdentityV1,
-    ModuleProvenanceV1,
-    ModuleRecommendationV1,
     ModuleRequestV1,
     ModuleResultV1,
-    ModuleStatus,
-    ModuleWarningV1,
 )
 
 DIRECT_IDENTITY = ModuleIdentityV1(
@@ -66,15 +64,22 @@ class StandaloneDirectAnalysisV1:
     def invoke(self, request: ModuleRequestV1) -> ModuleResultV1:
         error = self._validate_request(request)
         if error is not None:
-            return self._rejected(request, error)
+            return terminal_module_result(
+                module=DIRECT_IDENTITY,
+                request=request,
+                status="REJECTED",
+                error=error,
+            )
         try:
-            now = self._normalized_now()
-            self._validate_period_is_closed(request, now)
+            now = normalized_utc_now(self._clock, module_name="Direct")
+            validate_closed_period(request, now, module_name="Direct")
             observation = self._observations.read(request, now)
         except DirectReadAuthorizationError as authorization_error:
-            return self._rejected(
-                request,
-                ModuleErrorV1(
+            return terminal_module_result(
+                module=DIRECT_IDENTITY,
+                request=request,
+                status="REJECTED",
+                error=ModuleErrorV1(
                     code="DIRECT_SCOPE_REJECTED",
                     message=str(authorization_error),
                     field="scope",
@@ -82,11 +87,18 @@ class StandaloneDirectAnalysisV1:
                 ),
             )
         except DirectProviderUnavailable:
-            return self._failed_provider_read(request)
+            return failed_provider_read(
+                module=DIRECT_IDENTITY,
+                request=request,
+                error_code="DIRECT_PROVIDER_READ_FAILED",
+                message="The authorized Direct read failed before analysis.",
+            )
         except ValueError as error_value:
-            return self._rejected(
-                request,
-                ModuleErrorV1(
+            return terminal_module_result(
+                module=DIRECT_IDENTITY,
+                request=request,
+                status="REJECTED",
+                error=ModuleErrorV1(
                     code="DIRECT_EVIDENCE_REJECTED",
                     message=str(error_value),
                     field="external_evidence",
@@ -104,32 +116,23 @@ class StandaloneDirectAnalysisV1:
             budget_period_start=observation.budget_period_start,
             budget_period_end=observation.budget_period_end,
             observed_at=now,
-            conversions=(
-                -1 if observation.conversions is None else observation.conversions
-            ),
+            conversions=observation.conversions,
         )
         metrics = self._metrics(calculated, observation)
-        warnings = self._warnings(
+        conditions = evaluate_direct_conditions(
             clicks=observation.clicks,
             conversions=observation.conversions,
             observed_at=observation.observed_at,
             now=now,
         )
-        hypotheses = self._hypotheses(calculated)
-        recommendations = self._recommendations(calculated, warnings)
-        status: ModuleStatus = "PARTIAL" if warnings else "SUCCEEDED"
+        warnings = conditions.warnings()
+        hypotheses = direct_hypotheses(calculated)
+        recommendations = conditions.recommendations()
+        status = conditions.status
         assessment = ModuleAssessmentV1(
-            summary=self._assessment_summary(warnings),
-            data_quality_status=(
-                "PARTIAL"
-                if {
-                    "CONVERSION_CONTEXT_UNAVAILABLE",
-                    "DIRECT_DATA_STALE",
-                }
-                & {item.code for item in warnings}
-                else "READY"
-            ),
-            confidence_status=self._confidence_status(warnings),
+            summary=conditions.assessment_summary,
+            data_quality_status=conditions.data_quality_status,
+            confidence_status=conditions.confidence_status,
         )
         receipt = self._decision_records.record_module_decision(
             DIRECT_IDENTITY,
@@ -291,287 +294,3 @@ class StandaloneDirectAnalysisV1:
                 )
             )
         return tuple(values)
-
-    @staticmethod
-    def _warnings(
-        *,
-        clicks: int,
-        conversions: Optional[int],
-        observed_at: datetime,
-        now: datetime,
-    ) -> Tuple[ModuleWarningV1, ...]:
-        warnings = []
-        if conversions is None:
-            warnings.append(
-                ModuleWarningV1(
-                    code="CONVERSION_CONTEXT_UNAVAILABLE",
-                    message=(
-                        "No provider-neutral conversion count was supplied, "
-                        "so conversion-dependent conclusions remain partial."
-                    ),
-                )
-            )
-        elif clicks < 50 or conversions < 3:
-            warnings.append(
-                ModuleWarningV1(
-                    code="INSUFFICIENT_SAMPLE",
-                    message=(
-                        "At least 50 clicks and three conversions are required "
-                        "for a conversion-dependent conclusion."
-                    ),
-                )
-            )
-        if now - observed_at > timedelta(minutes=30):
-            warnings.append(
-                ModuleWarningV1(
-                    code="DIRECT_DATA_STALE",
-                    message=(
-                        "Direct evidence is older than the supported "
-                        "30-minute freshness window."
-                    ),
-                )
-            )
-        return tuple(warnings)
-
-    @classmethod
-    def _hypotheses(
-        cls,
-        calculated: Mapping[str, DirectMetric],
-    ) -> Tuple[ModuleHypothesisV1, ...]:
-        hypotheses = []
-        ctr = cls._decimal(calculated["ctr_percent"])
-        utilization = cls._decimal(calculated["budget_utilization_percent"])
-        pacing = cls._decimal(calculated["pacing_percent"])
-        if (
-            ctr is not None
-            and cls._integer(calculated["impressions"]) >= 5_000
-            and ctr < Decimal(1)
-        ):
-            hypotheses.append(
-                ModuleHypothesisV1(
-                    code="LOW_CTR_MAY_REFLECT_AD_RELEVANCE",
-                    summary=(
-                        "Low CTR may indicate that the ad or targeting does "
-                        "not match current search intent."
-                    ),
-                    evidence_metric_names=("ctr_percent", "impressions"),
-                )
-            )
-        if utilization is not None and utilization >= Decimal(90):
-            hypotheses.append(
-                ModuleHypothesisV1(
-                    code="BUDGET_PRESSURE_MAY_LIMIT_DELIVERY",
-                    summary=(
-                        "High budget utilization may limit campaign delivery "
-                        "before the weekly period closes."
-                    ),
-                    evidence_metric_names=(
-                        "budget_utilization_percent",
-                        "current_weekly_budget_micros",
-                    ),
-                )
-            )
-        if pacing is not None and pacing >= Decimal(120):
-            hypotheses.append(
-                ModuleHypothesisV1(
-                    code="SPEND_MAY_BE_AHEAD_OF_PACING",
-                    summary=(
-                        "Spend may be progressing faster than the current "
-                        "weekly budget period."
-                    ),
-                    evidence_metric_names=(
-                        "pacing_percent",
-                        "cost_micros",
-                        "current_weekly_budget_micros",
-                    ),
-                )
-            )
-        if not hypotheses:
-            hypotheses.append(
-                ModuleHypothesisV1(
-                    code="DIRECT_TRAFFIC_EFFICIENCY_STABLE",
-                    summary=(
-                        "The available Direct-native traffic metrics do not "
-                        "cross the current anomaly thresholds."
-                    ),
-                    evidence_metric_names=("ctr_percent", "cpc_rub"),
-                )
-            )
-        return tuple(hypotheses[:3])
-
-    @staticmethod
-    def _recommendations(
-        calculated: Mapping[str, DirectMetric],
-        warnings: Tuple[ModuleWarningV1, ...],
-    ) -> Tuple[ModuleRecommendationV1, ...]:
-        codes = {item.code for item in warnings}
-        if "CONVERSION_CONTEXT_UNAVAILABLE" in codes:
-            return (
-                ModuleRecommendationV1(
-                    code="CONVERSION_CONTEXT_REQUIRED",
-                    summary=(
-                        "Supply a provider-neutral conversion count before "
-                        "making a conversion-dependent campaign decision."
-                    ),
-                    rationale=(
-                        "CTR, CPC, utilization, and pacing are available, but "
-                        "CPA and conversion effectiveness cannot be derived."
-                    ),
-                    executable=False,
-                ),
-            )
-        if "INSUFFICIENT_SAMPLE" in codes:
-            return (
-                ModuleRecommendationV1(
-                    code="COLLECT_MORE_DIRECT_EVIDENCE",
-                    summary="Collect a larger click and conversion sample.",
-                    rationale=(
-                        "The current sample is below the existing minimum of "
-                        "50 clicks and three conversions."
-                    ),
-                    executable=False,
-                ),
-            )
-        if "DIRECT_DATA_STALE" in codes:
-            return (
-                ModuleRecommendationV1(
-                    code="REFRESH_DIRECT_EVIDENCE",
-                    summary="Refresh Direct evidence before taking action.",
-                    rationale=(
-                        "The evidence exceeds the supported 30-minute "
-                        "freshness window."
-                    ),
-                    executable=False,
-                ),
-            )
-        return (
-            ModuleRecommendationV1(
-                code="CONTINUE_MONITORING",
-                summary="Continue monitoring the campaign without a write.",
-                rationale=(
-                    "The validated Direct-native metrics and neutral "
-                    "conversion context support a complete read-only result."
-                ),
-                executable=False,
-            ),
-        )
-
-    @staticmethod
-    def _assessment_summary(
-        warnings: Tuple[ModuleWarningV1, ...],
-    ) -> str:
-        codes = {item.code for item in warnings}
-        if "CONVERSION_CONTEXT_UNAVAILABLE" in codes:
-            return (
-                "Direct-native performance and campaign state were calculated, "
-                "but conversion-dependent conclusions remain partial."
-            )
-        if "DIRECT_DATA_STALE" in codes:
-            return (
-                "Direct performance was calculated, but the evidence must be "
-                "refreshed before a current conclusion."
-            )
-        if "INSUFFICIENT_SAMPLE" in codes:
-            return (
-                "Direct performance was calculated, but the neutral conversion "
-                "sample is insufficient."
-            )
-        return (
-            "Direct-native performance, campaign state, and neutral conversion "
-            "context were calculated successfully."
-        )
-
-    @staticmethod
-    def _confidence_status(
-        warnings: Tuple[ModuleWarningV1, ...],
-    ) -> str:
-        codes = {item.code for item in warnings}
-        if "INSUFFICIENT_SAMPLE" in codes:
-            return "INSUFFICIENT_DATA"
-        if "DIRECT_DATA_STALE" in codes:
-            return "STALE_DATA"
-        return "READY"
-
-    @staticmethod
-    def _decimal(value: object) -> Optional[Decimal]:
-        if value == NOT_APPLICABLE:
-            return None
-        try:
-            return Decimal(str(value))
-        except (InvalidOperation, ValueError):
-            return None
-
-    @staticmethod
-    def _integer(value: DirectMetric) -> int:
-        if not isinstance(value, int):
-            raise ValueError("The calculated Direct count is not an integer.")
-        return value
-
-    def _normalized_now(self) -> datetime:
-        now = self._clock()
-        if now.tzinfo is None:
-            raise ValueError("The Direct module clock must be timezone-aware.")
-        return now.astimezone(timezone.utc)
-
-    @staticmethod
-    def _validate_period_is_closed(
-        request: ModuleRequestV1,
-        now: datetime,
-    ) -> None:
-        local_date = now.astimezone(ZoneInfo(request.period.timezone)).date()
-        if datetime.fromisoformat(request.period.end_date).date() >= local_date:
-            raise ValueError("The requested Direct period must be closed.")
-
-    @classmethod
-    def _rejected(
-        cls,
-        request: ModuleRequestV1,
-        error: ModuleErrorV1,
-    ) -> ModuleResultV1:
-        return cls._terminal_result(request, "REJECTED", error)
-
-    @classmethod
-    def _failed_provider_read(
-        cls,
-        request: ModuleRequestV1,
-    ) -> ModuleResultV1:
-        return cls._terminal_result(
-            request,
-            "FAILED",
-            ModuleErrorV1(
-                code="DIRECT_PROVIDER_READ_FAILED",
-                message="The authorized Direct read failed before analysis.",
-                field="connection_ref",
-                retryable=True,
-            ),
-        )
-
-    @classmethod
-    def _terminal_result(
-        cls,
-        request: ModuleRequestV1,
-        status: Literal["REJECTED", "FAILED"],
-        error: ModuleErrorV1,
-    ) -> ModuleResultV1:
-        return ModuleResultV1(
-            schema_version=MODULE_RESULT_SCHEMA_VERSION,
-            run_id=cls._bounded_run_id(status.lower(), request),
-            module=DIRECT_IDENTITY,
-            status=status,
-            metrics=(),
-            assessment=None,
-            recommendations=(),
-            proposal=None,
-            execution_result=None,
-            provenance=(),
-            warnings=(),
-            errors=(error,),
-            decision_record_ref=None,
-        )
-
-    @staticmethod
-    def _bounded_run_id(prefix: str, request: ModuleRequestV1) -> str:
-        digest = hashlib.sha256(
-            request.idempotency_key.encode("utf-8")
-        ).hexdigest()[:24]
-        return prefix + "-direct-" + digest

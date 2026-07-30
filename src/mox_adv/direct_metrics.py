@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 
 NOT_APPLICABLE = "NOT_APPLICABLE"
 ONE_HUNDRED = Decimal(100)
@@ -24,7 +24,7 @@ class DirectCalculatedValues:
     cpc_rub: DirectCalculatedMetric
     budget_utilization_percent: DirectCalculatedMetric
     pacing_percent: DirectCalculatedMetric
-    conversions: int = -1
+    conversions: Optional[int] = None
     cpa_rub: DirectCalculatedMetric = NOT_APPLICABLE
 
 
@@ -62,7 +62,7 @@ def calculate_direct_metrics(
     budget_period_start: datetime,
     budget_period_end: datetime,
     observed_at: datetime,
-    conversions: int = -1,
+    conversions: Optional[int] = None,
 ) -> Dict[str, DirectMetric]:
     """Calculate the existing exact Direct aggregate and optional neutral CPA."""
 
@@ -87,7 +87,7 @@ def calculate_direct_metrics(
         ),
         "pacing_percent": _decimal_text(calculated.pacing_percent),
     }
-    if calculated.conversions >= 0:
+    if calculated.conversions is not None:
         metrics["conversions"] = calculated.conversions
         metrics["cpa_rub"] = _decimal_text(calculated.cpa_rub)
     return metrics
@@ -102,7 +102,7 @@ def calculate_direct_metric_values(
     budget_period_start: datetime,
     budget_period_end: datetime,
     observed_at: datetime,
-    conversions: int = -1,
+    conversions: Optional[int] = None,
 ) -> DirectCalculatedValues:
     """Return exact Decimal values for paired and standalone projections."""
 
@@ -145,7 +145,7 @@ def calculate_direct_metric_values(
         conversions=conversions,
         cpa_rub=(
             NOT_APPLICABLE
-            if conversions < 0
+            if conversions is None
             else _money(cost_micros, conversions)
         ),
     )

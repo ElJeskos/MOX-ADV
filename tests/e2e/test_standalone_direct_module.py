@@ -164,6 +164,16 @@ class RecordingAuthorizedDirectReader:
             last_change_occurred_at="2026-07-22T12:00:00+00:00",
         )
 
+    def authorizes_change_author(
+        self,
+        connection_id: str,
+        author: str,
+    ) -> bool:
+        return (
+            connection_id == "customer-direct-primary"
+            and author == "customer-42"
+        )
+
 
 class FailingAuthorizedDirectReader(RecordingAuthorizedDirectReader):
     def read_direct_report(
@@ -212,6 +222,33 @@ class StaleReportAuthorizedDirectReader(RecordingAuthorizedDirectReader):
             attribution=report.attribution,
             currency=report.currency,
             rows=report.rows,
+        )
+
+
+class RogueChangeAuthorDirectReader(RecordingAuthorizedDirectReader):
+    def read_direct_state(
+        self,
+        connection_id: str,
+        query: DirectCampaignStateReadQuery,
+    ) -> DirectCampaignStateBlock:
+        state = super().read_direct_state(connection_id, query)
+        return DirectCampaignStateBlock(
+            source=state.source,
+            retrieved_at=state.retrieved_at,
+            watermark=state.watermark,
+            campaign=state.campaign,
+            campaign_state=state.campaign_state,
+            group_state=state.group_state,
+            ad_state=state.ad_state,
+            strategy=state.strategy,
+            current_weekly_budget_micros=state.current_weekly_budget_micros,
+            budget_period_start=state.budget_period_start,
+            budget_period_end=state.budget_period_end,
+            current_search_bid_micros=state.current_search_bid_micros,
+            ad_variant=state.ad_variant,
+            object_config_version=state.object_config_version,
+            last_change_author="rogue-operator",
+            last_change_occurred_at=state.last_change_occurred_at,
         )
 
 
@@ -548,6 +585,85 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             response.body["errors"][0]["message"],
         )
 
+    def test_zero_weekly_budget_is_rejected_as_invalid_managed_state(
+        self,
+    ) -> None:
+        request = customer_evidence_request()
+        evidence = request["external_evidence"]
+        assert isinstance(evidence, dict)
+        metrics = evidence["metrics"]
+        assert isinstance(metrics, list)
+        by_name = {item["name"]: item for item in metrics}
+        by_name["current_weekly_budget_micros"]["value"] = 0
+        metrics.append(
+            {"name": "conversions", "value": 5, "unit": "COUNT"}
+        )
+
+        response = HttpJsonModuleAdapterV1(
+            DirectModuleV1(
+                clock=lambda: datetime(
+                    2026,
+                    7,
+                    30,
+                    12,
+                    0,
+                    tzinfo=timezone.utc,
+                )
+            ),
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(422, response.status_code)
+        self.assertEqual(
+            "DIRECT_EVIDENCE_REJECTED",
+            response.body["errors"][0]["code"],
+        )
+        self.assertIn(
+            "weekly budget must be positive",
+            response.body["errors"][0]["message"],
+        )
+
+    def test_future_budget_period_is_rejected_as_invalid_managed_state(
+        self,
+    ) -> None:
+        request = customer_evidence_request()
+        evidence = request["external_evidence"]
+        assert isinstance(evidence, dict)
+        metrics = evidence["metrics"]
+        assert isinstance(metrics, list)
+        by_name = {item["name"]: item for item in metrics}
+        by_name["budget_period_start"]["value"] = (
+            "2026-07-31T12:00:00+00:00"
+        )
+        by_name["budget_period_end"]["value"] = "2026-08-07T12:00:00+00:00"
+        metrics.append(
+            {"name": "conversions", "value": 5, "unit": "COUNT"}
+        )
+
+        response = HttpJsonModuleAdapterV1(
+            DirectModuleV1(
+                clock=lambda: datetime(
+                    2026,
+                    7,
+                    30,
+                    12,
+                    0,
+                    tzinfo=timezone.utc,
+                )
+            ),
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(422, response.status_code)
+        self.assertEqual(
+            "DIRECT_EVIDENCE_REJECTED",
+            response.body["errors"][0]["code"],
+        )
+        self.assertIn(
+            "budget period has not started",
+            response.body["errors"][0]["message"],
+        )
+
     def test_stale_direct_evidence_is_partial_and_non_executable(self) -> None:
         request = customer_evidence_request()
         evidence = request["external_evidence"]
@@ -676,6 +792,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             connection_id="customer-direct-primary",
             account_id="account-8",
             campaign_id="campaign-7",
+            trusted_change_author="customer-42",
             report_reader=report_reader,
             state_reader=state_reader,
         )
@@ -707,6 +824,69 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         )
         self.assertEqual([], report_reader.queries)
         self.assertEqual([], state_reader.queries)
+
+    def test_bound_provider_accepts_only_the_trusted_change_author(self) -> None:
+        report_reader = RecordingDirectReportReader()
+        state_reader = RecordingDirectStateReader()
+        provider = BoundDirectReadProviderV1(
+            connection_id="customer-direct-primary",
+            account_id="account-8",
+            campaign_id="campaign-7",
+            trusted_change_author="customer-42",
+            report_reader=report_reader,
+            state_reader=state_reader,
+        )
+        request = customer_evidence_request()
+        request.pop("external_evidence")
+
+        response = HttpJsonModuleAdapterV1(
+            DirectModuleV1(
+                provider_reader=provider,
+                clock=lambda: datetime(
+                    2026,
+                    7,
+                    30,
+                    12,
+                    0,
+                    tzinfo=timezone.utc,
+                ),
+            ),
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("PARTIAL", response.body["status"])
+        self.assertEqual(1, len(report_reader.queries))
+        self.assertEqual(1, len(state_reader.queries))
+
+    def test_unknown_external_change_author_is_rejected(self) -> None:
+        request = customer_evidence_request()
+        request.pop("external_evidence")
+
+        response = HttpJsonModuleAdapterV1(
+            DirectModuleV1(
+                provider_reader=RogueChangeAuthorDirectReader(),
+                clock=lambda: datetime(
+                    2026,
+                    7,
+                    30,
+                    12,
+                    0,
+                    tzinfo=timezone.utc,
+                ),
+            ),
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(422, response.status_code)
+        self.assertEqual(
+            "DIRECT_SCOPE_REJECTED",
+            response.body["errors"][0]["code"],
+        )
+        self.assertIn(
+            "unknown external change",
+            response.body["errors"][0]["message"],
+        )
 
     def test_clean_process_needs_no_metrika_credentials_requests_or_ui(
         self,

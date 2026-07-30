@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Literal, Optional, Tuple
-from zoneinfo import ZoneInfo
+from typing import Callable, Optional, Tuple
 
 from mox_adv.metrika_metrics import calculate_metrika_metrics
 from mox_adv.metrika_provider import (
@@ -13,6 +11,12 @@ from mox_adv.metrika_provider import (
     MetrikaObservationReaderV1,
     MetrikaProviderUnavailable,
     MetrikaReadAuthorizationError,
+)
+from mox_adv.module_analysis import (
+    failed_provider_read,
+    normalized_utc_now,
+    terminal_module_result,
+    validate_closed_period,
 )
 from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
@@ -57,15 +61,22 @@ class StandaloneMetrikaAnalysisV1:
     def invoke(self, request: ModuleRequestV1) -> ModuleResultV1:
         error = self._validate_request(request)
         if error is not None:
-            return self._rejected(request, error)
+            return terminal_module_result(
+                module=METRIKA_IDENTITY,
+                request=request,
+                status="REJECTED",
+                error=error,
+            )
         try:
-            now = self._normalized_now()
-            self._validate_period_is_closed(request, now)
+            now = normalized_utc_now(self._clock, module_name="Metrika")
+            validate_closed_period(request, now, module_name="Metrika")
             observation = self._observations.read(request, now)
         except MetrikaReadAuthorizationError as authorization_error:
-            return self._rejected(
-                request,
-                ModuleErrorV1(
+            return terminal_module_result(
+                module=METRIKA_IDENTITY,
+                request=request,
+                status="REJECTED",
+                error=ModuleErrorV1(
                     code="METRIKA_SCOPE_REJECTED",
                     message=str(authorization_error),
                     field="scope",
@@ -73,11 +84,18 @@ class StandaloneMetrikaAnalysisV1:
                 ),
             )
         except MetrikaProviderUnavailable:
-            return self._failed_provider_read(request)
+            return failed_provider_read(
+                module=METRIKA_IDENTITY,
+                request=request,
+                error_code="METRIKA_PROVIDER_READ_FAILED",
+                message="The authorized Metrika read failed before analysis.",
+            )
         except ValueError as error_value:
-            return self._rejected(
-                request,
-                ModuleErrorV1(
+            return terminal_module_result(
+                module=METRIKA_IDENTITY,
+                request=request,
+                status="REJECTED",
+                error=ModuleErrorV1(
                     code="METRIKA_EVIDENCE_REJECTED",
                     message=str(error_value),
                     field="external_evidence",
@@ -247,72 +265,3 @@ class StandaloneMetrikaAnalysisV1:
         if "METRIKA_DATA_STALE" in codes:
             return "STALE_DATA"
         return "READY"
-
-    def _normalized_now(self) -> datetime:
-        now = self._clock()
-        if now.tzinfo is None:
-            raise ValueError("The Metrika module clock must be timezone-aware.")
-        return now.astimezone(timezone.utc)
-
-    @staticmethod
-    def _validate_period_is_closed(
-        request: ModuleRequestV1,
-        now: datetime,
-    ) -> None:
-        local_date = now.astimezone(ZoneInfo(request.period.timezone)).date()
-        if datetime.fromisoformat(request.period.end_date).date() >= local_date:
-            raise ValueError("The requested Metrika period must be closed.")
-
-    @classmethod
-    def _rejected(
-        cls,
-        request: ModuleRequestV1,
-        error: ModuleErrorV1,
-    ) -> ModuleResultV1:
-        return cls._terminal_result(request, "REJECTED", error)
-
-    @classmethod
-    def _failed_provider_read(
-        cls,
-        request: ModuleRequestV1,
-    ) -> ModuleResultV1:
-        return cls._terminal_result(
-            request,
-            "FAILED",
-            ModuleErrorV1(
-                code="METRIKA_PROVIDER_READ_FAILED",
-                message=("The authorized Metrika read failed before analysis."),
-                field="connection_ref",
-                retryable=True,
-            ),
-        )
-
-    @classmethod
-    def _terminal_result(
-        cls,
-        request: ModuleRequestV1,
-        status: Literal["REJECTED", "FAILED"],
-        error: ModuleErrorV1,
-    ) -> ModuleResultV1:
-        return ModuleResultV1(
-            schema_version=MODULE_RESULT_SCHEMA_VERSION,
-            run_id=cls._bounded_run_id(status.lower(), request),
-            module=METRIKA_IDENTITY,
-            status=status,
-            metrics=(),
-            assessment=None,
-            recommendations=(),
-            proposal=None,
-            execution_result=None,
-            provenance=(),
-            warnings=(),
-            errors=(error,),
-            decision_record_ref=None,
-        )
-
-    @staticmethod
-    def _bounded_run_id(prefix: str, request: ModuleRequestV1) -> str:
-        digest = hashlib.sha256(request.idempotency_key.encode("utf-8")).hexdigest()[
-            :24
-        ]
-        return prefix + "-metrika-" + digest
