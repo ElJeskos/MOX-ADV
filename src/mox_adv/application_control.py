@@ -102,13 +102,12 @@ class ApplicationWriteBoundary:
         scope: TrustedScope,
         final_check: Callable[[], Any] | None = None,
     ) -> Any:
-        occurred_at = self.clock()
+        self.require_dispatch_allowed(scope)
+        result = None if final_check is None else final_check()
         self.pre_write_audit.authorize(
             execution_key,
             target_key,
-            occurred_at,
+            self.clock(),
         )
-        self.require_dispatch_allowed(scope)
-        result = None if final_check is None else final_check()
         self.require_dispatch_allowed(scope)
         return result

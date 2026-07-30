@@ -726,13 +726,60 @@ def record_completed_stage_artifacts(
         workspace.write_json(name, value)
         recorded[name] = _artifact_digest(workspace.path / name)
     stages[stage] = recorded
-    workspace.write_json(
-        "completed-stage-evidence.json",
+    _replace_json(
+        workspace.path / "completed-stage-evidence.json",
         {
             "schema_version": "readonly-e2e-completed-stages-v1",
             "stages": stages,
         },
     )
+
+
+def _replace_json(path: Path, value: Mapping[str, Any]) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix="." + path.name + ".",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(
+                value,
+                stream,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def _write_or_verify_json(
+    workspace: RunWorkspace,
+    name: str,
+    value: Mapping[str, Any],
+) -> None:
+    path = workspace.path / name
+    expected = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    if path.exists():
+        if path.read_text(encoding="utf-8") != expected:
+            raise ValueError(
+                "Completed stage evidence changed before finalization."
+            )
+        return
+    workspace.write_json(name, value)
 
 
 def _verified_completed_stage_artifacts(
@@ -951,7 +998,7 @@ def write_final_e2e_artifacts(
     journal.close()
 
     for name, value in supplemental_artifacts.items():
-        workspace.write_json(name, value)
+        _write_or_verify_json(workspace, name, value)
     egress_text = "".join(
         canonical_json(record.as_dict()) + "\n" for record in egress.records
     )

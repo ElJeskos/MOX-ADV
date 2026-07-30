@@ -126,6 +126,18 @@ class ImmutableProposalStore:
                 "WHERE active = 1 AND expires_at <= ?",
                 (timestamp.isoformat(),),
             )
+            same_id = connection.execute(
+                "SELECT canonical_hash FROM active_proposals "
+                "WHERE proposal_id = ?",
+                (proposal.proposal_id,),
+            ).fetchone()
+            if (
+                same_id is not None
+                and str(same_id["canonical_hash"]) != canonical_hash
+            ):
+                raise ProposalConflictError(
+                    "An immutable proposal ID already contains different content."
+                )
             active = connection.execute(
                 "SELECT proposal_id, canonical_hash FROM active_proposals "
                 "WHERE snapshot_id = ? AND reason_key = ? AND active = 1",

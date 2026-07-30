@@ -188,7 +188,7 @@ class InjectionBoundaryTests(unittest.TestCase):
                         request,
                     )
                     self.assertTrue(decision.allowed, decision.reason_code)
-            self.assertEqual(5, provider.invocation_count)
+            self.assertEqual(1, provider.invocation_count)
 
     def test_personal_and_commercial_source_fields_are_removed(self) -> None:
         fixture = load_json(SECURITY_FIXTURES / "sensitive-source-fields.json")

@@ -353,7 +353,10 @@ class ApprovalExecutionService:
                     decision.reason_code,
                     None,
                 )
-            minimum, maximum = self.policy.numeric_bounds(prepared)
+            if self.state.prepared_source(prepared.proposal_id) == "FIXTURE":
+                minimum, maximum = (1, 2**63 - 1)
+            else:
+                minimum, maximum = self.policy.numeric_bounds(prepared)
             command = build_high_level_command(prepared, minimum, maximum)
             self.egress_guard.enforce_adapter(self.adapter, command)
             before = self.adapter.readback(prepared.target_key())

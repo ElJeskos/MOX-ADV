@@ -822,25 +822,35 @@ class DurableControlState:
         self,
         plan: TerminalNoWritePlan,
     ) -> None:
+        from mox_adv.recommend_contracts import _canonical_hash
+
         if plan.action != "KEEP" or plan.status != "INSUFFICIENT_DATA":
             raise ControlRejected(
                 "INVALID_INPUT",
                 "fixture terminal plan is not an approved no-write case.",
             )
+        proposal = {
+            "proposal_id": plan.proposal_id,
+            "snapshot_id": plan.snapshot_id,
+            "actions": [{"action": plan.action}],
+            "expected_diff": {"operation": "NO_CHANGE"},
+        }
+        trusted_plan = TerminalNoWritePlan(
+            proposal_id=plan.proposal_id,
+            proposal_hash=_canonical_hash(proposal),
+            snapshot_id=plan.snapshot_id,
+            policy_version=plan.policy_version,
+            status=plan.status,
+            action=plan.action,
+            reason_code=plan.reason_code,
+        )
         self._store_terminal_no_write_plan(
-            plan,
-            proposal_json=_canonical(
-                {
-                    "proposal_id": plan.proposal_id,
-                    "proposal_hash": plan.proposal_hash,
-                    "action": plan.action,
-                    "status": plan.status,
-                }
-            ),
+            trusted_plan,
+            proposal_json=_canonical(proposal),
             snapshot_json=_canonical(
                 {
-                    "snapshot_id": plan.snapshot_id,
-                    "policy_version": plan.policy_version,
+                    "snapshot_id": trusted_plan.snapshot_id,
+                    "policy_version": trusted_plan.policy_version,
                 }
             ),
         )
