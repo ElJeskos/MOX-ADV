@@ -125,7 +125,7 @@ API_FIELDS = {
     "http_verb", "access_class", "verification_status",
 }
 APPROVED_POLICY_SHA256 = (
-    "ef4756f0d4d843eb0bd4bfbf56ec18f65868e108133552e21dac83c6625e2cc5"
+    "606d2a7d5284a827797d4f8c79ea92061cf733248b5e02e8e1a0e4fd6e478ebc"
 )
 
 
