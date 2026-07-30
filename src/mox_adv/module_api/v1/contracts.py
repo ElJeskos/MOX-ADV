@@ -526,6 +526,14 @@ class ModuleRequestV1:
                 "EVALUATE_IMPACT operation"
             )
         if self.impact_evaluation_command is not None:
+            if not isinstance(
+                self.impact_evaluation_command,
+                ImpactEvaluationCommandV1,
+            ):
+                raise ContractValidationError(
+                    "impact_evaluation_command must be an "
+                    "ImpactEvaluationCommandV1"
+                )
             if self.external_evidence is not None:
                 raise ContractValidationError(
                     "impact evaluation requests cannot contain external_evidence"
@@ -923,6 +931,13 @@ class ModuleProposalV1:
             raise ContractValidationError(
                 "proposal must contain at most three hypotheses"
             )
+        if any(
+            not isinstance(item, ModuleHypothesisV1)
+            for item in self.hypotheses
+        ):
+            raise ContractValidationError(
+                "proposal.hypotheses must contain ModuleHypothesisV1 values"
+            )
         if tuple(item.rank for item in self.hypotheses) != tuple(
             range(1, len(self.hypotheses) + 1)
         ):
@@ -1256,6 +1271,13 @@ class ModuleResultV1:
             raise ContractValidationError(
                 "impact_outcome cannot be combined with execution or lifecycle outcomes"
             )
+        if self.impact_outcome is not None and not isinstance(
+            self.impact_outcome,
+            ImpactEvaluationOutcomeV1,
+        ):
+            raise ContractValidationError(
+                "result.impact_outcome must be an ImpactEvaluationOutcomeV1"
+            )
         if status in ("BLOCKED", "REJECTED", "FAILED") and not self.errors:
             raise ContractValidationError(
                 f"result.errors must not be empty when status is {status}"
@@ -1263,12 +1285,6 @@ class ModuleResultV1:
         if len(self.hypotheses) > 3:
             raise ContractValidationError(
                 "result must contain at most three hypotheses"
-            )
-        if tuple(item.rank for item in self.hypotheses) != tuple(
-            range(1, len(self.hypotheses) + 1)
-        ):
-            raise ContractValidationError(
-                "result hypotheses must use consecutive ranks"
             )
         metric_names = {metric.name for metric in self.metrics}
         for hypothesis in self.hypotheses:
@@ -1281,6 +1297,12 @@ class ModuleResultV1:
                 raise ContractValidationError(
                     "hypothesis references an unknown metric: " + sorted(unknown)[0]
                 )
+        if tuple(item.rank for item in self.hypotheses) != tuple(
+            range(1, len(self.hypotheses) + 1)
+        ):
+            raise ContractValidationError(
+                "result hypotheses must use consecutive ranks"
+            )
         if self.proposal is not None and self.proposal.hypotheses:
             if self.proposal.hypotheses != self.hypotheses:
                 raise ContractValidationError(
