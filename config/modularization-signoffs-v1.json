@@ -1,0 +1,38 @@
+{
+  "schema_version": "modularization-signoffs-v1",
+  "scope_document": "requirements-modularization-v1.md",
+  "scope_sha256": "8c89228b0c6cbe3787c5ea9f36528b1e93701fe8cd2f1aebcb3ec5ccf469860f",
+  "recorded_at": "2026-07-30T12:00:00+03:00",
+  "signoffs": [
+    {
+      "signoff": "CUSTOMER_REQUIREMENTS",
+      "authority_role": "PROJECT_OWNER",
+      "status": "APPROVED",
+      "evidence": [
+        "current-conversation:explicit-project-owner-confirmation:2026-07-30"
+      ],
+      "blocker": null
+    },
+    {
+      "signoff": "PRODUCT",
+      "authority_role": "PRODUCT_REVIEWER",
+      "status": "PENDING",
+      "evidence": [],
+      "blocker": "Approval of this exact scope digest has not been received from a product reviewer."
+    },
+    {
+      "signoff": "ARCHITECTURE",
+      "authority_role": "ARCHITECTURE_REVIEWER",
+      "status": "PENDING",
+      "evidence": [],
+      "blocker": "Approval of this exact scope digest has not been received from an architecture reviewer."
+    },
+    {
+      "signoff": "SECURITY",
+      "authority_role": "SECURITY_REVIEWER",
+      "status": "PENDING",
+      "evidence": [],
+      "blocker": "Approval of this exact scope digest has not been received from a security reviewer."
+    }
+  ]
+}

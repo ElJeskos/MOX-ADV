@@ -16,6 +16,7 @@ It preserves provenance without copying a stale raw snapshot into the bundle.
 | Source | Authority | Use |
 | --- | --- | --- |
 | [`requirements-modularization-v1.md`](../../requirements-modularization-v1.md) | Normative modular amendment, version 1.0 | Product editions, customer integration, environment authority, modular evidence, acceptance, and sign-offs |
+| [`config/modularization-signoffs-v1.json`](../../config/modularization-signoffs-v1.json) | Digest-bound modular sign-off record | Project-owner approval and explicit pending product, architecture, and security reviews |
 | [`requirements.md`](../../requirements.md) | Normative behavioral and acceptance baseline, version 2.7 | Inherited calculations, architecture constraints, policies, contracts, lifecycles, execution, Decision Records, audit, and paired behavior |
 | [`AGENTS.md`](../../AGENTS.md) | Repository agent routing | Entry point for issue tracking, domain documentation, and OKF usage |
 | [`docs/agents/domain.md`](../../docs/agents/domain.md) | Domain-documentation workflow | Routes future domain concepts to `CONTEXT.md` and accepted ADRs when they exist |
@@ -35,6 +36,8 @@ It preserves provenance without copying a stale raw snapshot into the bundle.
 | OKF concept | Primary source locations |
 | --- | --- |
 | [Normative Specification](../project/normative-specification.md) | Modular amendment authority plus `requirements.md` sections 1, 17, 18, 20, and 21 |
+| [Source Authority](../project/source-authority.md) | `requirements-modularization-v1.md`, `requirements.md`, live API-matrix precedence, and repository workflow sources |
+| [Gate 0 Record](../project/gate-0-record.md) | Modular amendment production boundary plus legacy `config/gate0-policy.json` values |
 | [Prototype Outcome and Scope](../product/prototype-outcome-and-scope.md) | Modular amendment product, integration, environment, and acceptance matrices plus inherited `requirements.md` sections 2 and 3 |
 | [Operating Modes and Human Authority](../product/operating-modes-and-human-authority.md) | Modular amendment environment matrix plus inherited `requirements.md` sections 4, 8.5, 8.6, 12, and 15 |
 | [Closed Control Loop](../architecture/closed-control-loop.md) | Modular amendment product and integration matrices plus inherited `requirements.md` sections 2 and 5, `FR-MON-008`, `FR-MON-009`, and `FR-CTL-007` |

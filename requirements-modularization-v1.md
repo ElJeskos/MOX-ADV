@@ -80,21 +80,24 @@ The capability identifiers remain unchanged so existing Decision Records, report
 An edition is accepted against only the capabilities listed for that edition.
 Evidence types are `LOCAL_CONTRACT`, `TEST_COUNTER`, `REAL_READ_ONLY`, `SIMULATED`, `TEST_CONTOUR`, and `DASHBOARD_REGRESSION`.
 `TEST_CONTOUR` proves execution semantics only against explicit test resources or test adapters and never proves production write.
+The legacy `SOURCE_INTEGRATION`, `INTEGRATED_ANALYTICS`, and `ORIGINAL_INTEGRATION_COVERAGE` definitions remain paired capabilities because their preserved requirements join or jointly cover both providers.
+Standalone provider isolation and first-result integration are accepted through `AS-002` and `AS-004` instead of weakening those legacy definitions.
 
 | Capability | Applicable editions | Required evidence |
 | --- | --- | --- |
 | `CAMPAIGN_LIFECYCLE` | `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | LOCAL_CONTRACT + TEST_CONTOUR |
 | `GOAL_LIFECYCLE` | `METRIKA_STANDALONE` + `DIRECT_METRIKA_PAIRED` | TEST_COUNTER + TEST_CONTOUR |
-| `SOURCE_INTEGRATION` | `METRIKA_STANDALONE` + `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | REAL_READ_ONLY + TEST_CONTOUR |
+| `SOURCE_INTEGRATION` | `DIRECT_METRIKA_PAIRED` | REAL_READ_ONLY + TEST_CONTOUR |
 | `INTEGRATED_ANALYTICS` | `DIRECT_METRIKA_PAIRED` | REAL_READ_ONLY + TEST_CONTOUR |
-| `LLM_ANALYSIS` | `METRIKA_STANDALONE` + `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | SIMULATED + REAL_READ_ONLY |
+| `LLM_ANALYSIS` | `METRIKA_STANDALONE` + `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | SIMULATED + REAL_READ_ONLY + TEST_CONTOUR |
 | `APPROVAL_REQUIRED` | `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | SIMULATED + TEST_CONTOUR |
 | `BOUNDED_AUTONOMY` | `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | SIMULATED + TEST_CONTOUR |
 | `MONITORING_AND_ALERTING` | `METRIKA_STANDALONE` + `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | SIMULATED + REAL_READ_ONLY |
 | `IMPACT_EVALUATION` | `METRIKA_STANDALONE` + `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | SIMULATED + TEST_CONTOUR |
 | `OPERATIONAL_MODES` | `METRIKA_STANDALONE` + `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | SIMULATED + TEST_CONTOUR |
 | `TOOL_CONTRACT` | `METRIKA_STANDALONE` + `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | SIMULATED + LOCAL_CONTRACT |
-| `ORIGINAL_INTEGRATION_COVERAGE` | `METRIKA_STANDALONE` + `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | LOCAL_CONTRACT + TEST_COUNTER + TEST_CONTOUR |
+| `AUDITABILITY` | `METRIKA_STANDALONE` + `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | SIMULATED + TEST_CONTOUR |
+| `ORIGINAL_INTEGRATION_COVERAGE` | `DIRECT_METRIKA_PAIRED` | LOCAL_CONTRACT + TEST_COUNTER + TEST_CONTOUR |
 | `SAFETY_CORE` | `METRIKA_STANDALONE` + `DIRECT_STANDALONE` + `DIRECT_METRIKA_PAIRED` | SIMULATED + LOCAL_CONTRACT + TEST_CONTOUR |
 | `CLOSED_LOOP_CONTROL` | `DIRECT_METRIKA_PAIRED` | TEST_CONTOUR + DASHBOARD_REGRESSION |
 
@@ -122,7 +125,11 @@ They do not substitute for final release acceptance.
 
 | Sign-off | Status | Evidence |
 | --- | --- | --- |
-| `CUSTOMER_REQUIREMENTS` | `APPROVED` | Customer confirmation of the revised ticket plan on 30 July 2026 |
-| `PRODUCT` | `APPROVED` | Three-edition product matrix and inherited-behavior boundary |
-| `ARCHITECTURE` | `APPROVED` | One deep module contract with HTTP/JSON and in-process adapters |
-| `SECURITY` | `APPROVED` | Read-only production and test-only write authority matrix |
+| `CUSTOMER_REQUIREMENTS` | `APPROVED` | `config/modularization-signoffs-v1.json#CUSTOMER_REQUIREMENTS` |
+| `PRODUCT` | `PENDING` | `config/modularization-signoffs-v1.json#PRODUCT` |
+| `ARCHITECTURE` | `PENDING` | `config/modularization-signoffs-v1.json#ARCHITECTURE` |
+| `SECURITY` | `PENDING` | `config/modularization-signoffs-v1.json#SECURITY` |
+
+The project owner's explicit confirmation approves the requirement set.
+Product, architecture, and security sign-offs remain pending until the corresponding reviewers approve this exact digest.
+No pending row may be treated as approved by the validator or by a gate decision.
