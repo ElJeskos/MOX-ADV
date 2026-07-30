@@ -81,8 +81,9 @@ TOP_FIELDS = {
     "llm", "governance", "api_matrix",
 }
 CREDENTIAL_PROFILES = {
-    "DIRECT_PROD_READ", "METRIKA_TEST_WRITE", "TEST_SITE_PUBLISH",
-    "DIRECT_PILOT_WRITE", "METRIKA_PILOT_WRITE", "PILOT_SITE_PUBLISH",
+    "DIRECT_PROD_READ", "METRIKA_PROD_READ", "METRIKA_TEST_WRITE",
+    "TEST_SITE_PUBLISH", "DIRECT_PILOT_WRITE", "METRIKA_PILOT_WRITE",
+    "PILOT_SITE_PUBLISH",
 }
 LIMIT_FIELDS = {
     "platform_weekly_spend_rub", "application_daily_spend_rub",
@@ -125,7 +126,7 @@ API_FIELDS = {
     "http_verb", "access_class", "verification_status",
 }
 APPROVED_POLICY_SHA256 = (
-    "606d2a7d5284a827797d4f8c79ea92061cf733248b5e02e8e1a0e4fd6e478ebc"
+    "0051a0a7483431f1b36f2cf29001438463de5a7ac0df1c86426292fb242a24f5"
 )
 
 

@@ -428,13 +428,18 @@ class LegacyEnvironmentSafetyE2ETests(unittest.TestCase):
             guard_factory(self.policy, environment="STAGING")
 
     def test_production_credential_resolver_exposes_no_write_profile(self) -> None:
-        self.assertEqual(
-            "MOX_ADV_DIRECT_PROD_READ",
-            resolve_keychain_binding(self.policy, "DIRECT_PROD_READ"),
-        )
+        expected_read_profiles = {
+            "DIRECT_PROD_READ": "MOX_ADV_DIRECT_PROD_READ",
+            "METRIKA_PROD_READ": "MOX_ADV_METRIKA_PROD_READ",
+        }
+        for profile_name, keychain_binding in expected_read_profiles.items():
+            self.assertEqual(
+                keychain_binding,
+                resolve_keychain_binding(self.policy, profile_name),
+            )
         for profile in self.policy["credentials"]["profiles"]:
             profile_name = str(profile["name"])
-            if profile_name == "DIRECT_PROD_READ":
+            if profile_name in expected_read_profiles:
                 continue
             with (
                 self.subTest(profile=profile_name),

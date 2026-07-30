@@ -29,7 +29,8 @@ def resolve_keychain_binding(
         for item in profiles
         if isinstance(item, Mapping)
         and item.get("name") == credential_profile
-        and item.get("access") == "direct_reports_read_only"
+        and item.get("access")
+        in {"direct_reports_read_only", "metrika_read_only"}
     ]
     if len(matches) != 1:
         raise CredentialProfileRejected(

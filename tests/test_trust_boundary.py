@@ -293,13 +293,13 @@ class ExactEgressBoundaryTests(unittest.TestCase):
         )
         self.guard.authorize(
             "GET",
-            "https://api-metrika.yandex.net/stat/v1/data?ids=test-counter",
+            "https://api-metrika.yandex.net/stat/v1/data?ids=pilot-counter",
             version="v1",
             service="Statistics",
             operation="get",
             authority=EgressAuthority(
-                CredentialProfile.METRIKA_TEST_WRITE,
-                "test-counter",
+                CredentialProfile.METRIKA_PROD_READ,
+                "pilot-counter",
             ),
         )
 
@@ -382,17 +382,17 @@ class ExactEgressBoundaryTests(unittest.TestCase):
     def test_metrika_profile_and_counter_must_match_exact_binding(self) -> None:
         cases = (
             (
-                CredentialProfile.METRIKA_TEST_WRITE,
+                CredentialProfile.METRIKA_PROD_READ,
                 "pilot-counter",
-                "pilot-counter",
+                "test-counter",
             ),
             (
-                CredentialProfile.METRIKA_PILOT_WRITE,
+                CredentialProfile.METRIKA_PROD_READ,
                 "test-counter",
                 "test-counter",
             ),
             (
-                CredentialProfile.METRIKA_TEST_WRITE,
+                CredentialProfile.METRIKA_PROD_READ,
                 "test-counter",
                 "pilot-counter",
             ),

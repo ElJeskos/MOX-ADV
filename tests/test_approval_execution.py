@@ -918,7 +918,7 @@ class EgressGuardTests(unittest.TestCase):
         pilot = policy["bindings"]["pilot"]
         assert isinstance(pilot, dict)
         pilot["direct_account"] = "pilot-account"
-        pilot["test_counter"] = "test-counter"
+        pilot["pilot_counter"] = "production-counter"
         guard = HttpEgressGuard(
             policy,
             environment=ExecutionEnvironment.PRODUCTION,
@@ -930,21 +930,81 @@ class EgressGuardTests(unittest.TestCase):
             service="Campaigns",
             operation="get",
             authority=EgressAuthority(
-                CredentialProfile.DIRECT_PILOT_WRITE,
+                CredentialProfile.DIRECT_PROD_READ,
                 "pilot-account",
             ),
         )
         guard.authorize(
             "GET",
-            "https://api-metrika.yandex.net/stat/v1/data?ids=test-counter",
+            "https://api-metrika.yandex.net/stat/v1/data?ids=production-counter",
             version="v1",
             service="Statistics",
             operation="get",
             authority=EgressAuthority(
-                CredentialProfile.METRIKA_TEST_WRITE,
-                "test-counter",
+                CredentialProfile.METRIKA_PROD_READ,
+                "production-counter",
             ),
         )
+        rejected_profiles = (
+            (
+                CredentialProfile.DIRECT_PILOT_WRITE,
+                "POST",
+                "https://api.direct.yandex.com/json/v501/campaigns",
+                "v501",
+                "Campaigns",
+                "get",
+                "pilot-account",
+            ),
+            (
+                CredentialProfile.METRIKA_TEST_WRITE,
+                "GET",
+                "https://api-metrika.yandex.net/stat/v1/data?ids=production-counter",
+                "v1",
+                "Statistics",
+                "get",
+                "production-counter",
+            ),
+            (
+                CredentialProfile.METRIKA_PILOT_WRITE,
+                "GET",
+                "https://api-metrika.yandex.net/stat/v1/data?ids=production-counter",
+                "v1",
+                "Statistics",
+                "get",
+                "production-counter",
+            ),
+            (
+                CredentialProfile.TEST_SITE_PUBLISH,
+                "GET",
+                "https://api-metrika.yandex.net/stat/v1/data?ids=production-counter",
+                "v1",
+                "Statistics",
+                "get",
+                "test-site-zone",
+            ),
+            (
+                CredentialProfile.PILOT_SITE_PUBLISH,
+                "GET",
+                "https://api-metrika.yandex.net/stat/v1/data?ids=production-counter",
+                "v1",
+                "Statistics",
+                "get",
+                "pilot-site-zone",
+            ),
+        )
+        for profile, verb, url, version, service, operation, target in rejected_profiles:
+            with (
+                self.subTest(profile=profile),
+                self.assertRaises(EgressDenied),
+            ):
+                guard.authorize(
+                    verb,
+                    url,
+                    version=version,
+                    service=service,
+                    operation=operation,
+                    authority=EgressAuthority(profile, target),
+                )
 
     def test_http_guard_rejects_path_host_version_method_and_redirect_changes(
         self,

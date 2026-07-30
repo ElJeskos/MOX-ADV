@@ -35,6 +35,7 @@ class MatrixAccessClass(str, Enum):
 
 class CredentialAccess(str, Enum):
     DIRECT_REPORTS_READ_ONLY = "direct_reports_read_only"
+    METRIKA_READ_ONLY = "metrika_read_only"
     DIRECT_PILOT_WRITE = "one_allowlisted_account_write_disabled_by_default"
     METRIKA_TEST = "one_test_counter_read_write"
     METRIKA_PILOT = "one_pilot_counter_candidate_goal_write"
@@ -44,6 +45,7 @@ class CredentialAccess(str, Enum):
 
 class CredentialProfile(str, Enum):
     DIRECT_PROD_READ = "DIRECT_PROD_READ"
+    METRIKA_PROD_READ = "METRIKA_PROD_READ"
     DIRECT_PILOT_WRITE = "DIRECT_PILOT_WRITE"
     METRIKA_TEST_WRITE = "METRIKA_TEST_WRITE"
     METRIKA_PILOT_WRITE = "METRIKA_PILOT_WRITE"
@@ -56,16 +58,27 @@ _CREDENTIAL_ACCESS_BY_MATRIX_CLASS = {
         {CredentialAccess.DIRECT_REPORTS_READ_ONLY}
     ),
     (EgressSystem.DIRECT, MatrixAccessClass.MANAGEMENT_READBACK): frozenset(
-        {CredentialAccess.DIRECT_PILOT_WRITE}
+        {
+            CredentialAccess.DIRECT_REPORTS_READ_ONLY,
+            CredentialAccess.DIRECT_PILOT_WRITE,
+        }
     ),
     (EgressSystem.DIRECT, MatrixAccessClass.INTEGRATION_WRITE_ONLY): frozenset(
         {CredentialAccess.DIRECT_PILOT_WRITE}
     ),
     (EgressSystem.METRIKA, MatrixAccessClass.READ_ONLY): frozenset(
-        {CredentialAccess.METRIKA_TEST, CredentialAccess.METRIKA_PILOT}
+        {
+            CredentialAccess.METRIKA_READ_ONLY,
+            CredentialAccess.METRIKA_TEST,
+            CredentialAccess.METRIKA_PILOT,
+        }
     ),
     (EgressSystem.METRIKA, MatrixAccessClass.GOAL_READBACK): frozenset(
-        {CredentialAccess.METRIKA_TEST, CredentialAccess.METRIKA_PILOT}
+        {
+            CredentialAccess.METRIKA_READ_ONLY,
+            CredentialAccess.METRIKA_TEST,
+            CredentialAccess.METRIKA_PILOT,
+        }
     ),
     (EgressSystem.METRIKA, MatrixAccessClass.GOAL_LIFECYCLE_WRITE): frozenset(
         {CredentialAccess.METRIKA_TEST, CredentialAccess.METRIKA_PILOT}
@@ -76,6 +89,7 @@ _CREDENTIAL_ACCESS_BY_MATRIX_CLASS = {
 }
 _PROFILE_BINDING_FIELD = {
     CredentialProfile.DIRECT_PROD_READ: "direct_account",
+    CredentialProfile.METRIKA_PROD_READ: "pilot_counter",
     CredentialProfile.DIRECT_PILOT_WRITE: "direct_account",
     CredentialProfile.METRIKA_TEST_WRITE: "test_counter",
     CredentialProfile.METRIKA_PILOT_WRITE: "pilot_counter",
@@ -86,6 +100,12 @@ _PROFILE_COUNTER_FIELD = {
     CredentialProfile.TEST_SITE_PUBLISH: "test_counter",
     CredentialProfile.PILOT_SITE_PUBLISH: "pilot_counter",
 }
+_PRODUCTION_READ_PROFILES = frozenset(
+    {
+        CredentialProfile.DIRECT_PROD_READ,
+        CredentialProfile.METRIKA_PROD_READ,
+    }
+)
 
 
 class EgressDenied(PermissionError):
@@ -242,6 +262,11 @@ class HttpEgressGuard:
         authority: EgressAuthority,
         parsed_url: Any,
     ) -> bool:
+        if (
+            self._environment is ExecutionEnvironment.PRODUCTION
+            and authority.credential_profile not in _PRODUCTION_READ_PROFILES
+        ):
+            return False
         access = self._credential_access.get(authority.credential_profile)
         allowed = _CREDENTIAL_ACCESS_BY_MATRIX_CLASS.get(
             (endpoint.system, endpoint.access_class),

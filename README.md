@@ -83,6 +83,7 @@ The existing paired runtime and Dashboard continue to use the legacy composition
 
 Every legacy execution service and provider egress guard requires an explicit trusted `ExecutionEnvironment`.
 `PRODUCTION` permits observation, analysis, recommendation, and read-class provider operations only.
+Its trusted credential resolver exposes only `DIRECT_PROD_READ` and `METRIKA_PROD_READ`; write-capable profiles are rejected even for readback operations.
 Every Direct, Metrika-goal, and site-changing operation is rejected before credential matching, state preparation, or provider dispatch with the stable reason code `PRODUCTION_WRITE_FORBIDDEN`.
 Approval, Mandate, retry, restart, external evidence, pilot flags, and adapter selection do not override this environment restriction.
 Existing simulated Dashboard and E2E flows explicitly select `TEST` and keep their sealed fake-adapter behavior.
