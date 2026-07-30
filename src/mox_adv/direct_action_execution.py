@@ -9,6 +9,7 @@ from mox_adv.approval_execution import (
 )
 from mox_adv.autonomy_contracts import BoundedAutonomyRequest
 from mox_adv.autonomy_execution import BoundedAutonomyService
+from mox_adv.commands import ACTION_SPECS, ActionFamily
 from mox_adv.control_state import (
     ControlRejected,
     PreparedChange,
@@ -27,6 +28,7 @@ from mox_adv.direct_action_common import (
 )
 from mox_adv.direct_action_runtime import DirectActionRuntimeV1
 from mox_adv.direct_analysis import DIRECT_IDENTITY
+from mox_adv.direct_provider import DirectObservationV1
 from mox_adv.module_analysis import terminal_module_result
 from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
@@ -129,6 +131,15 @@ class DirectActionExecutionV1:
                 and paired.expected_fingerprint == prepared.expected_fingerprint
                 and paired.expected_state == current.state
             ):
+                if prepared.current_value != self._paired_current_value(
+                    prepared,
+                    current,
+                ):
+                    raise ControlRejected(
+                        "CURRENT_STATE_MISMATCH",
+                        "The paired proposal current value does not match the "
+                        "authorized Direct reread.",
+                    )
                 current_fingerprint = paired.expected_fingerprint
         facts = self._facts(
             context,
@@ -312,6 +323,20 @@ class DirectActionExecutionV1:
             ),
             kill_switch_available=operational.kill_switch_available,
         )
+
+    @staticmethod
+    def _paired_current_value(
+        prepared: PreparedChange,
+        current: DirectObservationV1,
+    ) -> object:
+        family = ACTION_SPECS[prepared.action].family
+        if family is ActionFamily.WEEKLY_BUDGET:
+            return current.state.current_weekly_budget_micros
+        if family is ActionFamily.SEARCH_BID:
+            return current.state.current_search_bid_micros
+        if family is ActionFamily.CAMPAIGN_STATE:
+            return current.state.campaign_state
+        return current.state.ad_variant
 
     @staticmethod
     def _blocked(

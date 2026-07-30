@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -22,7 +23,7 @@ from mox_adv.direct_action_runtime import (
     DirectActionRuntimeV1,
     PairedDirectActionContextV1,
 )
-from mox_adv.direct_provider import DirectStateValuesV1
+from mox_adv.direct_provider import DirectReadAuthorizationError, DirectStateValuesV1
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.fake_write_adapter import FakeWriteAdapter
 from mox_adv.impact import ImpactEvaluationRequest, ImpactObservation, ImpactReport
@@ -167,7 +168,9 @@ class PairedSnapshotDirectProviderV1:
         author: str,
     ) -> bool:
         if connection_id != self._connection_id:
-            raise PermissionError("The paired Direct connection is not authorized.")
+            raise DirectReadAuthorizationError(
+                "The paired Direct connection is not authorized."
+            )
         return author == self._trusted_change_author
 
     def expected_state(self) -> DirectStateValuesV1:
@@ -198,7 +201,9 @@ class PairedSnapshotDirectProviderV1:
             or account_id != self._account_id
             or campaign_id != self._campaign_id
         ):
-            raise PermissionError("The paired Direct scope is not authorized.")
+            raise DirectReadAuthorizationError(
+                "The paired Direct scope is not authorized."
+            )
 
 
 def execute_paired_direct_test_action(
@@ -353,7 +358,7 @@ def evaluate_paired_direct_impact(
                 "confounders": list(request.confounders),
                 "evidence": list(request.evidence),
             },
-            "idempotency_key": "paired-impact-" + request.change_id,
+            "idempotency_key": _impact_idempotency_key(request.change_id),
         }
     )
     result = InProcessModuleAdapterV1(
@@ -496,6 +501,14 @@ def _impact_observation(value: ImpactObservation) -> Mapping[str, Any]:
         "comparability_status": value.comparability_status,
         "confidence_status": value.confidence_status,
     }
+
+
+def _impact_idempotency_key(change_id: str) -> str:
+    candidate = "paired-impact-" + change_id
+    if len(candidate) <= 128:
+        return candidate
+    digest = hashlib.sha256(change_id.encode("utf-8")).hexdigest()
+    return "paired-impact-sha256-" + digest
 
 
 def _write_immutable_json(path: Path, value: Mapping[str, Any]) -> None:

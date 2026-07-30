@@ -240,6 +240,9 @@ class DirectoryDecisionRecordStoreV1:
         name = reference[len(prefix) :]
         if "/" in name or not name.endswith(".json") or len(name) != 64 + len(".json"):
             raise KeyError("Decision record reference is invalid.")
+        decision_id = name[:64]
+        if any(character not in "0123456789abcdef" for character in decision_id):
+            raise KeyError("Decision record reference is invalid.")
         path = self.root / name
         try:
             content = path.read_bytes()
@@ -251,6 +254,19 @@ class DirectoryDecisionRecordStoreV1:
         canonical = self._canonical(value)
         if content != canonical:
             raise KeyError("Decision record is not canonical.")
+        stored_decision_id = value.get("decision_id")
+        unsigned_record = dict(value)
+        unsigned_record.pop("decision_id", None)
+        expected_decision_id = hashlib.sha256(
+            json.dumps(
+                unsigned_record,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        if stored_decision_id != decision_id or expected_decision_id != decision_id:
+            raise KeyError("Decision record integrity check failed.")
         return copy.deepcopy(value)
 
     def _store(

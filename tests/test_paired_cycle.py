@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import NoReturn
 
 from mox_adv.contracts import DirectCampaignStateReadQuery, DirectReportsReadQuery
 from mox_adv.environment import ExecutionEnvironment
-from mox_adv.module_api.v1 import InProcessModuleAdapterV1, ModuleRequestV1
-from mox_adv.modules.direct import DirectModuleV1
+from mox_adv.impact import load_impact_fixture
+from mox_adv.module_api.v1 import (
+    DirectoryDecisionRecordStoreV1,
+    InProcessModuleAdapterV1,
+    ModuleRequestV1,
+)
+from mox_adv.modules.direct import DIRECT_IDENTITY, DirectModuleV1
+from mox_adv.paired_cycle import evaluate_paired_direct_impact
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class _ForbiddenProductionReader:
@@ -46,7 +59,76 @@ class PairedCycleSafetyTests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
             provider_reader=reader,
         )
-        request = ModuleRequestV1.from_dict(
+        request = self._production_request()
+
+        result = InProcessModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).invoke(request)
+
+        self.assertEqual("BLOCKED", result.status)
+        self.assertEqual(
+            "PRODUCTION_WRITE_FORBIDDEN",
+            result.errors[0].code,
+        )
+        self.assertEqual(0, reader.report_reads)
+        self.assertEqual(0, reader.state_reads)
+        self.assertIsNotNone(result.decision_record_ref)
+
+    def test_directory_decision_record_rejects_canonical_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = DirectoryDecisionRecordStoreV1(root)
+            receipt = store.record_production_write_block(
+                DIRECT_IDENTITY,
+                self._production_request(),
+                ExecutionEnvironment.PRODUCTION,
+            )
+            path = root / (receipt.decision_id + ".json")
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["outcome"] = "SUCCEEDED"
+            os.chmod(path, 0o600)
+            path.write_text(
+                json.dumps(
+                    value,
+                    ensure_ascii=True,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(path, 0o400)
+
+            with self.assertRaisesRegex(KeyError, "integrity"):
+                store.read(receipt.reference)
+
+    def test_paired_impact_hashes_a_maximum_length_change_idempotency_key(
+        self,
+    ) -> None:
+        policy = json.loads(
+            (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
+        )
+        fixture = load_impact_fixture(
+            ROOT / "fixtures" / "impact" / "IMPACT_CPA_IMPROVED_KEEP.json",
+            policy,
+        )
+        request = replace(fixture, change_id="c" * 128)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            outcome = evaluate_paired_direct_impact(
+                run_directory=Path(temporary),
+                policy=policy,
+                request=request,
+            )
+
+        key = str(outcome.decision_record["idempotency_key"])
+        self.assertLessEqual(len(key), 128)
+        self.assertRegex(key, r"^paired-impact-sha256-[0-9a-f]{64}$")
+
+    @staticmethod
+    def _production_request() -> ModuleRequestV1:
+        return ModuleRequestV1.from_dict(
             {
                 "schema_version": "module-request-v1",
                 "connection_ref": {"connection_id": "sim-connection"},
@@ -85,20 +167,6 @@ class PairedCycleSafetyTests(unittest.TestCase):
                 "idempotency_key": "paired-production-block",
             }
         )
-
-        result = InProcessModuleAdapterV1(
-            module,
-            environment=ExecutionEnvironment.PRODUCTION,
-        ).invoke(request)
-
-        self.assertEqual("BLOCKED", result.status)
-        self.assertEqual(
-            "PRODUCTION_WRITE_FORBIDDEN",
-            result.errors[0].code,
-        )
-        self.assertEqual(0, reader.report_reads)
-        self.assertEqual(0, reader.state_reads)
-        self.assertIsNotNone(result.decision_record_ref)
 
 
 if __name__ == "__main__":
