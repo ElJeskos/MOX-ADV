@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -9,10 +12,16 @@ from mox_adv.module_api.v1 import (
     ContractValidationError,
     HttpJsonModuleAdapterV1,
     InProcessModuleAdapterV1,
+    ModuleExecutionResultV1,
     ModuleIdentityV1,
+    ModuleOperationV1,
+    ModuleProposalV1,
     ModuleRequestV1,
     ModuleResultV1,
+    OPERATION_TYPES_BY_KIND,
 )
+from mox_adv.modules.direct import DirectModuleV1
+from mox_adv.modules.metrika import MetrikaModuleV1
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -197,6 +206,79 @@ class ModuleRequestContractTests(unittest.TestCase):
         ):
             ModuleRequestV1.from_dict(payload)
 
+    def test_operation_constructor_rejects_an_invalid_kind_type_pair(self) -> None:
+        with self.assertRaisesRegex(
+            ContractValidationError,
+            "operation.operation_type must be one of",
+        ):
+            ModuleOperationV1(
+                kind="ANALYZE",
+                operation_type="CREATE_CAMPAIGN",
+            )
+
+    def test_closed_wire_values_fail_closed_on_direct_construction(self) -> None:
+        request = ModuleRequestV1.from_dict(valid_request_payload())
+        result = ModuleResultV1.from_dict(successful_result_payload())
+        assert request.external_evidence is not None
+        assert result.assessment is not None
+        invalid_constructors = {
+            "environment": lambda: replace(request, environment="STAGING"),
+            "evidence_source": lambda: replace(
+                request.external_evidence,
+                source="UNTRUSTED",
+            ),
+            "module_id": lambda: ModuleIdentityV1(
+                module_id="UNKNOWN",
+                module_version="1.0.0",
+            ),
+            "assessment": lambda: replace(
+                result.assessment,
+                data_quality_status="UNKNOWN",
+            ),
+            "proposal": lambda: ModuleProposalV1(
+                proposal_id="proposal-1",
+                operation_type="PLAN_OPTIMIZATION",
+                status="UNKNOWN",
+            ),
+            "execution": lambda: ModuleExecutionResultV1(
+                execution_id="execution-1",
+                operation_type="APPLY_OPTIMIZATION",
+                status="UNKNOWN",
+                applied=False,
+            ),
+            "provenance": lambda: replace(
+                result.provenance[0],
+                source_type="UNKNOWN",
+            ),
+            "result_status": lambda: replace(
+                result,
+                status="UNKNOWN",  # type: ignore[arg-type]
+            ),
+        }
+        for field, construct in invalid_constructors.items():
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ContractValidationError,
+                    "must be one of",
+                ):
+                    construct()
+
+    def test_production_execution_intent_remains_representable_for_policy_guard(
+        self,
+    ) -> None:
+        payload = valid_request_payload()
+        operation = payload["operation"]
+        assert isinstance(operation, dict)
+        operation.update(
+            kind="EXECUTE",
+            operation_type="APPLY_OPTIMIZATION",
+        )
+
+        request = ModuleRequestV1.from_dict(payload)
+
+        self.assertEqual("PRODUCTION", request.environment)
+        self.assertEqual("EXECUTE", request.operation.kind)
+
 
 class ModuleAdapterContractTests(unittest.TestCase):
     def test_http_and_in_process_adapters_invoke_the_same_module_contract(self) -> None:
@@ -228,8 +310,8 @@ class ModuleAdapterContractTests(unittest.TestCase):
     def test_direct_and_metrika_modules_need_no_cross_provider_configuration(
         self,
     ) -> None:
-        direct = RecordingModule("YANDEX_DIRECT")
-        metrika = RecordingModule("YANDEX_METRIKA")
+        direct = DirectModuleV1(RecordingModule("YANDEX_DIRECT").invoke)
+        metrika = MetrikaModuleV1(RecordingModule("YANDEX_METRIKA").invoke)
 
         direct_result = InProcessModuleAdapterV1(direct).invoke(
             ModuleRequestV1.from_dict(valid_request_payload())
@@ -240,6 +322,26 @@ class ModuleAdapterContractTests(unittest.TestCase):
 
         self.assertEqual("YANDEX_DIRECT", direct_result.module.module_id)
         self.assertEqual("YANDEX_METRIKA", metrika_result.module.module_id)
+
+    def test_each_provider_composition_root_imports_without_the_other(self) -> None:
+        for provider, absent_provider in (
+            ("direct", "metrika"),
+            ("metrika", "direct"),
+        ):
+            with self.subTest(provider=provider):
+                script = (
+                    "import sys; "
+                    f"import mox_adv.modules.{provider}; "
+                    f"assert 'mox_adv.modules.{absent_provider}' not in sys.modules"
+                )
+                completed = subprocess.run(
+                    [sys.executable, "-c", script],
+                    check=False,
+                    capture_output=True,
+                    env={"PYTHONPATH": str(ROOT / "src")},
+                    text=True,
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
 
 
 class OpenAPIContractTests(unittest.TestCase):
@@ -259,6 +361,28 @@ class OpenAPIContractTests(unittest.TestCase):
 
         ModuleRequestV1.from_dict(request_example)
         ModuleResultV1.from_dict(result_example)
+
+    def test_openapi_operation_pairs_match_the_python_contract(self) -> None:
+        document = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+        operation_schema = document["components"]["schemas"]["ModuleOperationV1"]
+        openapi_pairs = {
+            branch["properties"]["kind"]["const"]: tuple(
+                branch["properties"]["operation_type"]["enum"]
+            )
+            for branch in operation_schema["oneOf"]
+        }
+
+        self.assertEqual(OPERATION_TYPES_BY_KIND, openapi_pairs)
+
+    def test_result_proposal_and_execution_are_optional_inputs(self) -> None:
+        payload = successful_result_payload()
+        payload.pop("proposal")
+        payload.pop("execution_result")
+
+        result = ModuleResultV1.from_dict(payload)
+
+        self.assertIsNone(result.proposal)
+        self.assertIsNone(result.execution_result)
 
 
 if __name__ == "__main__":

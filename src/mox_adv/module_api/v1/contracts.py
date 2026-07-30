@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -29,6 +29,14 @@ OPERATION_TYPES_BY_KIND = {
 }
 
 JsonScalar = Union[str, int, float, None]
+OperationKind = Literal["ANALYZE", "PLAN", "EXECUTE"]
+ModuleStatus = Literal[
+    "SUCCEEDED",
+    "PARTIAL",
+    "BLOCKED",
+    "REJECTED",
+    "FAILED",
+]
 
 
 class ContractValidationError(ValueError):
@@ -302,6 +310,18 @@ class ExternalEvidenceV1:
     watermark: str
     metrics: Tuple[MetricValueV1, ...]
 
+    def __post_init__(self) -> None:
+        _one_of(
+            self.schema_version,
+            "external_evidence.schema_version",
+            (EXTERNAL_EVIDENCE_SCHEMA_VERSION,),
+        )
+        _one_of(
+            self.source,
+            "external_evidence.source",
+            ("CUSTOMER_ECOSYSTEM",),
+        )
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ExternalEvidenceV1":
         _exact_fields(
@@ -316,10 +336,10 @@ class ExternalEvidenceV1:
                 "metrics",
             ),
         )
-        schema_version = _one_of(
+        schema_version = _text(
             value["schema_version"],
             "external_evidence.schema_version",
-            (EXTERNAL_EVIDENCE_SCHEMA_VERSION,),
+            maximum=64,
         )
         metrics = tuple(
             MetricValueV1.from_dict(
@@ -341,10 +361,10 @@ class ExternalEvidenceV1:
                 "external_evidence.evidence_id",
                 maximum=128,
             ),
-            source=_one_of(
+            source=_text(
                 value["source"],
                 "external_evidence.source",
-                ("CUSTOMER_ECOSYSTEM",),
+                maximum=64,
             ),
             observed_at=_timestamp(
                 value["observed_at"],
@@ -370,8 +390,20 @@ class ExternalEvidenceV1:
 
 @dataclass(frozen=True)
 class ModuleOperationV1:
-    kind: str
+    kind: OperationKind
     operation_type: str
+
+    def __post_init__(self) -> None:
+        kind = _one_of(
+            self.kind,
+            "operation.kind",
+            tuple(OPERATION_TYPES_BY_KIND),
+        )
+        _one_of(
+            self.operation_type,
+            "operation.operation_type",
+            OPERATION_TYPES_BY_KIND[kind],
+        )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleOperationV1":
@@ -380,17 +412,15 @@ class ModuleOperationV1:
             field="operation",
             required=("kind", "operation_type"),
         )
-        kind = _one_of(
-            value["kind"],
-            "operation.kind",
-            tuple(OPERATION_TYPES_BY_KIND),
-        )
         return cls(
-            kind=kind,
-            operation_type=_one_of(
+            kind=cast(
+                OperationKind,
+                _text(value["kind"], "operation.kind", maximum=32),
+            ),
+            operation_type=_text(
                 value["operation_type"],
                 "operation.operation_type",
-                OPERATION_TYPES_BY_KIND[kind],
+                maximum=128,
             ),
         )
 
@@ -409,6 +439,38 @@ class ModuleRequestV1:
     external_evidence: Optional[ExternalEvidenceV1]
     operation: ModuleOperationV1
     idempotency_key: str
+
+    def __post_init__(self) -> None:
+        _one_of(
+            self.schema_version,
+            "schema_version",
+            (MODULE_REQUEST_SCHEMA_VERSION,),
+        )
+        _one_of(
+            self.environment,
+            "environment",
+            ("PRODUCTION", "TEST"),
+        )
+        _text(self.idempotency_key, "idempotency_key", maximum=128)
+        nested_types = (
+            ("connection_ref", self.connection_ref, StoredConnectionRefV1),
+            ("scope", self.scope, ModuleScopeV1),
+            ("period", self.period, ClosedPeriodV1),
+            ("objective", self.objective, ModuleObjectiveV1),
+            ("operation", self.operation, ModuleOperationV1),
+        )
+        for field, value, expected_type in nested_types:
+            if not isinstance(value, expected_type):
+                raise ContractValidationError(
+                    f"{field} must be a {expected_type.__name__}"
+                )
+        if (
+            self.external_evidence is not None
+            and not isinstance(self.external_evidence, ExternalEvidenceV1)
+        ):
+            raise ContractValidationError(
+                "external_evidence must be an ExternalEvidenceV1"
+            )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleRequestV1":
@@ -434,18 +496,18 @@ class ModuleRequestV1:
                 "external_evidence must be an object when present"
             )
         return cls(
-            schema_version=_one_of(
+            schema_version=_text(
                 value["schema_version"],
                 "schema_version",
-                (MODULE_REQUEST_SCHEMA_VERSION,),
+                maximum=64,
             ),
             connection_ref=StoredConnectionRefV1.from_dict(
                 _object(value["connection_ref"], "connection_ref")
             ),
-            environment=_one_of(
+            environment=_text(
                 value["environment"],
                 "environment",
-                ("PRODUCTION", "TEST"),
+                maximum=32,
             ),
             scope=ModuleScopeV1.from_dict(_object(value["scope"], "scope")),
             period=ClosedPeriodV1.from_dict(_object(value["period"], "period")),
@@ -490,6 +552,18 @@ class ModuleIdentityV1:
     module_id: str
     module_version: str
 
+    def __post_init__(self) -> None:
+        _one_of(
+            self.module_id,
+            "module.module_id",
+            ("YANDEX_DIRECT", "YANDEX_METRIKA"),
+        )
+        _text(
+            self.module_version,
+            "module.module_version",
+            maximum=32,
+        )
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleIdentityV1":
         _exact_fields(
@@ -498,10 +572,10 @@ class ModuleIdentityV1:
             required=("module_id", "module_version"),
         )
         return cls(
-            module_id=_one_of(
+            module_id=_text(
                 value["module_id"],
                 "module.module_id",
-                ("YANDEX_DIRECT", "YANDEX_METRIKA"),
+                maximum=64,
             ),
             module_version=_text(
                 value["module_version"],
@@ -523,6 +597,18 @@ class ModuleAssessmentV1:
     data_quality_status: str
     confidence_status: str
 
+    def __post_init__(self) -> None:
+        _one_of(
+            self.data_quality_status,
+            "assessment.data_quality_status",
+            ("READY", "PARTIAL", "INCOMPATIBLE"),
+        )
+        _one_of(
+            self.confidence_status,
+            "assessment.confidence_status",
+            ("READY", "INSUFFICIENT_DATA", "STALE_DATA"),
+        )
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleAssessmentV1":
         _exact_fields(
@@ -532,15 +618,15 @@ class ModuleAssessmentV1:
         )
         return cls(
             summary=_text(value["summary"], "assessment.summary", maximum=2_000),
-            data_quality_status=_one_of(
+            data_quality_status=_text(
                 value["data_quality_status"],
                 "assessment.data_quality_status",
-                ("READY", "PARTIAL", "INCOMPATIBLE"),
+                maximum=32,
             ),
-            confidence_status=_one_of(
+            confidence_status=_text(
                 value["confidence_status"],
                 "assessment.confidence_status",
-                ("READY", "INSUFFICIENT_DATA", "STALE_DATA"),
+                maximum=32,
             ),
         )
 
@@ -600,6 +686,13 @@ class ModuleProposalV1:
     operation_type: str
     status: str
 
+    def __post_init__(self) -> None:
+        _one_of(
+            self.status,
+            "proposal.status",
+            ("PROPOSED", "DRY_RUN"),
+        )
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleProposalV1":
         _exact_fields(
@@ -618,10 +711,10 @@ class ModuleProposalV1:
                 "proposal.operation_type",
                 maximum=128,
             ),
-            status=_one_of(
+            status=_text(
                 value["status"],
                 "proposal.status",
-                ("PROPOSED", "DRY_RUN"),
+                maximum=32,
             ),
         )
 
@@ -640,6 +733,20 @@ class ModuleExecutionResultV1:
     status: str
     applied: bool
     provider_reference: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _one_of(
+            self.status,
+            "execution_result.status",
+            (
+                "APPLIED",
+                "NO_CHANGE",
+                "BLOCKED",
+                "ALREADY_PROCESSED",
+                "UNKNOWN_RESULT",
+                "FAILED",
+            ),
+        )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleExecutionResultV1":
@@ -663,17 +770,10 @@ class ModuleExecutionResultV1:
                 "execution_result.operation_type",
                 maximum=128,
             ),
-            status=_one_of(
+            status=_text(
                 value["status"],
                 "execution_result.status",
-                (
-                    "APPLIED",
-                    "NO_CHANGE",
-                    "BLOCKED",
-                    "ALREADY_PROCESSED",
-                    "UNKNOWN_RESULT",
-                    "FAILED",
-                ),
+                maximum=32,
             ),
             applied=applied,
             provider_reference=_optional_text(
@@ -703,6 +803,13 @@ class ModuleProvenanceV1:
     watermark: str
     evidence_id: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        _one_of(
+            self.source_type,
+            "provenance.source_type",
+            ("PROVIDER", "CUSTOMER_EVIDENCE"),
+        )
+
     @classmethod
     def from_dict(
         cls,
@@ -717,10 +824,10 @@ class ModuleProvenanceV1:
             optional=("evidence_id",),
         )
         return cls(
-            source_type=_one_of(
+            source_type=_text(
                 value["source_type"],
                 f"{field}.source_type",
-                ("PROVIDER", "CUSTOMER_EVIDENCE"),
+                maximum=32,
             ),
             source=_text(value["source"], f"{field}.source", maximum=128),
             retrieved_at=_timestamp(
@@ -816,7 +923,7 @@ class ModuleResultV1:
     schema_version: str
     run_id: str
     module: ModuleIdentityV1
-    status: str
+    status: ModuleStatus
     metrics: Tuple[MetricValueV1, ...]
     assessment: Optional[ModuleAssessmentV1]
     recommendations: Tuple[ModuleRecommendationV1, ...]
@@ -826,6 +933,31 @@ class ModuleResultV1:
     warnings: Tuple[ModuleWarningV1, ...]
     errors: Tuple[ModuleErrorV1, ...]
     decision_record_ref: Optional[str]
+
+    def __post_init__(self) -> None:
+        _one_of(
+            self.schema_version,
+            "result.schema_version",
+            (MODULE_RESULT_SCHEMA_VERSION,),
+        )
+        _text(self.run_id, "result.run_id", maximum=128)
+        if not isinstance(self.module, ModuleIdentityV1):
+            raise ContractValidationError(
+                "result.module must be a ModuleIdentityV1"
+            )
+        status = _one_of(
+            self.status,
+            "result.status",
+            ("SUCCEEDED", "PARTIAL", "BLOCKED", "REJECTED", "FAILED"),
+        )
+        if self.proposal is not None and self.execution_result is not None:
+            raise ContractValidationError(
+                "result cannot contain both proposal and execution_result"
+            )
+        if status in ("BLOCKED", "REJECTED", "FAILED") and not self.errors:
+            raise ContractValidationError(
+                f"result.errors must not be empty when status is {status}"
+            )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleResultV1":
@@ -841,25 +973,15 @@ class ModuleResultV1:
                 "metrics",
                 "assessment",
                 "recommendations",
-                "proposal",
-                "execution_result",
                 "provenance",
                 "warnings",
                 "errors",
                 "decision_record_ref",
             ),
+            optional=("proposal", "execution_result"),
         )
-        proposal_value = value["proposal"]
-        execution_value = value["execution_result"]
-        if proposal_value is not None and execution_value is not None:
-            raise ContractValidationError(
-                "result cannot contain both proposal and execution_result"
-            )
-        status = _one_of(
-            value["status"],
-            "result.status",
-            ("SUCCEEDED", "PARTIAL", "BLOCKED", "REJECTED", "FAILED"),
-        )
+        proposal_value = value.get("proposal")
+        execution_value = value.get("execution_result")
         errors = tuple(
             ModuleErrorV1.from_dict(
                 _object(item, f"errors[{index}]"),
@@ -867,21 +989,20 @@ class ModuleResultV1:
             )
             for index, item in enumerate(_array(value["errors"], "errors"))
         )
-        if status in ("BLOCKED", "REJECTED", "FAILED") and not errors:
-            raise ContractValidationError(
-                f"result.errors must not be empty when status is {status}"
-            )
         return cls(
-            schema_version=_one_of(
+            schema_version=_text(
                 value["schema_version"],
                 "result.schema_version",
-                (MODULE_RESULT_SCHEMA_VERSION,),
+                maximum=64,
             ),
             run_id=_text(value["run_id"], "result.run_id", maximum=128),
             module=ModuleIdentityV1.from_dict(
                 _object(value["module"], "module")
             ),
-            status=status,
+            status=cast(
+                ModuleStatus,
+                _text(value["status"], "result.status", maximum=32),
+            ),
             metrics=tuple(
                 MetricValueV1.from_dict(
                     _object(item, f"metrics[{index}]"),

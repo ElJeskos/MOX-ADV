@@ -28,13 +28,15 @@ class HttpJsonResponseV1:
 
 
 class InProcessModuleAdapterV1:
-    """Invoke a module without crossing an HTTP boundary."""
+    """Validate the paired-runtime seam without adding an HTTP hop."""
 
     def __init__(self, module: ModuleV1) -> None:
         self._module = module
 
     def invoke(self, request: ModuleRequestV1) -> ModuleResultV1:
-        return self._module.invoke(request)
+        canonical_request = ModuleRequestV1.from_dict(request.as_dict())
+        result = self._module.invoke(canonical_request)
+        return ModuleResultV1.from_dict(result.as_dict())
 
 
 class HttpJsonModuleAdapterV1:
@@ -53,7 +55,9 @@ class HttpJsonModuleAdapterV1:
             )
             return HttpJsonResponseV1(status_code=400, body=result.as_dict())
 
-        result = self._module.invoke(request)
+        result = ModuleResultV1.from_dict(
+            self._module.invoke(request).as_dict()
+        )
         status_code = {
             "SUCCEEDED": 200,
             "PARTIAL": 200,

@@ -375,9 +375,52 @@
               "MANAGE_GOAL_CANDIDATE",
               "APPLY_OPTIMIZATION"
             ],
-            "description": "High-level typed operation name, never a provider HTTP operation."
+            "description": "High-level typed operation name, never a provider HTTP operation. EXECUTE expresses intent only and is authorized solely by the trusted environment guard."
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "ANALYZE"
+              },
+              "operation_type": {
+                "enum": [
+                  "ANALYZE_PERFORMANCE",
+                  "EVALUATE_IMPACT"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "PLAN"
+              },
+              "operation_type": {
+                "enum": [
+                  "PLAN_OPTIMIZATION",
+                  "CREATE_CAMPAIGN",
+                  "MANAGE_GOAL_CANDIDATE"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "EXECUTE"
+              },
+              "operation_type": {
+                "enum": [
+                  "APPLY_OPTIMIZATION",
+                  "CREATE_CAMPAIGN",
+                  "MANAGE_GOAL_CANDIDATE"
+                ]
+              }
+            }
+          }
+        ]
       },
       "ModuleRequestV1": {
         "type": "object",
@@ -681,8 +724,6 @@
           "metrics",
           "assessment",
           "recommendations",
-          "proposal",
-          "execution_result",
           "provenance",
           "warnings",
           "errors",

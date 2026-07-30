@@ -73,7 +73,10 @@ Standalone Direct and Metrika integrations share `ModuleRequestV1` and `ModuleRe
 The in-process and HTTP/JSON adapters invoke the same `ModuleV1` interface, so the paired runtime can adopt the contract without an HTTP hop.
 Requests reference stored connections and accept only closed high-level operations and normalized scalar evidence.
 They have no fields for OAuth tokens, arbitrary endpoints, provider HTTP methods, headers, or raw Yandex payloads.
+An `EXECUTE` request expresses typed intent but grants no authority: the trusted module guard must block it in production and may execute it only through an approved test adapter.
 The published HTTP contract is [`openapi/module-api-v1.openapi.json`](openapi/module-api-v1.openapi.json).
+The Python operation mapping is canonical for the closed operation vocabulary, and a parity test requires OpenAPI to publish the same valid kind/type pairs.
+Generating the complete OpenAPI document from code is intentionally deferred to a dedicated contract-tooling slice.
 The existing paired runtime and Dashboard continue to use the legacy composition until their dedicated migration slice.
 
 ## Tests
