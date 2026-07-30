@@ -16,7 +16,6 @@ from mox_adv.contracts import (
     RunContext,
 )
 from mox_adv.direct_metrics import calculate_direct_metric_values
-from mox_adv.metrika_metrics import calculate_metrika_metrics
 from mox_adv.normalization import IntegratedSnapshotNormalizerV1
 
 

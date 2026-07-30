@@ -7,7 +7,6 @@ from pathlib import Path
 
 from scripts.validate_modular_scope import validate_scope
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SCOPE_PATH = ROOT / "requirements-modularization-v1.md"
 SOURCE_AUTHORITY_PATH = ROOT / "okf" / "project" / "source-authority.md"

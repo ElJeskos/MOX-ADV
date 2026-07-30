@@ -5,11 +5,21 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+)
 
 from mox_adv.environment import (
-    ExecutionEnvironment,
     EnvironmentWriteDenied,
+    ExecutionEnvironment,
     parse_execution_environment,
     require_test_write_environment,
 )

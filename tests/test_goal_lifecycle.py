@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mox_adv.control_state import AuthenticatedPrincipal
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.goal_lifecycle import (
     AuthorityKind,
     CreationReservation,
@@ -23,7 +24,6 @@ from mox_adv.goal_lifecycle import (
     site_publish_binding,
     site_publish_diff,
 )
-from mox_adv.environment import ExecutionEnvironment
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc)

@@ -25,8 +25,8 @@ from mox_adv.control_state import (
 from mox_adv.egress import EgressDenied, HttpEgressGuard
 from mox_adv.environment import (
     PRODUCTION_WRITE_FORBIDDEN,
-    ExecutionEnvironment,
     EnvironmentWriteDenied,
+    ExecutionEnvironment,
     parse_execution_environment,
     require_test_write_environment,
 )

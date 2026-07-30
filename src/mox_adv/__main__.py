@@ -2,5 +2,4 @@
 
 from mox_adv.cli import main
 
-
 raise SystemExit(main())

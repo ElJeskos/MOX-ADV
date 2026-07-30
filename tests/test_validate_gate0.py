@@ -9,7 +9,6 @@ from typing import Optional
 
 from scripts.validate_gate0 import BINDING_TYPES, load_policy, validate_policy
 
-
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "config" / "gate0-policy.json"
 

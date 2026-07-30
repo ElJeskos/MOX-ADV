@@ -26,11 +26,11 @@ from mox_adv.module_api.v1 import (
     ModuleRequestV1,
     ModuleResultV1,
 )
-from mox_adv.monitoring import MonitoringStore
 from mox_adv.modules.direct import (
     BoundDirectReadProviderV1,
     DirectModuleV1,
 )
+from mox_adv.monitoring import MonitoringStore
 
 ROOT = Path(__file__).resolve().parents[2]
 

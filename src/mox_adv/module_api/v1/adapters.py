@@ -9,7 +9,6 @@ from mox_adv.environment import (
     ExecutionEnvironment,
     parse_execution_environment,
 )
-
 from mox_adv.module_api.v1.contracts import (
     ContractValidationError,
     ModuleIdentityV1,

@@ -12,8 +12,8 @@ from mox_adv.control_state import (
     MacOSLocalPrincipalAuthenticator,
 )
 from mox_adv.environment import (
-    ExecutionEnvironment,
     EnvironmentWriteDenied,
+    ExecutionEnvironment,
     parse_execution_environment,
     require_test_write_environment,
 )
