@@ -143,6 +143,7 @@
                     "enum": [
                       "INVALID_INPUT",
                       "AMBIGUOUS_DATA",
+                      "MISSING_ANALYTICS_CONTEXT",
                       "UNSUPPORTED_STATE",
                       "UNSUPPORTED_ACTION",
                       "AGENT_ERROR",
@@ -215,6 +216,7 @@
                       "enum": [
                         "INVALID_INPUT",
                         "AMBIGUOUS_DATA",
+                        "MISSING_ANALYTICS_CONTEXT",
                         "UNSUPPORTED_STATE",
                         "UNSUPPORTED_ACTION",
                         "AGENT_ERROR",

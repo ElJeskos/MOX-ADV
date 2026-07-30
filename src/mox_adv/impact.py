@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DECISIONS = (
@@ -28,7 +28,7 @@ class ImpactRejected(ValueError):
 
 def _closed(
     value: Mapping[str, Any],
-    fields: Tuple[str, ...],
+    fields: tuple[str, ...],
     label: str,
 ) -> None:
     if not isinstance(value, Mapping) or set(value) != set(fields):
@@ -126,7 +126,7 @@ class ImpactObservation:
             ("impressions", "clicks", "cost_micros", "visits", "goal_visits"),
             label + " metrics",
         )
-        checked_metrics: Dict[str, int] = {}
+        checked_metrics: dict[str, int] = {}
         for name, metric in metrics.items():
             if isinstance(metric, bool) or not isinstance(metric, int) or metric < 0:
                 raise ImpactRejected(label + " metric is invalid.")
@@ -175,9 +175,9 @@ class ImpactEvaluationRequest:
     baseline: ImpactObservation
     post_change: ImpactObservation
     seasonality: str
-    known_interventions: Tuple[str, ...]
-    confounders: Tuple[str, ...]
-    evidence: Tuple[str, ...]
+    known_interventions: tuple[str, ...]
+    confounders: tuple[str, ...]
+    evidence: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -195,14 +195,14 @@ class ImpactReport:
     delayed_conversion_cutoff_hours: int
     observation_window_hours: int
     seasonality: str
-    known_interventions: Tuple[str, ...]
-    confounders: Tuple[str, ...]
+    known_interventions: tuple[str, ...]
+    confounders: tuple[str, ...]
     metric_changes: Mapping[str, Any]
     confidence: str
-    evidence: Tuple[str, ...]
+    evidence: tuple[str, ...]
     next_decision: str
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "policy_version": self.policy_version,
@@ -258,8 +258,18 @@ def load_impact_fixture(
         ),
         "Impact fixture",
     )
-    expected_name = policy["impact"]["fixture"]["name"]
-    if value["fixture_name"] != expected_name:
+    fixture_contracts = policy["impact"].get("decision_fixtures")
+    if fixture_contracts is None:
+        allowed_names = {str(policy["impact"]["fixture"]["name"])}
+    elif isinstance(fixture_contracts, list):
+        allowed_names = {
+            str(item["name"])
+            for item in fixture_contracts
+            if isinstance(item, Mapping) and "name" in item
+        }
+    else:
+        raise ImpactRejected("Impact decision fixture contract is invalid.")
+    if value["fixture_name"] not in allowed_names:
         raise ImpactRejected("Impact fixture name does not match Gate 0.")
     if value["policy_version"] != policy["policy_id"]:
         raise ImpactRejected("Impact fixture policy version does not match Gate 0.")
@@ -362,16 +372,17 @@ class ImpactEvaluator:
             self.policy["mandate"]["kpi"]["target_maximum"],
             "Target CPA",
         )
-        next_decision = (
-            "KEEP_CHANGE"
-            if confidence == "READY" and post_cpa < baseline_cpa and post_cpa <= target
-            else "ESCALATE_TO_HUMAN"
-        )
-        expected_fixture_decision = self.policy["impact"]["fixture"][
-            "expected_next_decision"
-        ]
+        if confidence != "READY":
+            next_decision = "ESCALATE_TO_HUMAN"
+        elif post_cpa < baseline_cpa and post_cpa <= target:
+            next_decision = "KEEP_CHANGE"
+        elif post_cpa > baseline_cpa and post_cpa > target:
+            next_decision = "ROLLBACK_CHANGE"
+        else:
+            next_decision = "ADJUST_CHANGE"
+        expected_fixture_decision = self._fixture_decision(request.fixture_name)
         if (
-            request.fixture_name == self.policy["impact"]["fixture"]["name"]
+            expected_fixture_decision is not None
             and next_decision != expected_fixture_decision
         ):
             raise ImpactRejected("Impact fixture decision does not match Gate 0.")
@@ -416,6 +427,19 @@ class ImpactEvaluator:
             evidence=request.evidence,
             next_decision=next_decision,
         )
+
+    def _fixture_decision(self, fixture_name: str) -> str | None:
+        contracts = self.policy["impact"].get("decision_fixtures")
+        if isinstance(contracts, list):
+            for item in contracts:
+                if isinstance(item, Mapping) and item.get("name") == fixture_name:
+                    value = item.get("expected_next_decision")
+                    return str(value) if value is not None else None
+            return None
+        fixture = self.policy["impact"]["fixture"]
+        if fixture.get("name") == fixture_name:
+            return str(fixture["expected_next_decision"])
+        return None
 
     def _confidence(self, request: ImpactEvaluationRequest) -> str:
         if not request.evidence:

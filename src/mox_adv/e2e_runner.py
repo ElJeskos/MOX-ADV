@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -846,7 +846,12 @@ def tests_now() -> datetime:
     return NOW
 
 
-def run_readonly_e2e(runs_root: Path, run_id: str) -> Path:
+def run_readonly_e2e(
+    runs_root: Path,
+    run_id: str,
+    *,
+    additional_text_artifacts: Callable[[Path], Mapping[str, str]] | None = None,
+) -> Path:
     policy = load_policy()
     runs_root.mkdir(parents=True, exist_ok=True)
     egress = ReadOnlyEgressRecorder(policy)
@@ -890,6 +895,7 @@ def run_readonly_e2e(runs_root: Path, run_id: str) -> Path:
         egress=egress,
         supplemental_artifacts=supplemental,
         run_summary=run_summary,
+        additional_text_artifacts=additional_text_artifacts,
     )
 
 

@@ -125,6 +125,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     e2e_parser.add_argument("--run-id", required=True)
     e2e_parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    ui_parser = subparsers.add_parser(
+        "ui",
+        help="run the local operator UI for linked analytics and control",
+    )
+    ui_parser.add_argument("--port", type=int, default=8878)
+    ui_parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    ui_parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="do not open the UI in the default browser",
+    )
     return parser
 
 
@@ -211,6 +222,17 @@ def main(
 
         run_directory = run_readonly_e2e(arguments.runs_dir, arguments.run_id)
         print(run_directory)
+        return 0
+    if arguments.command == "ui":
+        from mox_adv.ui_server import serve_ui
+
+        if not 1 <= arguments.port <= 65535:
+            parser.error("UI port must be between 1 and 65535.")
+        serve_ui(
+            port=arguments.port,
+            runs_root=arguments.runs_dir,
+            open_browser=not arguments.no_open,
+        )
         return 0
     if arguments.command in {"approval", "kill-switch", "mandate"}:
         state = _default_control_state() if control_state is None else control_state

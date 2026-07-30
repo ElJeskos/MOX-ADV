@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterator, Mapping, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mox_adv.recommend_contracts import (
     _OPTIMIZATION_ACTIONS,
@@ -77,6 +78,9 @@ _POLICY_LIMIT_FIELDS = frozenset(
         "no_conversion_stop_spend_rub",
         "minimum_clicks",
         "minimum_conversions",
+        "low_ctr_percent",
+        "low_ctr_minimum_impressions",
+        "bid_increase_maximum_clicks",
         "source_mismatch_percent",
     }
 )
@@ -176,18 +180,22 @@ def _metric_decimal(value: Any, label: str) -> Optional[Decimal]:
     except (InvalidOperation, ValueError) as error:
         raise SchemaValidationError(label + " must be a decimal metric.") from error
     if not parsed.is_finite() or parsed < 0:
-        raise SchemaValidationError(
-            label + " must be a finite non-negative metric."
-        )
+        raise SchemaValidationError(label + " must be a finite non-negative metric.")
     return parsed
 
 
 def supported_facts(projection: Mapping[str, Any]) -> frozenset[str]:
     limits = projection["policy_limits"]
     comparability = projection["comparability"]
-    if comparability["status"] != "COMPARABLE":
+    if comparability["status"] == "INCOMPATIBLE":
         return frozenset({"SOURCE_MISMATCH"})
-    if comparability["confidence"] == "INSUFFICIENT_DATA":
+    if comparability["status"] == "PARTIAL":
+        return frozenset({"ANALYTICS_CONTEXT_INCOMPLETE"})
+    if (
+        comparability["confidence"] == "INSUFFICIENT_DATA"
+        or projection["clicks"] < limits["minimum_clicks"]
+        or projection["goal_visits"] < limits["minimum_conversions"]
+    ):
         return frozenset({"SAMPLE_BELOW_GATE0_MINIMUM"})
     facts = set()
     utilization = _metric_decimal(
@@ -202,6 +210,15 @@ def supported_facts(projection: Mapping[str, Any]) -> frozenset[str]:
         facts.add("BUDGET_UTILIZATION_AT_OR_ABOVE_THRESHOLD")
     if cpa is not None and cpa <= limits["cpa_target_rub"]:
         facts.add("CPA_AT_OR_BELOW_TARGET")
+    elif cpa is not None:
+        facts.add("CPA_ABOVE_TARGET")
+    ctr = _metric_decimal(projection["ctr"], "Projection ctr")
+    if (
+        ctr is not None
+        and ctr < Decimal(str(limits["low_ctr_percent"]))
+        and projection["impressions"] >= limits["low_ctr_minimum_impressions"]
+    ):
+        facts.add("LOW_CTR_BELOW_THRESHOLD")
     if projection["goal_visits"] == 0:
         facts.add("NO_CONVERSIONS")
         if projection["cost_micros"] >= (
@@ -237,14 +254,13 @@ def validate_projection(projection: Mapping[str, Any]) -> None:
             raise SchemaValidationError(
                 "Projection " + name + " must be an ISO date."
             ) from error
-    if projection["timezone"] != "UTC":
-        raise SchemaValidationError("Projection timezone must be UTC.")
-    if projection["campaign_state"] not in {"ON", "SUSPENDED"}:
-        raise SchemaValidationError("Projection campaign state is unsupported.")
-    if projection["campaign_strategy"] != "HIGHEST_POSITION":
-        raise SchemaValidationError("Projection campaign strategy is unsupported.")
-    if projection["current_ad_variant"] not in {"A", "B"}:
-        raise SchemaValidationError("Projection ad variant is unsupported.")
+    try:
+        ZoneInfo(projection["timezone"])
+    except (ValueError, ZoneInfoNotFoundError) as error:
+        raise SchemaValidationError("Projection timezone is unsupported.") from error
+    _code(projection["campaign_state"], "Projection campaign state")
+    _code(projection["campaign_strategy"], "Projection campaign strategy")
+    _code(projection["current_ad_variant"], "Projection ad variant")
     for name in ("ctr", "cpc", "conversion_rate", "cpa", "budget_utilization"):
         _metric_decimal(projection[name], "Projection " + name)
     attribution = projection["attribution"]
@@ -277,6 +293,15 @@ def validate_projection(projection: Mapping[str, Any]) -> None:
         raise SchemaValidationError(
             "Projection financial recommendation flag must be boolean."
         )
+    if comparability["financial_recommendations_allowed"]:
+        if projection["campaign_state"] not in {"ON", "SUSPENDED"}:
+            raise SchemaValidationError("Projection campaign state is not actionable.")
+        if projection["campaign_strategy"] != "HIGHEST_POSITION":
+            raise SchemaValidationError(
+                "Projection campaign strategy is not actionable."
+            )
+        if projection["current_ad_variant"] not in {"A", "B"}:
+            raise SchemaValidationError("Projection ad variant is not actionable.")
     _code_list(
         projection["observed_facts"],
         "Projection observed facts",
@@ -299,9 +324,7 @@ def validate_projection(projection: Mapping[str, Any]) -> None:
         )
         action = _code(item["action"], "Allowed change action")
         if action not in _OPTIMIZATION_ACTIONS:
-            raise SchemaValidationError(
-                "Allowed change history action is unsupported."
-            )
+            raise SchemaValidationError("Allowed change history action is unsupported.")
         _parse_utc(item["occurred_at"], "Allowed change timestamp")
         outcome = _code(item["outcome"], "Allowed change outcome")
         if outcome not in _CHANGE_OUTCOMES:
@@ -315,7 +338,13 @@ def validate_projection(projection: Mapping[str, Any]) -> None:
         "Projection policy limits",
     )
     for name, value in limits.items():
-        _integer(value, "Projection policy limit " + name)
+        if name == "low_ctr_percent":
+            if _metric_decimal(value, "Projection policy limit " + name) is None:
+                raise SchemaValidationError(
+                    "Projection policy limit low_ctr_percent is required."
+                )
+        else:
+            _integer(value, "Projection policy limit " + name)
     if set(projection["observed_facts"]) != supported_facts(projection):
         raise SchemaValidationError(
             "Projection observed facts are not supported by its metrics."
@@ -350,21 +379,26 @@ def build_sanitized_projection(
             "meaning": primary["business_meaning"],
         }
         projection["policy_limits"] = {
-            "budget_pressure_usage_percent": policy["monitoring"][
-                "anomaly_thresholds"
-            ]["budget_pressure_usage_percent"],
+            "budget_pressure_usage_percent": policy["monitoring"]["anomaly_thresholds"][
+                "budget_pressure_usage_percent"
+            ],
             "cpa_target_rub": policy["mandate"]["kpi"]["target_maximum"],
             "maximum_step_percent": policy["limits"]["maximum_step_percent"],
-            "observation_window_hours": policy["timing"][
-                "observation_window_hours"
-            ],
+            "observation_window_hours": policy["timing"]["observation_window_hours"],
             "no_conversion_stop_spend_rub": policy["limits"][
                 "no_conversion_stop_spend_rub"
             ],
             "minimum_clicks": policy["mandate"]["minimum_sample"]["clicks"],
-            "minimum_conversions": policy["mandate"]["minimum_sample"][
-                "conversions"
+            "minimum_conversions": policy["mandate"]["minimum_sample"]["conversions"],
+            "low_ctr_percent": policy["monitoring"]["anomaly_thresholds"][
+                "low_ctr_percent"
             ],
+            "low_ctr_minimum_impressions": policy["monitoring"]["anomaly_thresholds"][
+                "low_ctr_minimum_impressions"
+            ],
+            "bid_increase_maximum_clicks": policy["monitoring"][
+                "anomaly_thresholds"
+            ].get("bid_increase_maximum_clicks", 99),
             "source_mismatch_percent": policy["monitoring"]["anomaly_thresholds"][
                 "source_mismatch_percent"
             ],

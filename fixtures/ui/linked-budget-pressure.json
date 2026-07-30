@@ -1,0 +1,162 @@
+{
+  "baseline": {
+    "campaign": "sim-readonly-baseline",
+    "clicks": 90,
+    "cost_micros": 1800000000,
+    "goal_visits": 10,
+    "impressions": 9000,
+    "visits": 95
+  },
+  "direct_report": {
+    "attribution": "AUTO",
+    "currency": "RUB",
+    "period_end": "2026-07-27",
+    "period_start": "2026-07-21",
+    "retrieved_at": "2026-07-28T00:10:00+00:00",
+    "rows": [
+      {
+        "campaign": "sim-campaign",
+        "clicks": 14,
+        "cost_micros": 271428571,
+        "date": "2026-07-21",
+        "impressions": 1400
+      },
+      {
+        "campaign": "sim-campaign",
+        "clicks": 14,
+        "cost_micros": 271428571,
+        "date": "2026-07-22",
+        "impressions": 1400
+      },
+      {
+        "campaign": "sim-campaign",
+        "clicks": 14,
+        "cost_micros": 271428571,
+        "date": "2026-07-23",
+        "impressions": 1400
+      },
+      {
+        "campaign": "sim-campaign",
+        "clicks": 14,
+        "cost_micros": 271428571,
+        "date": "2026-07-24",
+        "impressions": 1400
+      },
+      {
+        "campaign": "sim-campaign",
+        "clicks": 14,
+        "cost_micros": 271428571,
+        "date": "2026-07-25",
+        "impressions": 1400
+      },
+      {
+        "campaign": "sim-campaign",
+        "clicks": 15,
+        "cost_micros": 271428571,
+        "date": "2026-07-26",
+        "impressions": 1500
+      },
+      {
+        "campaign": "sim-campaign",
+        "clicks": 15,
+        "cost_micros": 271428574,
+        "date": "2026-07-27",
+        "impressions": 1500
+      }
+    ],
+    "source": "LOCAL_FIXTURE",
+    "timezone": "UTC",
+    "watermark": "2026-07-27T23:59:00+00:00"
+  },
+  "direct_state": {
+    "ad_state": "ON",
+    "ad_variant": "A",
+    "campaign": "sim-campaign",
+    "campaign_state": "ON",
+    "budget_period_end": "2026-07-28T00:00:00+00:00",
+    "budget_period_start": "2026-07-21T00:00:00+00:00",
+    "current_search_bid_micros": 100000000,
+    "current_weekly_budget_micros": 2000000000,
+    "group_state": "ON",
+    "last_change": {
+      "author": "sviridov",
+      "occurred_at": "2026-07-20T12:00:00+00:00"
+    },
+    "object_config_version": "sim-campaign-config-v1",
+    "retrieved_at": "2026-07-28T00:09:00+00:00",
+    "source": "LOCAL_FIXTURE",
+    "strategy": "HIGHEST_POSITION",
+    "watermark": "2026-07-27T23:58:00+00:00"
+  },
+  "fixture_id": "ui-linked-budget-pressure",
+  "generated_at": "2026-07-28T00:15:00+00:00",
+  "metrika_report": {
+    "attribution": "automatic",
+    "period_end": "2026-07-27",
+    "period_start": "2026-07-21",
+    "retrieved_at": "2026-07-28T00:12:00+00:00",
+    "rows": [
+      {
+        "campaign": "sim-campaign",
+        "date": "2026-07-21",
+        "goal": "sim-primary-goal",
+        "goal_visits": 2,
+        "visits": 14
+      },
+      {
+        "campaign": "sim-campaign",
+        "date": "2026-07-22",
+        "goal": "sim-primary-goal",
+        "goal_visits": 2,
+        "visits": 14
+      },
+      {
+        "campaign": "sim-campaign",
+        "date": "2026-07-23",
+        "goal": "sim-primary-goal",
+        "goal_visits": 2,
+        "visits": 14
+      },
+      {
+        "campaign": "sim-campaign",
+        "date": "2026-07-24",
+        "goal": "sim-primary-goal",
+        "goal_visits": 2,
+        "visits": 14
+      },
+      {
+        "campaign": "sim-campaign",
+        "date": "2026-07-25",
+        "goal": "sim-primary-goal",
+        "goal_visits": 2,
+        "visits": 14
+      },
+      {
+        "campaign": "sim-campaign",
+        "date": "2026-07-26",
+        "goal": "sim-primary-goal",
+        "goal_visits": 1,
+        "visits": 15
+      },
+      {
+        "campaign": "sim-campaign",
+        "date": "2026-07-27",
+        "goal": "sim-primary-goal",
+        "goal_visits": 1,
+        "visits": 15
+      }
+    ],
+    "source": "LOCAL_FIXTURE",
+    "timezone": "UTC",
+    "watermark": "2026-07-27T23:57:00+00:00"
+  },
+  "schema_version": "integrated-analytics-fixture-v1",
+  "scope": {
+    "account": "sim-direct-account",
+    "campaign": "sim-campaign",
+    "connection": "sim-connection",
+    "counter": "sim-pilot-counter",
+    "goal": "sim-primary-goal",
+    "organization": "sim-organization"
+  }
+}

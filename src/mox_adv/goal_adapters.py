@@ -222,6 +222,18 @@ class FakeSitePublishAdapter:
         with self._lock:
             return self._publications.get(candidate_id)
 
+    def seed_publication(self, publication: SitePublication) -> None:
+        """Restore a previously persisted fake publication after a restart."""
+
+        with self._lock:
+            if (
+                self._versions.get(publication.site_zone)
+                != publication.published_version
+                or publication.candidate_id in self._publications
+            ):
+                raise GoalLifecycleRejected("SITE_PUBLICATION_RESTORE_INVALID")
+            self._publications[publication.candidate_id] = publication
+
     def rollback_publication(
         self,
         publication: SitePublication,

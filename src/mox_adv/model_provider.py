@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 
 from mox_adv.recommend_contracts import (
@@ -24,14 +25,51 @@ class DeterministicFakeModelProvider:
         comparability = projection["comparability"]
         if comparability["status"] != "COMPARABLE":
             payload = self._needs_human(projection)
-        elif comparability["confidence"] == "INSUFFICIENT_DATA":
-            payload = self._insufficient(projection)
         elif projection["goal_visits"] == 0 and projection["cost_micros"] >= (
             projection["policy_limits"]["no_conversion_stop_spend_rub"] * 1_000_000
         ):
             payload = self._ineffective(projection)
-        else:
+        elif (
+            comparability["confidence"] == "INSUFFICIENT_DATA"
+            or projection["clicks"] < projection["policy_limits"]["minimum_clicks"]
+            or projection["goal_visits"]
+            < projection["policy_limits"]["minimum_conversions"]
+        ):
+            payload = self._insufficient(projection)
+        elif projection["campaign_state"] == "SUSPENDED" and Decimal(
+            str(projection["cpa"])
+        ) <= Decimal(str(projection["policy_limits"]["cpa_target_rub"])):
+            payload = self._resume_campaign(projection)
+        elif (
+            Decimal(str(projection["ctr"]))
+            < Decimal(str(projection["policy_limits"]["low_ctr_percent"]))
+            and projection["impressions"]
+            >= projection["policy_limits"]["low_ctr_minimum_impressions"]
+        ):
+            payload = self._switch_ad_variant(projection)
+        elif Decimal(str(projection["cpa"])) > Decimal(
+            str(projection["policy_limits"]["cpa_target_rub"])
+        ) and Decimal(str(projection["budget_utilization"])) >= Decimal(
+            str(projection["policy_limits"]["budget_pressure_usage_percent"])
+        ):
+            payload = self._decrease_budget(projection)
+        elif Decimal(str(projection["cpa"])) > Decimal(
+            str(projection["policy_limits"]["cpa_target_rub"])
+        ):
+            payload = self._decrease_bid(projection)
+        elif Decimal(str(projection["budget_utilization"])) >= Decimal(
+            str(projection["policy_limits"]["budget_pressure_usage_percent"])
+        ):
             payload = self._effective(projection)
+        elif (
+            Decimal(str(projection["budget_utilization"]))
+            < Decimal(str(projection["policy_limits"]["budget_pressure_usage_percent"]))
+            and projection["clicks"]
+            <= projection["policy_limits"]["bid_increase_maximum_clicks"]
+        ):
+            payload = self._increase_bid(projection)
+        else:
+            payload = self._keep(projection)
         return ModelResponse(
             payload=payload,
             provider="deterministic-fake",
@@ -109,6 +147,110 @@ class DeterministicFakeModelProvider:
         return payload
 
     @classmethod
+    def _decrease_budget(
+        cls,
+        projection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        payload = cls._base(
+            projection,
+            "INEFFECTIVE",
+            "DECREASE_WEEKLY_BUDGET",
+            "Цена конверсии выше целевой при высоком использовании бюджета.",
+        )
+        payload["expected_diff"] = {
+            "operation": "DECREASE_WEEKLY_BUDGET",
+            "relative_step_percent": projection["policy_limits"][
+                "maximum_step_percent"
+            ],
+        }
+        return payload
+
+    @classmethod
+    def _decrease_bid(
+        cls,
+        projection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        payload = cls._base(
+            projection,
+            "INEFFECTIVE",
+            "DECREASE_SEARCH_BID",
+            "Цена конверсии выше целевой, а давление недельного бюджета отсутствует.",
+        )
+        payload["expected_diff"] = {
+            "operation": "DECREASE_SEARCH_BID",
+            "relative_step_percent": projection["policy_limits"][
+                "maximum_step_percent"
+            ],
+        }
+        return payload
+
+    @classmethod
+    def _increase_bid(
+        cls,
+        projection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        payload = cls._base(
+            projection,
+            "EFFECTIVE",
+            "INCREASE_SEARCH_BID",
+            "Цена конверсии не превышает целевую, а недельный бюджет не ограничивает показы.",
+        )
+        payload["expected_diff"] = {
+            "operation": "INCREASE_SEARCH_BID",
+            "relative_step_percent": projection["policy_limits"][
+                "maximum_step_percent"
+            ],
+        }
+        return payload
+
+    @classmethod
+    def _resume_campaign(
+        cls,
+        projection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        payload = cls._base(
+            projection,
+            "EFFECTIVE",
+            "RESUME_CAMPAIGN",
+            "Кампания приостановлена, а достаточная выборка соответствует целевому CPA.",
+        )
+        payload["expected_diff"] = {
+            "operation": "RESUME_CAMPAIGN",
+            "target_state": "ON",
+        }
+        return payload
+
+    @classmethod
+    def _keep(cls, projection: Mapping[str, Any]) -> dict[str, Any]:
+        payload = cls._base(
+            projection,
+            "EFFECTIVE",
+            "KEEP",
+            "Цена конверсии соответствует цели, а дополнительное изменение не требуется.",
+        )
+        payload["expected_diff"] = {"operation": "NO_CHANGE"}
+        return payload
+
+    @classmethod
+    def _switch_ad_variant(
+        cls,
+        projection: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        variant = "B" if projection["current_ad_variant"] == "A" else "A"
+        payload = cls._base(
+            projection,
+            "INEFFECTIVE",
+            "SET_AD_VARIANT",
+            "CTR ниже порога при достаточном числе показов; требуется проверить другой вариант объявления.",
+        )
+        payload["actions"][0]["parameters"] = {"variant_id": variant}
+        payload["expected_diff"] = {
+            "operation": "SET_AD_VARIANT",
+            "variant_id": variant,
+        }
+        return payload
+
+    @classmethod
     def _insufficient(cls, projection: Mapping[str, Any]) -> dict[str, Any]:
         payload = cls._base(
             projection,
@@ -122,13 +264,29 @@ class DeterministicFakeModelProvider:
 
     @classmethod
     def _needs_human(cls, projection: Mapping[str, Any]) -> dict[str, Any]:
+        context_incomplete = (
+            "ANALYTICS_CONTEXT_INCOMPLETE" in projection["observed_facts"]
+        )
         payload = cls._base(
             projection,
             "NEEDS_HUMAN",
             "REQUEST_HUMAN_HELP",
-            "Источники расходятся, поэтому нужно проверить трекинг вручную.",
+            (
+                "Недоступны доверенный baseline и история изменений, "
+                "поэтому финансовое предложение требует проверки человеком."
+                if context_incomplete
+                else ("Источники расходятся, поэтому нужно проверить трекинг вручную.")
+            ),
         )
-        payload["actions"][0]["parameters"] = {"reason_code": "AMBIGUOUS_DATA"}
+        payload["actions"][0]["parameters"] = {
+            "reason_code": (
+                "MISSING_ANALYTICS_CONTEXT" if context_incomplete else "AMBIGUOUS_DATA"
+            )
+        }
         payload["expected_diff"] = {"operation": "NO_CHANGE"}
-        payload["missing_data_requests"] = ["TRACKING_VALIDATION"]
+        payload["missing_data_requests"] = (
+            ["TRUSTED_BASELINE", "CHANGE_PROVENANCE"]
+            if context_incomplete
+            else ["TRACKING_VALIDATION"]
+        )
         return payload

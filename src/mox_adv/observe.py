@@ -43,7 +43,10 @@ from mox_adv.trust_boundary import (
     emit_run_capability_evidence,
 )
 
-LOCAL_FIXTURE_CAMPAIGNS = {"linked-observe": "sim-campaign"}
+LOCAL_FIXTURE_CAMPAIGNS = {
+    "linked-observe": "sim-campaign",
+    "ui-linked-budget-pressure": "sim-campaign",
+}
 
 
 def _utc_now() -> str:

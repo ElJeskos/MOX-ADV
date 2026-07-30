@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -614,6 +614,7 @@ def write_final_e2e_artifacts(
     egress: ReadOnlyEgressRecorder,
     supplemental_artifacts: Mapping[str, Mapping[str, Any]],
     run_summary: Mapping[str, Any],
+    additional_text_artifacts: Callable[[Path], Mapping[str, str]] | None = None,
 ) -> Path:
     """Write one immutable E2E evidence bundle and deterministic fingerprint."""
 
@@ -796,6 +797,11 @@ def write_final_e2e_artifacts(
             "fingerprint": stability_fingerprint,
         },
     )
+    if additional_text_artifacts is not None:
+        for name, text in additional_text_artifacts(workspace.path).items():
+            if Path(name).name != name or not name:
+                raise ValueError("An additional E2E artifact name is invalid.")
+            workspace.write_text(name, text)
     _write_artifact_manifest(
         workspace,
         run_id=run_id,

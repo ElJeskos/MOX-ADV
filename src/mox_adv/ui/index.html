@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>MOX-ADV Control</title>
+    <link rel="stylesheet" href="/assets/app.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <span>MOX-ADV</span>
+        <span class="brand-section">Control</span>
+      </div>
+      <div class="service-state" id="service-state">
+        <span class="state-dot" aria-hidden="true"></span>
+        <span>Локальный контур</span>
+      </div>
+    </header>
+
+    <main class="shell">
+      <aside class="controls" aria-labelledby="control-title">
+        <div>
+          <p class="eyebrow">Управление запуском</p>
+          <h1 id="control-title">Один запуск.<br>Два источника.</h1>
+          <p class="lede">
+            Директ и Метрика проходят единый анализ, решение и контроль применения.
+          </p>
+        </div>
+
+        <div class="mode-switch" role="tablist" aria-label="Режим запуска">
+          <button
+            class="mode-button"
+            id="mode-test"
+            role="tab"
+            aria-selected="false"
+            data-mode="test"
+          >
+            Тестовый
+          </button>
+          <button
+            class="mode-button is-active"
+            id="mode-production"
+            role="tab"
+            aria-selected="true"
+            data-mode="production"
+          >
+            Основной
+          </button>
+        </div>
+
+        <div class="operating-mode-control">
+          <p class="eyebrow">Контур исполнения</p>
+          <div
+            class="operating-modes"
+            id="operating-modes"
+            role="group"
+            aria-label="Операционный режим"
+          >
+            <button
+              class="operating-mode is-active"
+              type="button"
+              data-operating-mode="OBSERVE"
+              aria-pressed="true"
+            >
+              OBSERVE
+            </button>
+            <button
+              class="operating-mode"
+              type="button"
+              data-operating-mode="RECOMMEND"
+              aria-pressed="false"
+            >
+              RECOMMEND
+            </button>
+            <button
+              class="operating-mode"
+              type="button"
+              data-operating-mode="APPROVAL_REQUIRED"
+              aria-pressed="false"
+            >
+              APPROVAL REQUIRED
+            </button>
+            <button
+              class="operating-mode"
+              type="button"
+              data-operating-mode="BOUNDED_AUTONOMY"
+              aria-pressed="false"
+            >
+              BOUNDED AUTONOMY
+            </button>
+          </div>
+          <p class="operating-mode-note" id="operating-mode-note">
+            Только сбор связанных данных и объяснение. Proposal и executor не запускаются.
+          </p>
+        </div>
+
+        <section class="mode-context" aria-live="polite">
+          <div class="mode-heading">
+            <span class="mode-indicator" id="mode-indicator"></span>
+            <strong id="mode-name">Основной контур</strong>
+          </div>
+          <p id="mode-description">
+            Read-only анализ реальных данных Яндекс.Директа и Метрики. Рекомендация формируется без approval и применения.
+          </p>
+          <ul class="source-list" id="source-list">
+            <li><span>Директ</span><strong>Production API · read-only</strong></li>
+            <li><span>Метрика</span><strong>Production API · read-only</strong></li>
+            <li><span>Изменения</span><strong>Запрещены</strong></li>
+          </ul>
+        </section>
+
+        <button class="run-button" id="run-button" type="button">
+          <span id="run-button-label">Запустить read-only анализ</span>
+          <span class="button-arrow" aria-hidden="true">↗</span>
+        </button>
+
+        <p class="control-note" id="control-note">
+          Executor и approval отключены. Любые внешние write-запросы запрещены.
+        </p>
+      </aside>
+
+      <section class="workspace" aria-labelledby="workspace-title">
+        <div class="workspace-head">
+          <div>
+            <p class="eyebrow">Текущий запуск</p>
+            <h2 id="workspace-title">Готов к анализу</h2>
+          </div>
+          <span class="run-status is-idle" id="run-status">Ожидание</span>
+        </div>
+
+        <ol class="pipeline" id="pipeline" aria-label="Этапы запуска">
+          <li data-step="direct">
+            <span class="step-number">01</span>
+            <span>Директ</span>
+            <span class="step-state">Ожидает</span>
+          </li>
+          <li data-step="metrika">
+            <span class="step-number">02</span>
+            <span>Метрика</span>
+            <span class="step-state">Ожидает</span>
+          </li>
+          <li data-step="analytics">
+            <span class="step-number">03</span>
+            <span>Анализ</span>
+            <span class="step-state">Ожидает</span>
+          </li>
+          <li data-step="recommend">
+            <span class="step-number">04</span>
+            <span>Решение</span>
+            <span class="step-state">Ожидает</span>
+          </li>
+          <li data-step="apply">
+            <span class="step-number">05</span>
+            <span>Применение</span>
+            <span class="step-state">Ожидает</span>
+          </li>
+        </ol>
+
+        <div class="empty-state" id="empty-state">
+          <div class="signal" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <p>После запуска здесь появятся метрики, рекомендация и статус границы исполнения.</p>
+        </div>
+
+        <section class="report" id="report" hidden aria-live="polite">
+          <div class="report-meta">
+            <span id="report-run-id">—</span>
+            <span id="report-period">—</span>
+          </div>
+
+          <div class="metrics" id="metrics"></div>
+
+          <div class="decision">
+            <div>
+              <p class="eyebrow">Рекомендация</p>
+              <h3 id="decision-title">—</h3>
+              <p id="decision-copy">—</p>
+            </div>
+            <div class="change" id="change">
+              <span id="change-label">Предложение</span>
+              <strong id="change-value">—</strong>
+            </div>
+          </div>
+
+          <div class="execution">
+            <div>
+              <p class="eyebrow" id="execution-label">Граница исполнения</p>
+              <p class="execution-line" id="execution-line">—</p>
+            </div>
+            <div class="safety-proof">
+              <span class="proof-dot" aria-hidden="true"></span>
+              <span id="safety-copy">Внешняя запись отсутствует</span>
+            </div>
+          </div>
+
+          <div class="report-actions">
+            <a id="download-report" href="#" download>Скачать отчёт HTML</a>
+          </div>
+        </section>
+
+        <section class="blocked-panel" id="blocked-panel" hidden aria-live="polite">
+          <p class="eyebrow">Основной режим</p>
+          <h3>Запуск безопасно заблокирован</h3>
+          <p id="blocked-message">
+            Production-контур станет доступен после настройки доверенных границ.
+          </p>
+          <ul id="readiness-checks"></ul>
+        </section>
+      </section>
+    </main>
+
+    <section class="operator-console" aria-label="Управление полным циклом">
+      <div class="operator-console-head">
+        <div>
+          <p class="eyebrow">Safety control plane</p>
+          <h2>Полномочия и аварийная остановка</h2>
+        </div>
+        <p>
+          Approval, Mandate и kill switch остаются server-side объектами.
+          Интерфейс показывает точную область действия и не принимает секреты.
+        </p>
+      </div>
+
+      <div class="authority-layout">
+        <section class="authority-panel" aria-labelledby="approval-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Одноразовое полномочие</p>
+              <h3 id="approval-title">Approval</h3>
+            </div>
+            <span class="automation-state" id="approval-state">Нет активного</span>
+          </div>
+          <dl class="control-facts" id="approval-facts">
+            <div><dt>Proposal</dt><dd>—</dd></div>
+            <div><dt>Действие</dt><dd>—</dd></div>
+            <div><dt>До → после</dt><dd>—</dd></div>
+            <div><dt>Риск</dt><dd>—</dd></div>
+            <div><dt>Expiry</dt><dd>—</dd></div>
+          </dl>
+          <div class="inline-actions">
+            <button class="secondary-button" id="grant-approval" type="button">
+              Подтвердить точный proposal
+            </button>
+            <button class="primary-button" id="apply-approval" type="button" disabled>
+              Применить подтверждённое
+            </button>
+            <button class="text-button" id="revoke-approval" type="button">
+              Отозвать
+            </button>
+          </div>
+        </section>
+
+        <section class="authority-panel" aria-labelledby="mandate-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Ограниченная автономия</p>
+              <h3 id="mandate-title">Mandate</h3>
+            </div>
+            <span class="automation-state" id="mandate-state">Не активен</span>
+          </div>
+          <dl class="control-facts" id="mandate-facts">
+            <div><dt>Scope</dt><dd>Simulation campaign</dd></div>
+            <div><dt>Лимит шага</dt><dd>10%</dd></div>
+            <div><dt>Действия / 24 ч</dt><dd>0 / 1</dd></div>
+            <div><dt>Expiry</dt><dd>—</dd></div>
+          </dl>
+          <div class="inline-actions">
+            <button class="secondary-button" id="issue-mandate" type="button">
+              Выдать тестовый Mandate
+            </button>
+            <button class="text-button" id="revoke-mandate" type="button">
+              Отозвать
+            </button>
+          </div>
+        </section>
+
+        <section class="authority-panel kill-panel" aria-labelledby="kill-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Incident control</p>
+              <h3 id="kill-title">Kill switch</h3>
+            </div>
+            <span class="automation-state" id="kill-state">Снят</span>
+          </div>
+          <p class="panel-copy">
+            Блокирует следующую ещё не отправленную команду во всех выбранных scope.
+          </p>
+          <label class="interval-field">
+            <span>Scope</span>
+            <select id="kill-scope">
+              <option value="global">Global</option>
+              <option value="organization">Organization</option>
+              <option value="connection">Connection</option>
+              <option value="campaign">Campaign</option>
+            </select>
+          </label>
+          <label class="interval-field">
+            <span>Подтверждение для снятия</span>
+            <input id="kill-release-confirmation" type="text" autocomplete="off" placeholder="Введите RELEASE">
+          </label>
+          <div class="inline-actions">
+            <button class="danger-button" id="engage-kill-switch" type="button">
+              Аварийно остановить
+            </button>
+            <button class="text-button" id="release-kill-switch" type="button">
+              Снять блокировку
+            </button>
+          </div>
+        </section>
+      </div>
+      <p class="automation-message" id="control-plane-message" aria-live="polite"></p>
+    </section>
+
+    <section class="test-lab" id="test-lab" hidden aria-labelledby="test-lab-title">
+      <div class="test-lab-head">
+        <div>
+          <p class="eyebrow">Тестовый полигон</p>
+          <h2 id="test-lab-title">Сценарий и автопилот</h2>
+        </div>
+        <p>
+          Задайте непротиворечивые исходные факты.
+          Расчётные KPI, триггеры и решение сформируются тем же безопасным контуром.
+        </p>
+      </div>
+
+      <div class="lab-grid">
+        <section class="lab-panel scenario-panel" aria-labelledby="scenario-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Входные данные</p>
+              <h3 id="scenario-title">Метрики тестовой кампании</h3>
+            </div>
+            <span class="panel-index">01</span>
+          </div>
+          <div class="scenario-fields">
+            <label>
+              <span>Показы</span>
+              <input id="scenario-impressions" type="number" min="1" value="10000">
+            </label>
+            <label>
+              <span>Клики</span>
+              <input id="scenario-clicks" type="number" min="0" value="100">
+            </label>
+            <label>
+              <span>Расход, ₽</span>
+              <input id="scenario-spend" type="number" min="0" value="1900">
+            </label>
+            <label>
+              <span>Визиты</span>
+              <input id="scenario-visits" type="number" min="0" value="100">
+            </label>
+            <label>
+              <span>Конверсии</span>
+              <input id="scenario-conversions" type="number" min="0" value="12">
+            </label>
+            <label>
+              <span>Недельный бюджет, ₽</span>
+              <input id="scenario-budget" type="number" min="1" value="2000">
+            </label>
+            <label>
+              <span>Baseline: расход, ₽</span>
+              <input id="scenario-baseline-spend" type="number" min="0" value="1800">
+            </label>
+            <label>
+              <span>Baseline: конверсии</span>
+              <input id="scenario-baseline-conversions" type="number" min="0" value="10">
+            </label>
+            <label>
+              <span>Ожидаемый расход к текущему моменту, ₽</span>
+              <input id="scenario-expected-spend" type="number" min="1" value="1600">
+            </label>
+            <label>
+              <span>Baseline impressions</span>
+              <input id="scenario-baseline-impressions" type="number" min="1" value="10000">
+            </label>
+            <label>
+              <span>Baseline clicks</span>
+              <input id="scenario-baseline-clicks" type="number" min="0" value="100">
+            </label>
+            <label>
+              <span>Baseline visits</span>
+              <input id="scenario-baseline-visits" type="number" min="1" value="100">
+            </label>
+            <label>
+              <span>Цель не срабатывала, часов</span>
+              <input id="scenario-goal-silence" type="number" min="0" value="1">
+            </label>
+            <label>
+              <span>Расхождение источников, %</span>
+              <input id="scenario-source-mismatch" type="number" min="0" value="0">
+            </label>
+            <label>
+              <span>Возраст Direct, минут</span>
+              <input id="scenario-direct-age" type="number" min="0" value="1">
+            </label>
+            <label>
+              <span>Возраст Метрики, минут</span>
+              <input id="scenario-metrika-age" type="number" min="0" value="1">
+            </label>
+            <label>
+              <span>Разница watermarks, минут</span>
+              <input id="scenario-watermark-skew" type="number" min="0" value="0">
+            </label>
+            <label>
+              <span>Состояние кампании</span>
+              <select id="scenario-campaign-state">
+                <option value="ON" selected>Включена</option>
+                <option value="SUSPENDED">Приостановлена</option>
+              </select>
+            </label>
+            <label class="rule-toggle">
+              <input id="scenario-external-change" type="checkbox">
+              <span>Обнаружено внешнее изменение</span>
+            </label>
+          </div>
+          <div class="derived-preview" id="derived-preview" aria-live="polite"></div>
+        </section>
+
+        <section class="lab-panel automation-panel" aria-labelledby="automation-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Проактивный цикл</p>
+              <h3 id="automation-title">Тестовый автопилот</h3>
+            </div>
+            <span class="automation-state" id="automation-state">Выключен</span>
+          </div>
+
+          <label class="interval-field">
+            <span>Периодичность</span>
+            <select id="automation-interval">
+              <option value="5">Раз в 5 минут</option>
+              <option value="15">Раз в 15 минут</option>
+              <option value="60" selected>Раз в час</option>
+              <option value="360">Раз в 6 часов</option>
+              <option value="1440">Раз в сутки</option>
+            </select>
+          </label>
+
+          <div class="rule-list">
+            <div class="rule-row">
+              <label class="rule-toggle">
+                <input id="rule-budget-enabled" type="checkbox" checked>
+                <span>Давление бюджета</span>
+              </label>
+              <label>
+                <span>Использование ≥, %</span>
+                <input id="rule-budget-threshold" type="number" min="90" value="90">
+              </label>
+            </div>
+            <div class="rule-row">
+              <label class="rule-toggle">
+                <input id="rule-growth-enabled" type="checkbox" checked>
+                <span>Расход растёт без конверсий</span>
+              </label>
+              <label>
+                <span>Рост расхода ≥, ₽</span>
+                <input id="rule-growth-threshold" type="number" min="500" value="500">
+              </label>
+              <label>
+                <span>Рост конверсий ≤, %</span>
+                <input id="rule-conversion-ceiling" type="number" min="-100" max="0" value="0">
+              </label>
+            </div>
+            <div class="rule-row">
+              <label class="rule-toggle">
+                <input id="rule-no-conversion-enabled" type="checkbox" checked>
+                <span>Расход без конверсий</span>
+              </label>
+              <label>
+                <span>Расход ≥, ₽</span>
+                <input id="rule-no-conversion-threshold" type="number" min="2000" value="2000">
+              </label>
+            </div>
+            <div class="rule-row">
+              <label class="rule-toggle">
+                <input id="rule-pacing-enabled" type="checkbox" checked>
+                <span>Опережение pacing</span>
+              </label>
+              <label><span>Pacing ≥, %</span><input id="rule-pacing-threshold" type="number" min="120" value="120"></label>
+            </div>
+            <div class="rule-row">
+              <label class="rule-toggle"><input id="rule-cpc-enabled" type="checkbox" checked><span>Отклонение CPC</span></label>
+              <label><span>Отклонение ≥, %</span><input id="rule-cpc-threshold" type="number" min="30" value="30"></label>
+            </div>
+            <div class="rule-row">
+              <label class="rule-toggle"><input id="rule-ctr-enabled" type="checkbox" checked><span>Отклонение CTR</span></label>
+              <label><span>Отклонение ≥, %</span><input id="rule-ctr-threshold" type="number" min="30" value="30"></label>
+            </div>
+            <div class="rule-row">
+              <label class="rule-toggle"><input id="rule-cvr-enabled" type="checkbox" checked><span>Отклонение conversion rate</span></label>
+              <label><span>Отклонение ≥, %</span><input id="rule-cvr-threshold" type="number" min="30" value="30"></label>
+            </div>
+            <div class="rule-row">
+              <label class="rule-toggle"><input id="rule-goal-enabled" type="checkbox" checked><span>Цель перестала срабатывать</span></label>
+              <label><span>Нет цели ≥, часов</span><input id="rule-goal-hours" type="number" min="24" value="24"></label>
+              <label><span>Визитов ≥</span><input id="rule-goal-visits" type="number" min="50" value="50"></label>
+            </div>
+            <div class="rule-row">
+              <label class="rule-toggle"><input id="rule-source-enabled" type="checkbox" checked><span>Расхождение источников</span></label>
+              <label><span>Расхождение ≥, %</span><input id="rule-source-threshold" type="number" min="30" value="30"></label>
+            </div>
+            <div class="rule-row">
+              <label class="rule-toggle"><input id="rule-external-enabled" type="checkbox" checked><span>Внешнее изменение</span></label>
+              <span>Любое неизвестное изменение блокирует write.</span>
+            </div>
+            <div class="rule-row">
+              <label class="rule-toggle"><input id="rule-freshness-enabled" type="checkbox" checked><span>Freshness и watermarks</span></label>
+              <label><span>Direct ≤, мин</span><input id="rule-direct-freshness" type="number" min="1" max="30" value="30"></label>
+              <label><span>Метрика ≤, мин</span><input id="rule-metrika-freshness" type="number" min="1" max="360" value="360"></label>
+              <label><span>Watermark ≤, мин</span><input id="rule-watermark-freshness" type="number" min="1" max="360" value="360"></label>
+            </div>
+          </div>
+
+          <p class="safety-note">
+            Редактируемые правила могут только ужесточать Gate 0.
+            В тестовом режиме применение выполняется исключительно через sealed fake.
+          </p>
+          <div class="automation-actions">
+            <button class="secondary-button" id="save-automation" type="button">
+              Сохранить настройки
+            </button>
+            <button class="run-button compact" id="toggle-automation" type="button">
+              Включить автопилот
+            </button>
+          </div>
+          <p class="automation-message" id="automation-message" aria-live="polite"></p>
+          <p class="automation-timing" id="automation-timing">Запуски ещё не выполнялись.</p>
+        </section>
+      </div>
+
+      <section class="recommendation-guide" aria-labelledby="recommendation-guide-title">
+        <div class="guide-head">
+          <div>
+            <p class="eyebrow">Логика тестового решения</p>
+            <h2 id="recommendation-guide-title">Справочник рекомендаций</h2>
+          </div>
+          <p>
+            Пороговые значения участвуют в следующем ручном или автоматическом цикле.
+            Gate 0 проверяет предложенное действие отдельно и может остановить применение.
+          </p>
+        </div>
+
+        <div class="threshold-editor">
+          <label>
+            <span>Минимум кликов</span>
+            <input id="recommend-minimum-clicks" type="number" min="50" value="50">
+          </label>
+          <label>
+            <span>Минимум конверсий</span>
+            <input id="recommend-minimum-conversions" type="number" min="3" value="3">
+          </label>
+          <label>
+            <span>Целевой CPA, ₽</span>
+            <input id="recommend-target-cpa" type="number" min="1" max="1000" value="1000">
+          </label>
+          <label>
+            <span>Давление бюджета, %</span>
+            <input id="recommend-budget-pressure" type="number" min="90" value="90">
+          </label>
+          <label>
+            <span>Расход без конверсий, ₽</span>
+            <input id="recommend-no-conversion-spend" type="number" min="2000" value="2000">
+          </label>
+          <label>
+            <span>Низкий CTR, %</span>
+            <input id="recommend-low-ctr" type="number" min="0.1" max="1" step="0.1" value="1">
+          </label>
+          <label>
+            <span>Показов для проверки CTR</span>
+            <input id="recommend-low-ctr-impressions" type="number" min="5000" value="5000">
+          </label>
+          <label>
+            <span>Кликов для роста ставки, до</span>
+            <input id="recommend-bid-max-clicks" type="number" min="50" max="99" value="99">
+          </label>
+        </div>
+
+        <div class="guide-actions">
+          <p>
+            Значения можно только ужесточать относительно Gate 0.
+            Изменённая логика действует только в тестовом контуре.
+          </p>
+          <button class="secondary-button" id="save-recommendation-rules" type="button">
+            Сохранить логику
+          </button>
+        </div>
+        <p class="automation-message" id="recommendation-message" aria-live="polite"></p>
+
+        <div class="matrix-scroll">
+          <table class="recommendation-matrix" id="recommendation-matrix">
+            <thead>
+              <tr>
+                <th scope="col">Приоритет</th>
+                <th scope="col">Условие</th>
+                <th scope="col">Рекомендация</th>
+                <th scope="col">Что произойдёт</th>
+              </tr>
+            </thead>
+            <tbody id="recommendation-matrix-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="history-panel" aria-labelledby="history-title">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Журнал решений</p>
+            <h3 id="history-title">Что было решено и почему</h3>
+          </div>
+          <span class="panel-index">02</span>
+        </div>
+        <div class="decision-history" id="decision-history">
+          <p class="history-empty">История появится после первого тестового цикла.</p>
+        </div>
+      </section>
+    </section>
+
+    <section class="workflow-console" aria-labelledby="workflow-title">
+      <div class="operator-console-head">
+        <div>
+          <p class="eyebrow">Controlled workflows</p>
+          <h2 id="workflow-title">Campaign и Goal lifecycle</h2>
+        </div>
+        <p>
+          Подготовка структуры, точный diff, reservation, readback и cleanup.
+          Без production authority выполняется только локальная симуляция.
+        </p>
+      </div>
+
+      <div class="workflow-layout">
+        <section class="workflow-panel" aria-labelledby="campaign-workflow-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Яндекс Директ</p>
+              <h3 id="campaign-workflow-title">Пилотная кампания</h3>
+            </div>
+            <span class="panel-index">01</span>
+          </div>
+          <p class="panel-copy">
+            Campaign → ad group → два объявления → keyword → moderation → launch → readback.
+          </p>
+          <div class="workflow-steps" id="campaign-workflow-steps"></div>
+          <button class="secondary-button" id="run-campaign-workflow" type="button">
+            Запустить безопасную симуляцию
+          </button>
+        </section>
+
+        <section class="workflow-panel" aria-labelledby="goal-workflow-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Яндекс Метрика</p>
+              <h3 id="goal-workflow-title">Кандидатная цель</h3>
+            </div>
+            <span class="panel-index">02</span>
+          </div>
+          <p class="panel-copy">
+            Candidate → test counter → site event → reachGoal → polling → human semantic decision.
+          </p>
+          <div class="workflow-steps" id="goal-workflow-steps"></div>
+          <div class="inline-actions">
+            <button class="secondary-button" id="run-goal-workflow" type="button">
+              Проверить технически
+            </button>
+            <button class="text-button" id="approve-goal" type="button" disabled>
+              Подтвердить смысл
+            </button>
+            <button class="text-button" id="reject-goal" type="button" disabled>
+              Отклонить
+            </button>
+          </div>
+        </section>
+      </div>
+      <p class="automation-message" id="workflow-message" aria-live="polite"></p>
+    </section>
+
+    <section class="impact-console" aria-labelledby="impact-title">
+      <div class="operator-console-head">
+        <div>
+          <p class="eyebrow">Post-change observation</p>
+          <h2 id="impact-title">Impact evaluation</h2>
+        </div>
+        <p>
+          Сравнение baseline и post-change периода с confidence, evidence и одним следующим решением.
+        </p>
+      </div>
+      <div class="impact-layout">
+        <label class="interval-field">
+          <span>Сценарий наблюдения</span>
+          <select id="impact-fixture">
+            <option value="IMPACT_CPA_IMPROVED_KEEP">CPA улучшился · сохранить</option>
+            <option value="IMPACT_CPA_WORSE_ROLLBACK">CPA ухудшился · откатить</option>
+            <option value="IMPACT_MIXED_ADJUST">Смешанный эффект · скорректировать</option>
+            <option value="IMPACT_INCONCLUSIVE_HUMAN">Недостаточно данных · человеку</option>
+          </select>
+        </label>
+        <button class="secondary-button" id="run-impact" type="button">
+          Оценить результат
+        </button>
+        <div class="impact-result" id="impact-result" aria-live="polite">
+          <span>Следующее решение</span>
+          <strong>Ожидает observation window</strong>
+          <p>Запустите один из фиксированных сценариев.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="evidence-console" aria-labelledby="evidence-title">
+      <div class="operator-console-head">
+        <div>
+          <p class="eyebrow">Acceptance evidence</p>
+          <h2 id="evidence-title">Evidence и готовность Gate</h2>
+        </div>
+        <div class="evidence-actions">
+          <button class="secondary-button" id="refresh-evidence" type="button">
+            Обновить evidence
+          </button>
+          <button class="run-button compact" id="run-full-evidence" type="button">
+            Запустить полный тестовый контур
+          </button>
+        </div>
+      </div>
+
+      <div class="gate-strip" id="gate-strip">
+        <div data-gate="0"><span>Gate 0</span><strong>Проверяется</strong></div>
+        <div data-gate="1"><span>Gate 1</span><strong>Проверяется</strong></div>
+        <div data-gate="2"><span>Gate 2</span><strong>Проверяется</strong></div>
+        <div data-gate="3"><span>Gate 3</span><strong>Проверяется</strong></div>
+        <div data-gate="4"><span>Gate 4</span><strong>NO-GO</strong></div>
+      </div>
+
+      <div class="capability-matrix" id="capability-matrix">
+        <article data-capability="CAMPAIGN_LIFECYCLE"><span>Campaign lifecycle</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="GOAL_LIFECYCLE"><span>Goal lifecycle</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="SOURCE_INTEGRATION"><span>Source integration</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="INTEGRATED_ANALYTICS"><span>Integrated analytics</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="LLM_ANALYSIS"><span>LLM analysis</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="APPROVAL_REQUIRED"><span>Approval required</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="BOUNDED_AUTONOMY"><span>Bounded autonomy</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="MONITORING_AND_ALERTING"><span>Monitoring & alerts</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="IMPACT_EVALUATION"><span>Impact evaluation</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="OPERATIONAL_MODES"><span>Operational modes</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="TOOL_CONTRACT"><span>Tool contract</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="ORIGINAL_INTEGRATION_COVERAGE"><span>Direct API coverage</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="SAFETY_CORE"><span>Safety core</span><strong>NOT PROVEN</strong></article>
+        <article data-capability="CLOSED_LOOP_CONTROL"><span>Closed loop control</span><strong>NOT PROVEN</strong></article>
+      </div>
+      <a class="secondary-button evidence-download" id="evidence-report-download" hidden>
+        Скачать acceptance-отчёт HTML
+      </a>
+      <p class="automation-message" id="evidence-message" aria-live="polite"></p>
+    </section>
+
+    <footer>
+      <span>127.0.0.1 · локальный операторский интерфейс</span>
+      <span>Основной режим · только чтение</span>
+    </footer>
+  </body>
+</html>

@@ -380,6 +380,24 @@
       "ADJUST_CHANGE",
       "ESCALATE_TO_HUMAN"
     ],
+    "decision_fixtures": [
+      {
+        "name": "IMPACT_CPA_IMPROVED_KEEP",
+        "expected_next_decision": "KEEP_CHANGE"
+      },
+      {
+        "name": "IMPACT_CPA_WORSE_ROLLBACK",
+        "expected_next_decision": "ROLLBACK_CHANGE"
+      },
+      {
+        "name": "IMPACT_MIXED_ADJUST",
+        "expected_next_decision": "ADJUST_CHANGE"
+      },
+      {
+        "name": "IMPACT_INCONCLUSIVE_HUMAN",
+        "expected_next_decision": "ESCALATE_TO_HUMAN"
+      }
+    ],
     "fixture": {
       "name": "IMPACT_CPA_IMPROVED_KEEP",
       "expected_next_decision": "KEEP_CHANGE"

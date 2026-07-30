@@ -114,6 +114,7 @@ _REASON_CODES = frozenset(
     {
         "INVALID_INPUT",
         "AMBIGUOUS_DATA",
+        "MISSING_ANALYTICS_CONTEXT",
         "UNSUPPORTED_STATE",
         "UNSUPPORTED_ACTION",
         "AGENT_ERROR",
@@ -127,14 +128,15 @@ _FACT_EVIDENCE = {
         {"budget_utilization", "policy_limits"}
     ),
     "CPA_AT_OR_BELOW_TARGET": frozenset({"cpa", "policy_limits"}),
+    "CPA_ABOVE_TARGET": frozenset({"cpa", "policy_limits"}),
+    "LOW_CTR_BELOW_THRESHOLD": frozenset({"ctr", "impressions", "policy_limits"}),
     "NO_CONVERSIONS": frozenset({"goal_visits"}),
     "NO_CONVERSION_SPEND_AT_OR_ABOVE_THRESHOLD": frozenset(
         {"cost_micros", "policy_limits"}
     ),
-    "SAMPLE_BELOW_GATE0_MINIMUM": frozenset(
-        {"clicks", "goal_visits", "policy_limits"}
-    ),
+    "SAMPLE_BELOW_GATE0_MINIMUM": frozenset({"clicks", "goal_visits", "policy_limits"}),
     "SOURCE_MISMATCH": frozenset({"comparability"}),
+    "ANALYTICS_CONTEXT_INCOMPLETE": frozenset({"comparability"}),
 }
 
 
@@ -168,9 +170,7 @@ def _text(
     maximum: int = 500,
 ) -> str:
     if not isinstance(value, str) or not minimum <= len(value) <= maximum:
-        raise SchemaValidationError(
-            label + " must be a string with an allowed length."
-        )
+        raise SchemaValidationError(label + " must be a string with an allowed length.")
     return value
 
 
@@ -526,13 +526,15 @@ class OptimizationProposalV1:
             or _SAFE_IDENTIFIER.fullmatch(value["run_id"]) is None
         ):
             raise SchemaValidationError("Run ID is invalid.")
-        if not isinstance(value["snapshot_id"], str) or _SHA256.fullmatch(
-            value["snapshot_id"]
-        ) is None:
+        if (
+            not isinstance(value["snapshot_id"], str)
+            or _SHA256.fullmatch(value["snapshot_id"]) is None
+        ):
             raise SchemaValidationError("Snapshot ID is invalid.")
-        if not isinstance(value["expected_fingerprint"], str) or _SHA256.fullmatch(
-            value["expected_fingerprint"]
-        ) is None:
+        if (
+            not isinstance(value["expected_fingerprint"], str)
+            or _SHA256.fullmatch(value["expected_fingerprint"]) is None
+        ):
             raise SchemaValidationError("Expected fingerprint is invalid.")
         created = _parse_utc(value["created_at"], "Proposal created_at")
         expires = _parse_utc(value["expires_at"], "Proposal expires_at")
@@ -583,9 +585,7 @@ class OptimizationProposalV1:
             "actions": [_thaw_json(item) for item in self.actions],
             "evidence_fields": list(self.evidence_fields),
             "expected_effect_direction": self.expected_effect_direction,
-            "minimum_observation_window_hours": (
-                self.minimum_observation_window_hours
-            ),
+            "minimum_observation_window_hours": (self.minimum_observation_window_hours),
             "risks": list(self.risks),
             "preconditions": list(self.preconditions),
             "rollback_condition": self.rollback_condition,
