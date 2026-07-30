@@ -536,6 +536,46 @@ class ReferenceHttpClientE2ETests(unittest.TestCase):
         self.assertEqual("DRY_RUN", dry_run.body["proposal"]["status"])
         self.assertIsNone(dry_run.body["execution_result"])
 
+    def test_retried_direct_plan_replays_without_a_second_provider_read(
+        self,
+    ) -> None:
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        policy = json.loads(
+            (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
+        )
+        openapi = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reader = ActionAuthorizedDirectReader()
+            runtime = DirectActionRuntimeV1(
+                policy=policy,
+                state=DurableControlState(root / "control.sqlite3"),
+                proposal_store=ImmutableProposalStore(root / "proposals"),
+                trigger_store=MonitoringStore(root / "monitoring.sqlite3"),
+                test_adapter=None,
+                environment=ExecutionEnvironment.PRODUCTION,
+            )
+            adapter = HttpJsonModuleAdapterV1.for_durable_host(
+                DirectModuleV1(
+                    clock=lambda: now,
+                    provider_reader=reader,
+                    action_runtime=runtime,
+                ),
+                environment=ExecutionEnvironment.PRODUCTION,
+                replay_path=root / "module-replays.sqlite3",
+            )
+            payload = direct_plan_intent(environment="PRODUCTION")
+            with _ModuleApiServer(adapter) as server:
+                client = ModuleHttpClientV1.from_openapi(
+                    base_url=server.base_url,
+                    document=openapi,
+                )
+                first = client.invoke(payload)
+                retried = client.invoke(payload)
+
+        self.assertEqual(first.body, retried.body)
+        self.assertEqual(1, len(reader.state_calls))
+
     def test_test_direct_intent_executes_exactly_once_across_http_retry(
         self,
     ) -> None:

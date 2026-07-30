@@ -31,7 +31,10 @@ from mox_adv.control_state import (
 from mox_adv.mandate_store import DurableMandateAuthority
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.observe import run_observe_fixture
-from mox_adv.paired_cycle import execute_paired_direct_test_action
+from mox_adv.paired_cycle import (
+    PairedDirectExecutionOutcomeV1,
+    execute_paired_direct_test_action,
+)
 from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_contracts import OptimizationProposalV1, ProviderMetadata
 from mox_adv.recommend_projection import SanitizedProjection, build_sanitized_projection
@@ -352,33 +355,19 @@ def _execute_simulated_change(
         proposal_store=proposal_store,
         now=now,
     )
-    execution_result = module_outcome.result.execution_result
-    if execution_result is None:
-        errors = module_outcome.result.errors
-        reason = errors[0].code if errors else "DIRECT_MODULE_EXECUTION_FAILED"
-        raise UiRunRejected(
-            reason,
-            "The paired Direct module did not return an execution result.",
-        )
     return (
-        {
-            "status": execution_result.status,
-            "reason_code": (
-                None
-                if not module_outcome.result.errors
-                else module_outcome.result.errors[0].code
+        _paired_execution_payload(
+            module_outcome,
+            approval_id=approval.approval_id,
+            mandate_id=None,
+            action=action.value,
+            before_micros=current_value,
+            after_micros=target_value,
+            relative_step_percent=step,
+            missing_result_message=(
+                "The paired Direct module did not return an execution result."
             ),
-            "approval_id": approval.approval_id,
-            "action": action.value,
-            "before_micros": current_value,
-            "after_micros": target_value,
-            "readback_micros": module_outcome.observed_value,
-            "relative_step_percent": step,
-            "write_calls": module_outcome.write_calls,
-            "external_write_sent": False,
-            "adapter": "SEALED_FAKE",
-            "executor_invoked": True,
-        },
+        ),
         asdict(state.load_approval(approval.approval_id)),
     )
 
@@ -432,33 +421,55 @@ def _execute_bounded_simulated_change(
         mandate_authority=mandate_authority,
         mandate_id=mandate_id,
     )
-    execution_result = module_outcome.result.execution_result
+    return _paired_execution_payload(
+        module_outcome,
+        approval_id=None,
+        mandate_id=mandate_id,
+        action=prepared.action.value,
+        before_micros=prepared.current_value,
+        after_micros=prepared.target_value,
+        relative_step_percent=step,
+        missing_result_message=(
+            "The paired Direct module did not return a Mandate execution result."
+        ),
+    )
+
+
+def _paired_execution_payload(
+    outcome: PairedDirectExecutionOutcomeV1,
+    *,
+    approval_id: str | None,
+    mandate_id: str | None,
+    action: str,
+    before_micros: Any,
+    after_micros: Any,
+    relative_step_percent: int,
+    missing_result_message: str,
+) -> dict[str, Any]:
+    execution_result = outcome.result.execution_result
     if execution_result is None:
-        errors = module_outcome.result.errors
+        errors = outcome.result.errors
         reason = errors[0].code if errors else "DIRECT_MODULE_EXECUTION_FAILED"
-        raise UiRunRejected(
-            reason,
-            "The paired Direct module did not return a Mandate execution result.",
-        )
-    return {
+        raise UiRunRejected(reason, missing_result_message)
+    payload = {
         "status": execution_result.status,
         "reason_code": (
-            None
-            if not module_outcome.result.errors
-            else module_outcome.result.errors[0].code
+            None if not outcome.result.errors else outcome.result.errors[0].code
         ),
-        "approval_id": None,
-        "mandate_id": mandate_id,
-        "action": prepared.action.value,
-        "before_micros": prepared.current_value,
-        "after_micros": prepared.target_value,
-        "readback_micros": module_outcome.observed_value,
-        "relative_step_percent": step,
-        "write_calls": module_outcome.write_calls,
+        "approval_id": approval_id,
+        "action": action,
+        "before_micros": before_micros,
+        "after_micros": after_micros,
+        "readback_micros": outcome.observed_value,
+        "relative_step_percent": relative_step_percent,
+        "write_calls": outcome.write_calls,
         "external_write_sent": False,
         "adapter": "SEALED_FAKE",
         "executor_invoked": True,
     }
+    if mandate_id is not None:
+        payload["mandate_id"] = mandate_id
+    return payload
 
 
 def _not_triggered_execution(

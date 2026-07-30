@@ -1,4 +1,4 @@
-"""Durable idempotency bindings for successful module analysis responses."""
+"""Durable idempotency bindings for replayable module responses."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ class AnalysisReplayConflictError(ValueError):
 
 
 class AnalysisReplayPendingError(RuntimeError):
-    """Another adapter currently owns the provider read for this key."""
+    """Another adapter currently owns the replayable request for this key."""
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ class AnalysisReplayStoreV1(Protocol):
 
 
 class InMemoryAnalysisReplayStoreV1:
-    """Process-local replay store for tests and embedded compositions."""
+    """Process-local replay store for ANALYZE and PLAN compositions."""
 
     def __init__(self) -> None:
         self._records: Dict[
@@ -101,7 +101,7 @@ class InMemoryAnalysisReplayStoreV1:
             if owner_token == claim_token:
                 return None
             raise AnalysisReplayPendingError(
-                "another adapter owns this analysis request"
+                "another adapter owns this replayable request"
             )
 
     def store_response(
@@ -122,7 +122,7 @@ class InMemoryAnalysisReplayStoreV1:
                 or record[1] != claim_token
             ):
                 raise AnalysisReplayConflictError(
-                    "analysis response does not match its idempotency binding"
+                    "module response does not match its idempotency binding"
                 )
             self._records[key] = (
                 request_fingerprint,
@@ -155,7 +155,7 @@ class InMemoryAnalysisReplayStoreV1:
 
 
 class SqliteAnalysisReplayStoreV1:
-    """Persist replayable analysis responses across adapter restarts."""
+    """Persist replayable ANALYZE and PLAN responses across adapter restarts."""
 
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
@@ -231,7 +231,7 @@ class SqliteAnalysisReplayStoreV1:
                     connection.commit()
                     return None
                 raise AnalysisReplayPendingError(
-                    "another adapter owns this analysis request"
+                    "another adapter owns this replayable request"
                 )
             body = json.loads(body_json)
             if not isinstance(body, dict):
@@ -272,7 +272,7 @@ class SqliteAnalysisReplayStoreV1:
                 or row[1] != claim_token
             ):
                 raise AnalysisReplayConflictError(
-                    "analysis response does not match its idempotency binding"
+                    "module response does not match its idempotency binding"
                 )
             connection.execute(
                 """

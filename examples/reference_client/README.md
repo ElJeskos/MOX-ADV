@@ -35,8 +35,8 @@ Repeating the same execution request preserves its idempotency key, and the dura
 The client never automatically retries an `EXECUTE` request after a timeout or lost response.
 The operator must reconcile an uncertain write result through the trusted server-side workflow.
 
-The standalone HTTP host uses `HttpJsonModuleAdapterV1.for_durable_host(...)` with an operator-owned SQLite path so successful read results and in-flight ownership survive restarts.
-Claims do not expire automatically: this prevents a slow provider read from being duplicated after an arbitrary lease timeout.
+The standalone HTTP host uses `HttpJsonModuleAdapterV1.for_durable_host(...)` with an operator-owned SQLite path so successful `ANALYZE` and `PLAN` results and in-flight ownership survive restarts.
+Claims do not expire automatically: this prevents a slow provider read or planning reread from being duplicated after an arbitrary lease timeout.
 After a host crash, an operator must reconcile the provider operation and then call `recover_abandoned_claim(...)` before retrying that key.
 The recovery fingerprint is public and reproducible from the original validated request:
 

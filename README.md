@@ -82,6 +82,8 @@ The paired runtime now invokes `DirectModuleV1` and `MetrikaModuleV1` through `I
 Provider-backed results carry an optional lossless normalized observation with the validated daily grain and Direct state needed by paired analytics.
 The observation contains no credential or arbitrary provider payload and remains absent for customer-supplied aggregate evidence.
 The paired TEST cycle passes its existing sanitized projection and immutable proposal to `DirectModuleV1`, while the module derives the same policy facts, execution key, target validation, Approval or Mandate authority, and sealed fake-adapter readback.
+The final evidence runner supersedes its old internally contradictory synthetic projection and separately fabricated execution facts with one persisted linked TEST snapshot and its derived LLM projection.
+The proposal, deterministic policy decision, exact target, module Decision Record, and fake-adapter readback are all bound to that same snapshot.
 The trusted in-process paired runtime derives the internal `PAIRED_MODULE_RESULT` marker from an integrated snapshot fingerprint; the public HTTP/OpenAPI contract accepts only `CUSTOMER_ECOSYSTEM`, so a customer cannot forge the internal source or supply an arbitrary execution plan or provider request.
 Post-change impact is evaluated through the Direct `EVALUATE_IMPACT` operation and preserves the existing observed-association classification without making a causal claim.
 Each paired Direct execution and impact result persists an immutable module Decision Record below the public run directory.

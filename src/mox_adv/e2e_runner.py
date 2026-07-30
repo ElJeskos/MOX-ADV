@@ -784,6 +784,8 @@ def _analytics_optimization_workflow(
     monitoring_evidence = asdict(monitoring)
     supplemental = {
         "proposal.json": recommendation.proposal.as_dict(),
+        "paired-snapshot.json": dict(paired_snapshot),
+        "llm-projection.json": dict(projection),
         "approval.json": asdict(used_approval),
         "change_diff.json": change_diff,
         "impact_report.json": impact.as_dict(),
@@ -800,11 +802,11 @@ def _analytics_optimization_workflow(
     }
     run_summary = {
         "source": observe_result["source"],
-        "snapshot_id": observe_result["snapshot_id"],
-        "period_start": observe_result["snapshot"]["period_start"],
-        "period_end": observe_result["snapshot"]["period_end"],
-        "provenance": observe_result["snapshot"]["provenance"],
-        "metrics": observe_result["snapshot"]["metrics"],
+        "snapshot_id": paired_snapshot["snapshot_id"],
+        "period_start": paired_snapshot["period_start"],
+        "period_end": paired_snapshot["period_end"],
+        "provenance": paired_snapshot["provenance"],
+        "metrics": paired_snapshot["metrics"],
         "provider": recommendation.provider.provider,
         "model_id": recommendation.provider.model_id,
         "input_tokens": recommendation.provider.input_tokens,

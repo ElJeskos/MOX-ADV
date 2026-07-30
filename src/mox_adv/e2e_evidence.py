@@ -55,10 +55,13 @@ CAPABILITY_EVIDENCE_PATHS = {
         "result.json",
     ),
     "LLM_ANALYSIS": (
+        "paired-snapshot.json",
+        "llm-projection.json",
         "proposal.json",
         "events.jsonl",
     ),
     "APPROVAL_REQUIRED": (
+        "paired-snapshot.json",
         "approval.json",
         "change_diff.json",
         "direct-module-result.json",
@@ -86,6 +89,8 @@ CAPABILITY_EVIDENCE_PATHS = {
     "OPERATIONAL_MODES": (
         "observe-evidence.json",
         "proposal.json",
+        "paired-snapshot.json",
+        "llm-projection.json",
         "approval.json",
         "change_diff.json",
     ),
@@ -109,6 +114,8 @@ CAPABILITY_EVIDENCE_PATHS = {
 REQUIRED_SUPPLEMENTAL_ARTIFACTS = frozenset(
     {
         "proposal.json",
+        "paired-snapshot.json",
+        "llm-projection.json",
         "approval.json",
         "change_diff.json",
         "impact_report.json",
@@ -533,11 +540,28 @@ def _validate_run_summary(
     if any(not execution[field] for field in required_execution):
         raise ValueError("The final E2E execution evidence is empty.")
     proposal = supplemental_artifacts["proposal.json"]
+    paired_snapshot = supplemental_artifacts["paired-snapshot.json"]
+    llm_projection = supplemental_artifacts["llm-projection.json"]
     approval = supplemental_artifacts["approval.json"]
     change_diff = supplemental_artifacts["change_diff.json"]
     impact = supplemental_artifacts["impact_report.json"]
+    paired_campaign = paired_snapshot.get("campaign")
+    paired_metrics = paired_snapshot.get("metrics")
+    if not isinstance(paired_campaign, Mapping) or not isinstance(
+        paired_metrics,
+        Mapping,
+    ):
+        raise ValueError("The final E2E paired snapshot is invalid.")
     if (
         proposal.get("proposal_id") != run_summary["proposal_id"]
+        or proposal.get("snapshot_id") != run_summary["snapshot_id"]
+        or paired_snapshot.get("snapshot_id") != run_summary["snapshot_id"]
+        or paired_metrics != run_summary["metrics"]
+        or llm_projection.get("current_budget")
+        != paired_campaign.get("current_weekly_budget_micros")
+        or llm_projection.get("cost_micros") != paired_metrics.get("cost_micros")
+        or sorted(llm_projection.get("observed_facts", []))
+        != sorted(proposal.get("observed_facts", []))
         or not approval.get("approval_id")
         or approval.get("proposal_id") != run_summary["proposal_id"]
         or not approval.get("used_at")

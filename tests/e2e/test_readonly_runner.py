@@ -20,6 +20,15 @@ class ReadOnlyRunnerTests(unittest.TestCase):
                 (path / "lifecycle-evidence.json").read_text(encoding="utf-8")
             )
             proposal = json.loads((path / "proposal.json").read_text(encoding="utf-8"))
+            paired_snapshot = json.loads(
+                (path / "paired-snapshot.json").read_text(encoding="utf-8")
+            )
+            llm_projection = json.loads(
+                (path / "llm-projection.json").read_text(encoding="utf-8")
+            )
+            change_diff = json.loads(
+                (path / "change_diff.json").read_text(encoding="utf-8")
+            )
             direct_module_result = json.loads(
                 (path / "direct-module-result.json").read_text(encoding="utf-8")
             )
@@ -120,6 +129,44 @@ class ReadOnlyRunnerTests(unittest.TestCase):
         self.assertEqual(
             sorted(proposal["observed_facts"]),
             proposal["observed_facts"],
+        )
+        self.assertEqual(paired_snapshot["snapshot_id"], result["snapshot_id"])
+        self.assertEqual(paired_snapshot["snapshot_id"], proposal["snapshot_id"])
+        self.assertEqual(
+            paired_snapshot["campaign"]["current_weekly_budget_micros"],
+            llm_projection["current_budget"],
+        )
+        self.assertEqual(
+            paired_snapshot["metrics"]["cost_micros"],
+            llm_projection["cost_micros"],
+        )
+        self.assertEqual(
+            sorted(llm_projection["observed_facts"]),
+            proposal["observed_facts"],
+        )
+        self.assertEqual(
+            paired_snapshot["campaign"]["current_weekly_budget_micros"],
+            change_diff["approval_required"]["before"],
+        )
+        direct_metrics = {
+            metric["name"]: metric["value"]
+            for metric in direct_module_result["metrics"]
+        }
+        self.assertEqual(
+            paired_snapshot["metrics"]["cost_micros"],
+            direct_metrics["cost_micros"],
+        )
+        self.assertEqual(
+            change_diff["approval_required"]["before"],
+            direct_metrics["current_weekly_budget_micros"],
+        )
+        self.assertEqual(
+            change_diff["approval_required"]["after"],
+            direct_metrics["target_weekly_budget_micros"],
+        )
+        self.assertEqual(
+            change_diff["approval_required"]["after"],
+            change_diff["approval_required"]["readback"],
         )
         self.assertEqual("APPLIED", lifecycle["campaign_status"])
         self.assertEqual("VERIFIED", lifecycle["goal_technical_status"])

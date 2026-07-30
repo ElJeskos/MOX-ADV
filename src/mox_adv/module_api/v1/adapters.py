@@ -93,10 +93,10 @@ class HttpJsonModuleAdapterV1:
     ) -> None:
         self._module = module
         self._environment = parse_execution_environment(environment)
-        self._analysis_replay_store = analysis_replay_store
-        self._analysis_claim_token = uuid.uuid4().hex
-        self._analysis_inflight: Dict[str, str] = {}
-        self._analysis_replay_lock = threading.Condition()
+        self._replay_store = analysis_replay_store
+        self._replay_claim_token = uuid.uuid4().hex
+        self._replay_inflight: Dict[str, str] = {}
+        self._replay_lock = threading.Condition()
         self.decision_records = (
             InMemoryDecisionRecordStoreV1()
             if decision_records is None
@@ -148,11 +148,11 @@ class HttpJsonModuleAdapterV1:
             )
             return HttpJsonResponseV1(status_code=400, body=result.as_dict())
 
-        if request.operation.kind == "ANALYZE":
-            return self._handle_idempotent_analysis(request)
+        if request.operation.kind in {"ANALYZE", "PLAN"}:
+            return self._handle_idempotent_request(request)
         return self._invoke(request)
 
-    def _handle_idempotent_analysis(
+    def _handle_idempotent_request(
         self,
         request: ModuleRequestV1,
     ) -> HttpJsonResponseV1:
@@ -160,31 +160,31 @@ class HttpJsonModuleAdapterV1:
         fingerprint = analysis_request_fingerprint_v1(request)
         while True:
             try:
-                replay = self._analysis_replay_store.bind_or_read(
+                replay = self._replay_store.bind_or_read(
                     module_id=self._module.identity.module_id,
                     idempotency_key=key,
                     request_fingerprint=fingerprint,
-                    claim_token=self._analysis_claim_token,
+                    claim_token=self._replay_claim_token,
                 )
             except AnalysisReplayConflictError:
                 return self._idempotency_conflict()
             except AnalysisReplayPendingError:
-                with self._analysis_replay_lock:
-                    self._analysis_replay_lock.wait(timeout=0.05)
+                with self._replay_lock:
+                    self._replay_lock.wait(timeout=0.05)
                 continue
             if replay is not None:
                 return HttpJsonResponseV1(
                     status_code=replay.status_code,
                     body=replay.body,
                 )
-            with self._analysis_replay_lock:
-                inflight_fingerprint = self._analysis_inflight.get(key)
+            with self._replay_lock:
+                inflight_fingerprint = self._replay_inflight.get(key)
                 if inflight_fingerprint is None:
-                    self._analysis_inflight[key] = fingerprint
+                    self._replay_inflight[key] = fingerprint
                     break
                 if inflight_fingerprint != fingerprint:
                     return self._idempotency_conflict()
-                self._analysis_replay_lock.wait()
+                self._replay_lock.wait()
 
         try:
             response = self._invoke(request)
@@ -200,11 +200,11 @@ class HttpJsonModuleAdapterV1:
 
         try:
             if _response_is_replayable(response):
-                self._analysis_replay_store.store_response(
+                self._replay_store.store_response(
                     module_id=self._module.identity.module_id,
                     idempotency_key=key,
                     request_fingerprint=fingerprint,
-                    claim_token=self._analysis_claim_token,
+                    claim_token=self._replay_claim_token,
                     response=StoredAnalysisResponseV1(
                         status_code=response.status_code,
                         body=response.body,
@@ -231,17 +231,17 @@ class HttpJsonModuleAdapterV1:
         key: str,
         fingerprint: str,
     ) -> None:
-        self._analysis_replay_store.release_claim(
+        self._replay_store.release_claim(
             module_id=self._module.identity.module_id,
             idempotency_key=key,
             request_fingerprint=fingerprint,
-            claim_token=self._analysis_claim_token,
+            claim_token=self._replay_claim_token,
         )
 
     def _clear_local_analysis_inflight(self, key: str) -> None:
-        with self._analysis_replay_lock:
-            self._analysis_inflight.pop(key, None)
-            self._analysis_replay_lock.notify_all()
+        with self._replay_lock:
+            self._replay_inflight.pop(key, None)
+            self._replay_lock.notify_all()
 
     def _idempotency_conflict(self) -> HttpJsonResponseV1:
         result = ModuleResultV1.rejected_contract(

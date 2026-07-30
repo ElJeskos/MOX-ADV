@@ -1305,7 +1305,9 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 replacement.body["proposal"]["proposal_id"],
             )
             self.assertFalse(replacement.body["proposal"]["deduplicated"])
-            duplicate = http.handle(replacement_request)
+            duplicate_request = direct_action_plan_request()
+            duplicate_request["idempotency_key"] = "after-expiry-deduplicate-18"
+            duplicate = http.handle(duplicate_request)
             self.assertEqual(
                 replacement.body["proposal"]["proposal_id"],
                 duplicate.body["proposal"]["proposal_id"],

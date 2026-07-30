@@ -33,6 +33,24 @@ def sample_artifacts() -> dict[str, dict[str, Any]]:
         "proposal.json": {
             "schema_version": "proposal-v1",
             "proposal_id": "simulated-proposal",
+            "snapshot_id": "snapshot-1",
+            "observed_facts": ["CPA_AT_OR_BELOW_TARGET"],
+        },
+        "paired-snapshot.json": {
+            "snapshot_id": "snapshot-1",
+            "campaign": {
+                "current_weekly_budget_micros": 100,
+            },
+            "metrics": {
+                "clicks": 10,
+                "conversions": 2,
+                "cost_micros": 90,
+            },
+        },
+        "llm-projection.json": {
+            "current_budget": 100,
+            "cost_micros": 90,
+            "observed_facts": ["CPA_AT_OR_BELOW_TARGET"],
         },
         "approval.json": {
             "schema_version": "approval-v1",
@@ -105,7 +123,11 @@ def sample_run_summary() -> dict[str, Any]:
         "period_start": "2026-07-01",
         "period_end": "2026-07-07",
         "provenance": {"direct": "fixture", "metrika": "fixture"},
-        "metrics": {"clicks": 10, "conversions": 2},
+        "metrics": {
+            "clicks": 10,
+            "conversions": 2,
+            "cost_micros": 90,
+        },
         "provider": "deterministic-fake",
         "model_id": "fixture-model-v1",
         "input_tokens": 10,
@@ -390,6 +412,8 @@ class FinalEvidenceTests(unittest.TestCase):
                 "signed-audit-anchor.json",
                 "stability-fingerprint.json",
                 "proposal.json",
+                "paired-snapshot.json",
+                "llm-projection.json",
                 "approval.json",
                 "change_diff.json",
                 "impact_report.json",
