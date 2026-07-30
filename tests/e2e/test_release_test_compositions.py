@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
-from tests.e2e.test_release_distributions import _build_wheel
+from tests.e2e.release_test_support import build_wheel as _build_wheel
 from tests.e2e.test_standalone_direct_module import (
     campaign_creation_module_request,
     campaign_draft_payload,

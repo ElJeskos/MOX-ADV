@@ -35,6 +35,14 @@ jobs:
             'setuptools==75.8.2' \
             'wheel==0.45.1' \
             -r requirements-e2e.txt
+          dependency_wheelhouse="${RUNNER_TEMP}/mox-adv-release-dependencies"
+          mkdir -p "$dependency_wheelhouse"
+          python -m pip download --disable-pip-version-check \
+            --only-binary=:all: \
+            --dest "$dependency_wheelhouse" \
+            -r requirements-release.txt
+          echo "MOX_ADV_RELEASE_DEPENDENCY_WHEELHOUSE=$dependency_wheelhouse" \
+            >> "$GITHUB_ENV"
           python -m playwright install chromium
       - name: Validate scope and knowledge bundle
         run: make verify

@@ -4,6 +4,7 @@ WORKDIR /build
 
 COPY packaging /build/packaging
 COPY scripts/build_release_distributions.py /build/scripts/build_release_distributions.py
+COPY requirements-release.txt /build/requirements-release.txt
 COPY src /build/src
 COPY config /build/config
 COPY fixtures /build/fixtures
@@ -17,8 +18,9 @@ RUN python -m pip install \
     --version 1.0.0 \
     --output-dir /wheelhouse \
     && python -m pip download \
+    --only-binary=:all: \
     --dest /wheelhouse \
-    playwright==1.59.0
+    -r requirements-release.txt
 
 FROM python:3.12-slim
 
@@ -36,7 +38,7 @@ RUN python -m pip install \
     --no-index \
     --find-links /wheelhouse \
     mox-adv-paired==1.0.0 \
-    playwright==1.59.0 \
+    && python -m pip check \
     && rm -rf /wheelhouse
 
 RUN useradd --create-home --uid 10001 moxadv \

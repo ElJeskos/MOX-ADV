@@ -68,7 +68,9 @@ Install each customer deployment in its own virtual environment.
 
 The examples use a local release wheelhouse so installation does not resolve an unintended package from the network.
 
-The paired wheelhouse must contain the verified `playwright==1.59.0` Python distribution and its transitive dependencies in addition to the four MOX-ADV release artifacts.
+The paired wheelhouse must contain every exact Python dependency pinned in `requirements-release.txt` in addition to the four MOX-ADV release artifacts.
+
+The release requirements file is the authoritative complete dependency graph for the paired Python runtime.
 
 The Chromium provisioning command may download a browser, so an offline deployment must pre-populate the supported Playwright browser cache or use its approved internal artifact mirror.
 
@@ -396,20 +398,31 @@ The resulting `release-manifest.json` records the exact wheel filenames and SHA-
 
 The manifest covers the four MOX-ADV artifacts only.
 
-For an install-ready paired offline wheelhouse, download the declared platform-specific Playwright dependency set into the completed directory from the approved package index or mirror.
+For an install-ready paired offline wheelhouse, download the exact platform-specific dependency graph into the completed directory from the approved package index or mirror.
 
 ```shell
 python3 -m pip download \
+  --only-binary=:all: \
   --dest ./wheelhouse-1.0.1 \
-  'playwright==1.59.0'
+  -r requirements-release.txt
 ```
 
 Provision Chromium through the approved Playwright browser mirror or cache described in the clean-install section.
 
-Run the clean-wheel distribution and lifecycle acceptance tests on every supported target.
+Prepare the dependency wheelhouse once before running clean-wheel acceptance locally.
+
+The download is the only network-dependent preparation step.
+
+Every acceptance installation then resolves exclusively from local wheels and runs `pip check`.
 
 ```shell
-PYTHONPATH=src:. python3 -m unittest \
+release_dependency_wheelhouse="$(mktemp -d)"
+python3 -m pip download \
+  --only-binary=:all: \
+  --dest "$release_dependency_wheelhouse" \
+  -r requirements-release.txt
+MOX_ADV_RELEASE_DEPENDENCY_WHEELHOUSE="$release_dependency_wheelhouse" \
+  PYTHONPATH=src:. python3 -m unittest \
   tests.e2e.test_release_distributions \
   tests.e2e.test_release_lifecycle \
   tests.e2e.test_release_production_safety \

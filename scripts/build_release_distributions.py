@@ -22,6 +22,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGING_ROOT = ROOT / "packaging"
+RELEASE_REQUIREMENTS = ROOT / "requirements-release.txt"
 sys.path.insert(0, str(PACKAGING_ROOT))
 
 from release import release_version
@@ -113,6 +114,26 @@ def _normalized_requirement(value: str) -> str:
     return value.replace(" ", "").replace("(", "").replace(")", "")
 
 
+def _release_dependency_versions() -> dict[str, str]:
+    dependencies: dict[str, str] = {}
+    for line in RELEASE_REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+        name, separator, version = line.partition("==")
+        if not separator or not name or not version or name != name.lower():
+            raise RuntimeError(
+                "requirements-release.txt must contain exact normalized pins."
+            )
+        if name in dependencies:
+            raise RuntimeError(
+                "requirements-release.txt must not contain duplicate names."
+            )
+        dependencies[name] = version
+    if "playwright" not in dependencies:
+        raise RuntimeError(
+            "requirements-release.txt must pin the paired Playwright runtime."
+        )
+    return dependencies
+
+
 def _validate(
     wheels: Mapping[str, Path],
     *,
@@ -145,7 +166,7 @@ def _validate(
     expected_paired = {
         "mox-adv-direct==" + version,
         "mox-adv-metrika==" + version,
-        "playwright==1.59.0",
+        "playwright==" + _release_dependency_versions()["playwright"],
     }
     if requirements["paired"] != expected_paired:
         raise RuntimeError(

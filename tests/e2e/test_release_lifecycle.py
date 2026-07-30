@@ -5,7 +5,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
-import os
 import selectors
 import stat
 import subprocess
@@ -23,18 +22,24 @@ from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
+from tests.e2e.release_test_support import (
+    RELEASE_PACKAGES,
+    build_wheel,
+    copy_paired_dependency_wheels,
+)
+from tests.e2e.release_test_support import (
+    create_virtual_environment as _create_venv,
+)
+from tests.e2e.release_test_support import (
+    install_offline as _install,
+)
+from tests.e2e.release_test_support import (
+    release_environment as _release_environment,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
-RELEASE_PACKAGES = ("core", "direct", "metrika", "paired")
 BASE_VERSION = "1.0.0"
 PATCH_VERSION = "1.0.1"
-
-
-def _release_environment(**extra: str) -> dict[str, str]:
-    environment = {
-        name: value for name, value in os.environ.items() if name != "PYTHONPATH"
-    }
-    environment.update(extra)
-    return environment
 
 
 def _build_wheel(
@@ -42,44 +47,14 @@ def _build_wheel(
     version: str,
     destination: Path,
 ) -> Path:
-    build_root = destination / package / version
-    (build_root / "egg-info").mkdir(parents=True)
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "packaging" / package / "setup.py"),
-            "egg_info",
-            "--egg-base",
-            str(build_root / "egg-info"),
-            "build",
-            "--build-base",
-            str(build_root / "build"),
-            "bdist_wheel",
-            "--dist-dir",
-            str(destination),
-            "--bdist-dir",
-            str(build_root / "wheel"),
-        ],
-        cwd=ROOT,
-        env=_release_environment(MOX_ADV_RELEASE_VERSION=version),
-        check=False,
-        capture_output=True,
-        text=True,
+    built = build_wheel(
+        ROOT / "packaging" / package / "setup.py",
+        destination / "release-build" / package / version,
+        version=version,
     )
-    if completed.returncode != 0:
-        raise AssertionError(completed.stderr)
-    matches = tuple(destination.glob(f"*{version}-py3-none-any.whl"))
-    package_prefix = package.replace("-", "_")
-    wheel = tuple(
-        candidate
-        for candidate in matches
-        if candidate.name.startswith("mox_adv_" + package_prefix + "-")
-    )
-    if len(wheel) != 1:
-        raise AssertionError(
-            f"Expected one {package} {version} wheel, found {wheel!r}."
-        )
-    return wheel[0]
+    target = destination / built.name
+    built.replace(target)
+    return target
 
 
 def _wheel_metadata(wheel: Path) -> Message:
@@ -90,76 +65,17 @@ def _wheel_metadata(wheel: Path) -> Message:
         return BytesParser().parsebytes(archive.read(metadata_path))
 
 
-def _create_venv(path: Path) -> None:
-    completed = subprocess.run(
-        [sys.executable, "-m", "venv", str(path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise AssertionError(completed.stderr)
-
-
-def _install(
-    environment: Path,
-    wheelhouse: Path,
-    requirement: str,
-    *,
-    force: bool = False,
-) -> None:
-    command = [
-        str(environment / "bin" / "python"),
-        "-m",
-        "pip",
-        "install",
-        "--quiet",
-        "--no-index",
-        "--find-links",
-        str(wheelhouse),
-    ]
-    if force:
-        command.extend(("--upgrade", "--force-reinstall"))
-    command.append(requirement)
-    completed = subprocess.run(
-        command,
-        env=_release_environment(),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise AssertionError(completed.stderr)
-
-
-def _install_internal_release_set(
+def _install_paired_release_set(
     environment: Path,
     wheelhouse: Path,
     version: str,
 ) -> None:
-    requirements = [f"mox-adv-{package}=={version}" for package in RELEASE_PACKAGES]
-    completed = subprocess.run(
-        [
-            str(environment / "bin" / "python"),
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--no-index",
-            "--find-links",
-            str(wheelhouse),
-            "--no-deps",
-            "--upgrade",
-            "--force-reinstall",
-            *requirements,
-        ],
-        env=_release_environment(),
-        check=False,
-        capture_output=True,
-        text=True,
+    _install(
+        environment,
+        wheelhouse,
+        f"mox-adv-paired=={version}",
+        force=True,
     )
-    if completed.returncode != 0:
-        raise AssertionError(completed.stderr)
 
 
 def _uninstall(environment: Path, *distributions: str) -> None:
@@ -547,6 +463,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 PATCH_VERSION,
                 cls.wheelhouse,
             )
+        copy_paired_dependency_wheels(cls.wheelhouse)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -806,7 +723,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             state_canary.write_text("preserve-me\n", encoding="utf-8")
             _create_venv(environment)
 
-            _install_internal_release_set(
+            _install_paired_release_set(
                 environment,
                 self.wheelhouse,
                 "1.0.0",
@@ -821,7 +738,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 _installed_release_versions(environment),
             )
 
-            _install_internal_release_set(
+            _install_paired_release_set(
                 environment,
                 self.wheelhouse,
                 "1.0.1",
@@ -862,7 +779,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 upgraded_dashboard["production_mode"]["write_requests_allowed"]
             )
 
-            _install_internal_release_set(
+            _install_paired_release_set(
                 environment,
                 self.wheelhouse,
                 "1.0.0",
@@ -923,7 +840,7 @@ class ReleaseLifecycleTests(unittest.TestCase):
             state_canary = state / "customer-owned.txt"
             state_canary.write_text("preserve-me\n", encoding="utf-8")
             _create_venv(environment)
-            _install_internal_release_set(
+            _install_paired_release_set(
                 environment,
                 self.wheelhouse,
                 "1.0.0",

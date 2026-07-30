@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import os
 import selectors
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -21,10 +22,21 @@ from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from playwright.sync_api import sync_playwright
 
 from scripts import build_release_distributions
+from tests.e2e.release_test_support import (
+    RELEASE_DEPENDENCY_WHEELHOUSE_ENV,
+    build_release_wheelhouse,
+    copy_paired_dependency_wheels,
+    create_virtual_environment,
+    install_offline,
+)
+from tests.e2e.release_test_support import (
+    build_wheel as _build_wheel,
+)
 from tests.e2e.test_paired_dashboard_regression import (
     EXISTING_ROUTES,
     PRE_MIGRATION_SCREENSHOT_DIGESTS,
@@ -176,38 +188,6 @@ def _captured_dashboard_process(
         ) from error
     else:
         _terminate_and_capture(process)
-
-
-def _build_wheel(setup_path: Path, destination: Path) -> Path:
-    egg_base = destination / "egg-info"
-    egg_base.mkdir(parents=True)
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(setup_path),
-            "egg_info",
-            "--egg-base",
-            str(egg_base),
-            "build",
-            "--build-base",
-            str(destination / "build"),
-            "bdist_wheel",
-            "--dist-dir",
-            str(destination / "dist"),
-            "--bdist-dir",
-            str(destination / "wheel"),
-        ],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise AssertionError(completed.stderr)
-    wheels = tuple((destination / "dist").glob("*.whl"))
-    if len(wheels) != 1:
-        raise AssertionError(f"Expected one wheel, found {wheels!r}.")
-    return wheels[0]
 
 
 def _installed_paths(wheel: Path) -> set[str]:
@@ -780,42 +760,122 @@ raise SystemExit("lock unexpectedly acquired")
             self.assertNotIn("mox_adv/direct_analysis.py", names)
             self.assertNotIn("mox_adv/metrika_analysis.py", names)
 
+    def test_installed_paired_mandate_cli_loads_packaged_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheelhouse, _wheels = build_release_wheelhouse(
+                root,
+                version="1.0.0",
+                include_paired_dependencies=True,
+            )
+            environment = root / "venv"
+            create_virtual_environment(environment)
+            install_offline(
+                environment,
+                wheelhouse,
+                "mox-adv-paired==1.0.0",
+            )
+            probe = """
+import contextlib
+import io
+import tempfile
+from pathlib import Path
+
+from mox_adv.cli import main
+from mox_adv.control_state import AuthenticatedPrincipal, DurableControlState
+
+
+class FixedAuthenticator:
+    def authenticate(self):
+        return AuthenticatedPrincipal(
+            identity="installed-release-test",
+            authentication="authenticated_macos_user",
+        )
+
+    def elevated_reauthenticate(self):
+        return self.authenticate()
+
+
+with tempfile.TemporaryDirectory() as temporary:
+    error = io.StringIO()
+    with contextlib.redirect_stderr(error):
+        status = main(
+            ["mandate", "activate", "--mandate-id", "missing-mandate"],
+            control_state=DurableControlState(Path(temporary) / "control.sqlite3"),
+            authenticator=FixedAuthenticator(),
+        )
+    detail = error.getvalue()
+    if status != 2 or "MANDATE_NOT_FOUND" not in detail:
+        raise AssertionError(detail)
+"""
+            completed = subprocess.run(
+                [str(environment / "bin" / "python"), "-c", probe],
+                cwd=root,
+                env={
+                    name: value
+                    for name, value in os.environ.items()
+                    if name != "PYTHONPATH"
+                },
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_paired_dependency_wheelhouse_rejects_incomplete_or_extra_graph(
+        self,
+    ) -> None:
+        configured = os.environ.get(RELEASE_DEPENDENCY_WHEELHOUSE_ENV)
+        self.assertIsNotNone(configured)
+        assert configured is not None
+        source_wheels = tuple(sorted(Path(configured).glob("*.whl")))
+        self.assertGreater(len(source_wheels), 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            incomplete = root / "incomplete"
+            incomplete.mkdir()
+            for wheel in source_wheels[:-1]:
+                shutil.copy2(wheel, incomplete / wheel.name)
+            with mock.patch.dict(
+                os.environ,
+                {RELEASE_DEPENDENCY_WHEELHOUSE_ENV: str(incomplete)},
+            ), self.assertRaisesRegex(
+                AssertionError,
+                "exactly match requirements-release.txt",
+            ):
+                copy_paired_dependency_wheels(root / "incomplete-target")
+
+            extra = root / "extra"
+            extra.mkdir()
+            for wheel in source_wheels:
+                shutil.copy2(wheel, extra / wheel.name)
+            shutil.copy2(source_wheels[0], extra / ("extra-" + source_wheels[0].name))
+            with mock.patch.dict(
+                os.environ,
+                {RELEASE_DEPENDENCY_WHEELHOUSE_ENV: str(extra)},
+            ), self.assertRaisesRegex(
+                AssertionError,
+                "exactly match requirements-release.txt",
+            ):
+                copy_paired_dependency_wheels(root / "extra-target")
+
     def test_clean_paired_install_starts_existing_dashboard_on_8878(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            wheelhouse = root / "wheelhouse"
-            wheelhouse.mkdir()
-            for name in ("core", "direct", "metrika", "paired"):
-                wheel = _build_wheel(
-                    ROOT / "packaging" / name / "setup.py",
-                    root / name,
-                )
-                wheel.replace(wheelhouse / wheel.name)
+            wheelhouse, _wheels = build_release_wheelhouse(
+                root,
+                version="1.0.0",
+                include_paired_dependencies=True,
+            )
             environment = root / "venv"
-            subprocess.run(
-                [sys.executable, "-m", "venv", str(environment)],
-                check=True,
-                capture_output=True,
-                text=True,
+            create_virtual_environment(environment)
+            install_offline(
+                environment,
+                wheelhouse,
+                "mox-adv-paired==1.0.0",
             )
-            installed = subprocess.run(
-                [
-                    str(environment / "bin" / "python"),
-                    "-m",
-                    "pip",
-                    "install",
-                    "--quiet",
-                    "--no-deps",
-                    "--no-index",
-                    *(str(wheel) for wheel in sorted(wheelhouse.glob("*.whl"))),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(0, installed.returncode, installed.stderr)
             runtime_environment = {
                 name: value
                 for name, value in os.environ.items()

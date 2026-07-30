@@ -19,8 +19,11 @@ class DockerBoundaryTests(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("scripts/build_release_distributions.py", dockerfile)
+        self.assertIn("COPY requirements-release.txt", dockerfile)
+        self.assertIn("-r requirements-release.txt", dockerfile)
         self.assertIn("mox-adv-paired==1.0.0", dockerfile)
-        self.assertIn("playwright==1.59.0", dockerfile)
+        self.assertIn("python -m pip check", dockerfile)
+        self.assertNotIn("--no-deps", dockerfile)
         self.assertNotIn("pip install --no-cache-dir .", dockerfile)
 
     def test_printed_docker_command_denies_network_and_escalation(self) -> None:

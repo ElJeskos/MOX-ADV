@@ -6,7 +6,6 @@ import json
 import os
 import selectors
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -16,6 +15,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+from tests.e2e.release_test_support import (
+    build_release_wheelhouse,
+    create_virtual_environment,
+    install_offline,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_WRITE_FORBIDDEN = "PRODUCTION_WRITE_FORBIDDEN"
@@ -34,39 +39,6 @@ SENSITIVE_ENVIRONMENT_MARKERS = (
 )
 
 
-def _build_wheel(setup_path: Path, destination: Path) -> Path:
-    destination.mkdir(parents=True)
-    egg_base = destination / "egg-info"
-    egg_base.mkdir()
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(setup_path),
-            "egg_info",
-            "--egg-base",
-            str(egg_base),
-            "build",
-            "--build-base",
-            str(destination / "build"),
-            "bdist_wheel",
-            "--dist-dir",
-            str(destination / "dist"),
-            "--bdist-dir",
-            str(destination / "wheel"),
-        ],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise AssertionError(completed.stderr)
-    wheels = tuple((destination / "dist").glob("*.whl"))
-    if len(wheels) != 1:
-        raise AssertionError(f"Expected one wheel, found {wheels!r}.")
-    return wheels[0]
-
-
 def _install_standalone(
     *,
     root: Path,
@@ -74,32 +46,12 @@ def _install_standalone(
     edition: str,
 ) -> Path:
     environment = root / (edition + "-venv")
-    created = subprocess.run(
-        [sys.executable, "-m", "venv", str(environment)],
-        check=False,
-        capture_output=True,
-        text=True,
+    create_virtual_environment(environment)
+    install_offline(
+        environment,
+        wheelhouse,
+        "mox-adv-" + edition + "==1.0.0",
     )
-    if created.returncode != 0:
-        raise AssertionError(created.stderr)
-    installed = subprocess.run(
-        [
-            str(environment / "bin" / "python"),
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--no-index",
-            "--find-links",
-            str(wheelhouse),
-            "mox-adv-" + edition + "==1.0.0",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if installed.returncode != 0:
-        raise AssertionError(installed.stderr)
     return environment
 
 
@@ -109,31 +61,8 @@ def _install_paired(
     wheelhouse: Path,
 ) -> Path:
     environment = root / "paired-venv"
-    created = subprocess.run(
-        [sys.executable, "-m", "venv", str(environment)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if created.returncode != 0:
-        raise AssertionError(created.stderr)
-    installed = subprocess.run(
-        [
-            str(environment / "bin" / "python"),
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--no-deps",
-            "--no-index",
-            *(str(wheel) for wheel in sorted(wheelhouse.glob("*.whl"))),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if installed.returncode != 0:
-        raise AssertionError(installed.stderr)
+    create_virtual_environment(environment)
+    install_offline(environment, wheelhouse, "mox-adv-paired==1.0.0")
     return environment
 
 
@@ -655,14 +584,11 @@ class ProductionReleaseSafetyTests(unittest.TestCase):
         cls._temporary = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls._temporary.cleanup)
         cls.root = Path(cls._temporary.name)
-        cls.wheelhouse = cls.root / "wheelhouse"
-        cls.wheelhouse.mkdir()
-        for edition in ("core", "direct", "metrika", "paired"):
-            wheel = _build_wheel(
-                ROOT / "packaging" / edition / "setup.py",
-                cls.root / ("build-" + edition),
-            )
-            wheel.replace(cls.wheelhouse / wheel.name)
+        cls.wheelhouse, _ = build_release_wheelhouse(
+            cls.root,
+            version="1.0.0",
+            include_paired_dependencies=True,
+        )
         cls.environments = {
             edition: _install_standalone(
                 root=cls.root,

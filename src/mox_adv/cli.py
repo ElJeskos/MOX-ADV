@@ -22,6 +22,7 @@ from mox_adv.control_state import (
 )
 from mox_adv.observe import run_observe_fixture
 from mox_adv.pipeline import run_fixture
+from mox_adv.runtime_resources import runtime_resource
 
 
 class PrincipalAuthenticator(Protocol):
@@ -189,7 +190,7 @@ def _approval_duration(value: str) -> timedelta:
 
 
 def _load_gate0_policy() -> Mapping[str, Any]:
-    policy_path = Path(__file__).resolve().parents[2] / "config" / "gate0-policy.json"
+    policy_path = runtime_resource("config", "gate0-policy.json")
     try:
         policy = json.loads(policy_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
