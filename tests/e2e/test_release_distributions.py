@@ -781,15 +781,22 @@ import io
 import tempfile
 from pathlib import Path
 
-from mox_adv.cli import main
+from mox_adv.cli import _load_gate0_policy, main
 from mox_adv.control_state import AuthenticatedPrincipal, DurableControlState
+
+policy = _load_gate0_policy()
+mandate_issuer = policy["principals"]["mandate_issuer"]
+identity = mandate_issuer["identity"]
+authentication = mandate_issuer["authentication"]
+if not isinstance(identity, str) or not isinstance(authentication, str):
+    raise AssertionError("Packaged mandate issuer must contain string bindings.")
 
 
 class FixedAuthenticator:
     def authenticate(self):
         return AuthenticatedPrincipal(
-            identity="installed-release-test",
-            authentication="authenticated_macos_user",
+            identity=identity,
+            authentication=authentication,
         )
 
     def elevated_reauthenticate(self):
