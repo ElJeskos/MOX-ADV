@@ -250,7 +250,7 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
     ) -> None:
         implementation = RecordingWriteModule("YANDEX_DIRECT")
         for adapter_type in (
-            HttpJsonModuleAdapterV1,
+            HttpJsonModuleAdapterV1.for_embedded,
             InProcessModuleAdapterV1,
         ):
             adapter_factory: Any = adapter_type
@@ -283,7 +283,7 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
                         environment="PRODUCTION",
                     )
                     if adapter_kind == "HTTP_JSON":
-                        response = HttpJsonModuleAdapterV1(
+                        response = HttpJsonModuleAdapterV1.for_embedded(
                             implementation,
                             environment=ExecutionEnvironment.PRODUCTION,
                             decision_records=records,
@@ -344,7 +344,7 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
             records = InMemoryDecisionRecordStoreV1()
             with self.subTest(adapter=adapter_name):
                 if adapter_name == "HTTP_JSON":
-                    http_adapter = HttpJsonModuleAdapterV1(
+                    http_adapter = HttpJsonModuleAdapterV1.for_embedded(
                         implementation,
                         environment=ExecutionEnvironment.PRODUCTION,
                         decision_records=records,
@@ -352,7 +352,7 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
                     results = [
                         http_adapter.handle(copy.deepcopy(payload)).body,
                         http_adapter.handle(copy.deepcopy(payload)).body,
-                        HttpJsonModuleAdapterV1(
+                        HttpJsonModuleAdapterV1.for_embedded(
                             implementation,
                             environment=ExecutionEnvironment.PRODUCTION,
                             decision_records=records,
@@ -401,7 +401,7 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
         ):
             with self.subTest(module_id=module_id, operation_type=operation_type):
                 implementation = RecordingWriteModule(module_id)
-                response = HttpJsonModuleAdapterV1(
+                response = HttpJsonModuleAdapterV1.for_embedded(
                     implementation,
                     environment=ExecutionEnvironment.TEST,
                 ).handle(

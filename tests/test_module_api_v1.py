@@ -398,7 +398,7 @@ class ModuleAdapterContractTests(unittest.TestCase):
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).invoke(request)
-        http_response = HttpJsonModuleAdapterV1(
+        http_response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request_payload)
@@ -412,7 +412,7 @@ class ModuleAdapterContractTests(unittest.TestCase):
         payload = valid_request_payload()
         payload["oauth_token"] = "must-not-cross-the-boundary"
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(payload)

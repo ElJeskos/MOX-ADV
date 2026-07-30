@@ -6,7 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, List, Mapping, Sequence
+from typing import Any, Dict, FrozenSet, List, Mapping, Sequence, Set, Tuple
+
+REQUEST_DIRECTION = "request"
+RESPONSE_DIRECTION = "response"
+ALL_DIRECTIONS = frozenset({REQUEST_DIRECTION, RESPONSE_DIRECTION})
 
 
 def backward_incompatibilities(
@@ -30,6 +34,7 @@ def backward_incompatibilities(
         findings,
         "candidate",
     )
+    schema_directions = _component_schema_directions(baseline)
     for name, baseline_schema in baseline_schemas.items():
         if name not in candidate_schemas:
             findings.append("removed schema: components.schemas." + name)
@@ -39,7 +44,9 @@ def backward_incompatibilities(
             candidate_schemas[name],
             "components.schemas." + name,
             findings,
+            schema_directions.get(name, ALL_DIRECTIONS),
         )
+    _compare_component_responses(baseline, candidate, findings)
     return sorted(set(findings))
 
 
@@ -103,12 +110,46 @@ def _compare_paths(
                 new_id = candidate_operation.get("operationId")
                 if old_id != new_id:
                     findings.append("changed operationId: " + location)
+                _compare_request_body(
+                    baseline_operation,
+                    candidate_operation,
+                    location,
+                    findings,
+                )
                 _compare_responses(
                     baseline_operation,
                     candidate_operation,
                     location,
                     findings,
                 )
+
+
+def _compare_request_body(
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    location: str,
+    findings: List[str],
+) -> None:
+    old_body = baseline.get("requestBody")
+    if old_body is None:
+        return
+    new_body = candidate.get("requestBody")
+    if not isinstance(old_body, Mapping):
+        if old_body != new_body:
+            findings.append("changed requestBody: " + location)
+        return
+    if not isinstance(new_body, Mapping):
+        findings.append("removed requestBody: " + location)
+        return
+    if old_body.get("required") is not True and new_body.get("required") is True:
+        findings.append("requestBody became required: " + location)
+    _compare_content(
+        old_body,
+        new_body,
+        location + ".requestBody",
+        findings,
+        frozenset({REQUEST_DIRECTION}),
+    )
 
 
 def _compare_responses(
@@ -129,6 +170,96 @@ def _compare_responses(
             findings.append(
                 "removed response " + str(status_code) + ": " + location
             )
+            continue
+        _compare_response(
+            old_responses[status_code],
+            new_responses[status_code],
+            location + ".responses." + str(status_code),
+            findings,
+        )
+
+
+def _compare_component_responses(
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    findings: List[str],
+) -> None:
+    old_responses = _optional_mapping_at(
+        baseline,
+        ("components", "responses"),
+    )
+    new_responses = _optional_mapping_at(
+        candidate,
+        ("components", "responses"),
+    )
+    for name, old_response in old_responses.items():
+        if name not in new_responses:
+            findings.append("removed response component: " + str(name))
+            continue
+        _compare_response(
+            old_response,
+            new_responses[name],
+            "components.responses." + str(name),
+            findings,
+        )
+
+
+def _compare_response(
+    baseline: Any,
+    candidate: Any,
+    location: str,
+    findings: List[str],
+) -> None:
+    if not isinstance(baseline, Mapping):
+        if baseline != candidate:
+            findings.append("changed response: " + location)
+        return
+    if not isinstance(candidate, Mapping):
+        findings.append("response is no longer an object: " + location)
+        return
+    if "$ref" in baseline and candidate.get("$ref") != baseline["$ref"]:
+        findings.append("changed response $ref: " + location)
+    _compare_content(
+        baseline,
+        candidate,
+        location + ".content",
+        findings,
+        frozenset({RESPONSE_DIRECTION}),
+    )
+
+
+def _compare_content(
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    location: str,
+    findings: List[str],
+    directions: FrozenSet[str],
+) -> None:
+    old_content = baseline.get("content")
+    if not isinstance(old_content, Mapping):
+        return
+    new_content = candidate.get("content")
+    if not isinstance(new_content, Mapping):
+        findings.append("removed content: " + location)
+        return
+    for media_type, old_media in old_content.items():
+        new_media = new_content.get(media_type)
+        media_location = location + "." + str(media_type)
+        if not isinstance(old_media, Mapping):
+            if old_media != new_media:
+                findings.append("changed media type: " + media_location)
+            continue
+        if not isinstance(new_media, Mapping):
+            findings.append("removed media type: " + media_location)
+            continue
+        if "schema" in old_media:
+            _compare_schema(
+                old_media["schema"],
+                new_media.get("schema"),
+                media_location + ".schema",
+                findings,
+                directions,
+            )
 
 
 def _compare_schema(
@@ -136,6 +267,7 @@ def _compare_schema(
     candidate: Any,
     location: str,
     findings: List[str],
+    directions: FrozenSet[str],
 ) -> None:
     if not isinstance(baseline, Mapping):
         if baseline != candidate:
@@ -145,7 +277,7 @@ def _compare_schema(
         findings.append("schema is no longer an object: " + location)
         return
 
-    for exact_field in ("$ref", "const", "type", "pattern"):
+    for exact_field in ("$ref", "const", "type", "pattern", "format"):
         if (
             exact_field in baseline
             and candidate.get(exact_field) != baseline[exact_field]
@@ -156,22 +288,52 @@ def _compare_schema(
 
     old_enum = baseline.get("enum")
     new_enum = candidate.get("enum")
-    if isinstance(old_enum, list):
-        if not isinstance(new_enum, list) or not set(old_enum).issubset(new_enum):
-            findings.append("removed enum value: " + location)
+    if isinstance(old_enum, list) and new_enum != old_enum:
+        findings.append("changed enum values: " + location)
 
     old_required = baseline.get("required", [])
     new_required = candidate.get("required", [])
     if isinstance(old_required, list) and isinstance(new_required, list):
         added_required = sorted(set(new_required) - set(old_required))
-        for field in added_required:
-            findings.append(
-                "new required field " + str(field) + ": " + location
-            )
+        removed_required = sorted(set(old_required) - set(new_required))
+        if REQUEST_DIRECTION in directions:
+            for field in added_required:
+                findings.append(
+                    "new required request field "
+                    + str(field)
+                    + ": "
+                    + location
+                )
+        if RESPONSE_DIRECTION in directions:
+            for field in removed_required:
+                findings.append(
+                    "removed required response field "
+                    + str(field)
+                    + ": "
+                    + location
+                )
 
-    _compare_bounds(baseline, candidate, location, findings)
-    _compare_properties(baseline, candidate, location, findings)
-    _compare_items(baseline, candidate, location, findings)
+    _compare_bounds(
+        baseline,
+        candidate,
+        location,
+        findings,
+        directions,
+    )
+    _compare_properties(
+        baseline,
+        candidate,
+        location,
+        findings,
+        directions,
+    )
+    _compare_items(
+        baseline,
+        candidate,
+        location,
+        findings,
+        directions,
+    )
     for branch_name in ("oneOf", "anyOf", "allOf"):
         _compare_branches(
             baseline,
@@ -179,6 +341,7 @@ def _compare_schema(
             branch_name,
             location,
             findings,
+            directions,
         )
 
 
@@ -187,25 +350,50 @@ def _compare_bounds(
     candidate: Mapping[str, Any],
     location: str,
     findings: List[str],
+    directions: FrozenSet[str],
 ) -> None:
     for field in ("minimum", "minLength", "minItems"):
         old = baseline.get(field)
         new = candidate.get(field)
-        if isinstance(new, (int, float)) and (
-            not isinstance(old, (int, float)) or new > old
-        ):
+        if REQUEST_DIRECTION in directions and isinstance(
+            new,
+            (int, float),
+        ) and (not isinstance(old, (int, float)) or new > old):
             findings.append("tightened " + field + ": " + location)
+        if RESPONSE_DIRECTION in directions and isinstance(
+            old,
+            (int, float),
+        ) and (not isinstance(new, (int, float)) or new < old):
+            findings.append(
+                "relaxed response " + field + ": " + location
+            )
     for field in ("maximum", "maxLength", "maxItems"):
         old = baseline.get(field)
         new = candidate.get(field)
-        if isinstance(new, (int, float)) and (
-            not isinstance(old, (int, float)) or new < old
-        ):
+        if REQUEST_DIRECTION in directions and isinstance(
+            new,
+            (int, float),
+        ) and (not isinstance(old, (int, float)) or new < old):
             findings.append("tightened " + field + ": " + location)
-    if baseline.get("additionalProperties", True) is not False and (
+        if RESPONSE_DIRECTION in directions and isinstance(
+            old,
+            (int, float),
+        ) and (not isinstance(new, (int, float)) or new > old):
+            findings.append(
+                "relaxed response " + field + ": " + location
+            )
+    if REQUEST_DIRECTION in directions and (
+        baseline.get("additionalProperties", True) is not False
+    ) and (
         candidate.get("additionalProperties") is False
     ):
         findings.append("closed additionalProperties: " + location)
+    if RESPONSE_DIRECTION in directions and (
+        baseline.get("additionalProperties") is False
+    ) and candidate.get("additionalProperties", True) is not False:
+        findings.append(
+            "opened response additionalProperties: " + location
+        )
 
 
 def _compare_properties(
@@ -213,6 +401,7 @@ def _compare_properties(
     candidate: Mapping[str, Any],
     location: str,
     findings: List[str],
+    directions: FrozenSet[str],
 ) -> None:
     old_properties = baseline.get("properties")
     new_properties = candidate.get("properties")
@@ -230,6 +419,7 @@ def _compare_properties(
             new_properties[name],
             location + ".properties." + str(name),
             findings,
+            directions,
         )
 
 
@@ -238,6 +428,7 @@ def _compare_items(
     candidate: Mapping[str, Any],
     location: str,
     findings: List[str],
+    directions: FrozenSet[str],
 ) -> None:
     if "items" in baseline:
         _compare_schema(
@@ -245,6 +436,7 @@ def _compare_items(
             candidate.get("items"),
             location + ".items",
             findings,
+            directions,
         )
 
 
@@ -254,6 +446,7 @@ def _compare_branches(
     branch_name: str,
     location: str,
     findings: List[str],
+    directions: FrozenSet[str],
 ) -> None:
     old_branches = baseline.get(branch_name)
     if not isinstance(old_branches, list):
@@ -270,7 +463,78 @@ def _compare_branches(
             new_branches[index],
             location + "." + branch_name + "[" + str(index) + "]",
             findings,
+            directions,
         )
+
+
+def _component_schema_directions(
+    document: Mapping[str, Any],
+) -> Dict[str, FrozenSet[str]]:
+    """Trace whether each component schema is consumed or produced."""
+
+    components = _optional_mapping_at(document, ("components",))
+    schemas = _optional_mapping_at(document, ("components", "schemas"))
+    mutable_directions: Dict[str, Set[str]] = {}
+    visited: Set[Tuple[str, str]] = set()
+
+    def walk(value: Any, direction: str) -> None:
+        if isinstance(value, list):
+            for item in value:
+                walk(item, direction)
+            return
+        if not isinstance(value, Mapping):
+            return
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/components/"):
+            parts = reference.split("/")
+            if len(parts) == 4:
+                component_kind = parts[2]
+                component_name = parts[3]
+                visit_key = (reference, direction)
+                if visit_key not in visited:
+                    visited.add(visit_key)
+                    if component_kind == "schemas":
+                        mutable_directions.setdefault(
+                            component_name,
+                            set(),
+                        ).add(direction)
+                        walk(schemas.get(component_name), direction)
+                    else:
+                        component_group = components.get(component_kind)
+                        if isinstance(component_group, Mapping):
+                            walk(
+                                component_group.get(component_name),
+                                direction,
+                            )
+        for child in value.values():
+            walk(child, direction)
+
+    paths = _optional_mapping_at(document, ("paths",))
+    for path_item in paths.values():
+        if not isinstance(path_item, Mapping):
+            continue
+        for method, operation in path_item.items():
+            if method not in {
+                "get",
+                "put",
+                "post",
+                "delete",
+                "options",
+                "head",
+                "patch",
+                "trace",
+            } or not isinstance(operation, Mapping):
+                continue
+            walk(operation.get("requestBody"), REQUEST_DIRECTION)
+            responses = operation.get("responses")
+            if isinstance(responses, Mapping):
+                for response in responses.values():
+                    walk(response, RESPONSE_DIRECTION)
+
+    return {
+        name: frozenset(directions)
+        for name, directions in mutable_directions.items()
+    }
 
 
 def _mapping_at(
@@ -289,6 +553,18 @@ def _mapping_at(
         findings.append(label + " " + ".".join(path) + " is not an object")
         return {}
     return value
+
+
+def _optional_mapping_at(
+    document: Mapping[str, Any],
+    path: Sequence[str],
+) -> Mapping[str, Any]:
+    value: Any = document
+    for part in path:
+        if not isinstance(value, Mapping):
+            return {}
+        value = value.get(part)
+    return value if isinstance(value, Mapping) else {}
 
 
 def _major(value: Any) -> Any:

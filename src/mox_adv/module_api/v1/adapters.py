@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import threading
-from collections import OrderedDict
+import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Protocol, Tuple
+from pathlib import Path
+from typing import Any, Dict, Mapping, Optional, Protocol
 
 from mox_adv.environment import (
     ExecutionEnvironment,
@@ -23,6 +23,14 @@ from mox_adv.module_api.v1.contracts import (
 from mox_adv.module_api.v1.decision_records import (
     InMemoryDecisionRecordStoreV1,
     ModuleDecisionRecordStoreV1,
+)
+from mox_adv.module_api.v1.replay_store import (
+    AnalysisReplayConflictError,
+    AnalysisReplayPendingError,
+    AnalysisReplayStoreV1,
+    InMemoryAnalysisReplayStoreV1,
+    SqliteAnalysisReplayStoreV1,
+    StoredAnalysisResponseV1,
 )
 
 
@@ -81,23 +89,53 @@ class HttpJsonModuleAdapterV1:
         *,
         environment: ExecutionEnvironment,
         decision_records: Optional[ModuleDecisionRecordStoreV1] = None,
-        analysis_replay_limit: int = 1024,
+        analysis_replay_store: AnalysisReplayStoreV1,
     ) -> None:
-        if analysis_replay_limit < 1:
-            raise ValueError("analysis_replay_limit must be at least one.")
         self._module = module
         self._environment = parse_execution_environment(environment)
-        self._analysis_replay_limit = analysis_replay_limit
-        self._analysis_replays: OrderedDict[
-            str,
-            Tuple[str, HttpJsonResponseV1],
-        ] = OrderedDict()
+        self._analysis_replay_store = analysis_replay_store
+        self._analysis_claim_token = uuid.uuid4().hex
         self._analysis_inflight: Dict[str, str] = {}
         self._analysis_replay_lock = threading.Condition()
         self.decision_records = (
             InMemoryDecisionRecordStoreV1()
             if decision_records is None
             else decision_records
+        )
+
+    @classmethod
+    def for_embedded(
+        cls,
+        module: ModuleV1,
+        *,
+        environment: ExecutionEnvironment,
+        decision_records: Optional[ModuleDecisionRecordStoreV1] = None,
+    ) -> "HttpJsonModuleAdapterV1":
+        """Compose an explicitly process-local adapter for tests/embedding."""
+
+        return cls(
+            module,
+            environment=environment,
+            decision_records=decision_records,
+            analysis_replay_store=InMemoryAnalysisReplayStoreV1(),
+        )
+
+    @classmethod
+    def for_durable_host(
+        cls,
+        module: ModuleV1,
+        *,
+        environment: ExecutionEnvironment,
+        replay_path: Path,
+        decision_records: Optional[ModuleDecisionRecordStoreV1] = None,
+    ) -> "HttpJsonModuleAdapterV1":
+        """Compose the production/reference HTTP path with durable replay."""
+
+        return cls(
+            module,
+            environment=environment,
+            decision_records=decision_records,
+            analysis_replay_store=SqliteAnalysisReplayStoreV1(replay_path),
         )
 
     def handle(self, payload: Mapping[str, Any]) -> HttpJsonResponseV1:
@@ -119,16 +157,27 @@ class HttpJsonModuleAdapterV1:
         request: ModuleRequestV1,
     ) -> HttpJsonResponseV1:
         key = request.idempotency_key
-        fingerprint = _request_fingerprint(request)
-        with self._analysis_replay_lock:
-            while True:
-                replay = self._analysis_replays.get(key)
-                if replay is not None:
-                    replay_fingerprint, response = replay
-                    if replay_fingerprint != fingerprint:
-                        return self._idempotency_conflict()
-                    self._analysis_replays.move_to_end(key)
-                    return copy.deepcopy(response)
+        fingerprint = analysis_request_fingerprint_v1(request)
+        while True:
+            try:
+                replay = self._analysis_replay_store.bind_or_read(
+                    module_id=self._module.identity.module_id,
+                    idempotency_key=key,
+                    request_fingerprint=fingerprint,
+                    claim_token=self._analysis_claim_token,
+                )
+            except AnalysisReplayConflictError:
+                return self._idempotency_conflict()
+            except AnalysisReplayPendingError:
+                with self._analysis_replay_lock:
+                    self._analysis_replay_lock.wait(timeout=0.05)
+                continue
+            if replay is not None:
+                return HttpJsonResponseV1(
+                    status_code=replay.status_code,
+                    body=replay.body,
+                )
+            with self._analysis_replay_lock:
                 inflight_fingerprint = self._analysis_inflight.get(key)
                 if inflight_fingerprint is None:
                     self._analysis_inflight[key] = fingerprint
@@ -140,25 +189,59 @@ class HttpJsonModuleAdapterV1:
         try:
             response = self._invoke(request)
         except BaseException:
-            with self._analysis_replay_lock:
-                self._analysis_inflight.pop(key, None)
-                self._analysis_replay_lock.notify_all()
+            try:
+                self._release_analysis_claim(
+                    key=key,
+                    fingerprint=fingerprint,
+                )
+            finally:
+                self._clear_local_analysis_inflight(key)
             raise
 
-        with self._analysis_replay_lock:
+        try:
             if _response_is_replayable(response):
-                self._analysis_replays[key] = (
-                    fingerprint,
-                    copy.deepcopy(response),
+                self._analysis_replay_store.store_response(
+                    module_id=self._module.identity.module_id,
+                    idempotency_key=key,
+                    request_fingerprint=fingerprint,
+                    claim_token=self._analysis_claim_token,
+                    response=StoredAnalysisResponseV1(
+                        status_code=response.status_code,
+                        body=response.body,
+                    ),
                 )
-                self._analysis_replays.move_to_end(key)
-                while (
-                    len(self._analysis_replays) > self._analysis_replay_limit
-                ):
-                    self._analysis_replays.popitem(last=False)
+            else:
+                self._release_analysis_claim(
+                    key=key,
+                    fingerprint=fingerprint,
+                )
+        except BaseException:
+            self._release_analysis_claim(
+                key=key,
+                fingerprint=fingerprint,
+            )
+            raise
+        finally:
+            self._clear_local_analysis_inflight(key)
+        return response
+
+    def _release_analysis_claim(
+        self,
+        *,
+        key: str,
+        fingerprint: str,
+    ) -> None:
+        self._analysis_replay_store.release_claim(
+            module_id=self._module.identity.module_id,
+            idempotency_key=key,
+            request_fingerprint=fingerprint,
+            claim_token=self._analysis_claim_token,
+        )
+
+    def _clear_local_analysis_inflight(self, key: str) -> None:
+        with self._analysis_replay_lock:
             self._analysis_inflight.pop(key, None)
             self._analysis_replay_lock.notify_all()
-        return response
 
     def _idempotency_conflict(self) -> HttpJsonResponseV1:
         result = ModuleResultV1.rejected_contract(
@@ -194,7 +277,9 @@ class HttpJsonModuleAdapterV1:
         )
 
 
-def _request_fingerprint(request: ModuleRequestV1) -> str:
+def analysis_request_fingerprint_v1(request: ModuleRequestV1) -> str:
+    """Return the public canonical fingerprint used by recovery tooling."""
+
     canonical = json.dumps(
         request.as_dict(),
         ensure_ascii=True,

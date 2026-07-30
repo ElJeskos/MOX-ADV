@@ -15,6 +15,7 @@ from examples.reference_client.requests import (
     direct_execute_proposal,
     direct_plan_intent,
     direct_provider_read,
+    invalid_direct_customer_evidence,
     metrika_provider_read,
 )
 from mox_adv.control_state import AuthenticatedPrincipal, DurableControlState
@@ -41,6 +42,8 @@ OPENAPI_PATH = ROOT / "openapi" / "module-api-v1.openapi.json"
 class _ModuleApiServer:
     def __init__(self, adapter: HttpJsonModuleAdapterV1) -> None:
         self._adapter = adapter
+        self._request_count = 0
+        self._request_condition = threading.Condition()
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -50,6 +53,7 @@ class _ModuleApiServer:
                     return
                 length = int(self.headers["Content-Length"])
                 payload = json.loads(self.rfile.read(length))
+                owner._record_request()
                 response = owner._adapter.handle(payload)
                 body = json.dumps(response.body).encode("utf-8")
                 self.send_response(response.status_code)
@@ -83,6 +87,18 @@ class _ModuleApiServer:
         self._server.server_close()
         self._thread.join()
 
+    def wait_for_requests(self, count: int, timeout: float = 5.0) -> bool:
+        with self._request_condition:
+            return self._request_condition.wait_for(
+                lambda: self._request_count >= count,
+                timeout=timeout,
+            )
+
+    def _record_request(self) -> None:
+        with self._request_condition:
+            self._request_count += 1
+            self._request_condition.notify_all()
+
 
 class _OneTransientFailureMetrikaReader(RecordingAuthorizedMetrikaReader):
     def __init__(self) -> None:
@@ -96,12 +112,29 @@ class _OneTransientFailureMetrikaReader(RecordingAuthorizedMetrikaReader):
         return super().read_metrika_report(connection_id, query)
 
 
+class _CoordinatedMetrikaReader(RecordingAuthorizedMetrikaReader):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.attempts = 0
+        self._attempt_lock = threading.Lock()
+
+    def read_metrika_report(self, connection_id: str, query: Any) -> Any:
+        with self._attempt_lock:
+            self.attempts += 1
+        self.started.set()
+        if not self.release.wait(timeout=5.0):
+            raise RuntimeError("concurrent replay test timed out")
+        return super().read_metrika_report(connection_id, query)
+
+
 class ReferenceHttpClientE2ETests(unittest.TestCase):
     def test_calls_standalone_metrika_over_real_http_and_consumes_v1_result(
         self,
     ) -> None:
         reader = RecordingAuthorizedMetrikaReader()
-        adapter = HttpJsonModuleAdapterV1(
+        adapter = HttpJsonModuleAdapterV1.for_embedded(
             MetrikaModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -134,7 +167,7 @@ class ReferenceHttpClientE2ETests(unittest.TestCase):
         self,
     ) -> None:
         reader = RecordingAuthorizedMetrikaReader()
-        adapter = HttpJsonModuleAdapterV1(
+        adapter = HttpJsonModuleAdapterV1.for_embedded(
             MetrikaModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -162,9 +195,146 @@ class ReferenceHttpClientE2ETests(unittest.TestCase):
         self.assertEqual(first.body, retried.body)
         self.assertEqual(1, len(reader.calls))
 
+    def test_http_read_replay_survives_adapter_restart(self) -> None:
+        reader = RecordingAuthorizedMetrikaReader()
+        openapi = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+        payload = metrika_provider_read()
+        with tempfile.TemporaryDirectory() as temporary:
+            replay_path = Path(temporary) / "analysis-replays.sqlite3"
+
+            first_adapter = HttpJsonModuleAdapterV1.for_durable_host(
+                MetrikaModuleV1(
+                    clock=lambda: datetime(
+                        2026,
+                        7,
+                        30,
+                        12,
+                        0,
+                        tzinfo=timezone.utc,
+                    ),
+                    provider_reader=reader,
+                ),
+                environment=ExecutionEnvironment.PRODUCTION,
+                replay_path=replay_path,
+            )
+            with _ModuleApiServer(first_adapter) as server:
+                first = ModuleHttpClientV1.from_openapi(
+                    base_url=server.base_url,
+                    document=openapi,
+                ).invoke(payload)
+
+            restarted_adapter = HttpJsonModuleAdapterV1.for_durable_host(
+                MetrikaModuleV1(
+                    clock=lambda: datetime(
+                        2026,
+                        7,
+                        30,
+                        12,
+                        1,
+                        tzinfo=timezone.utc,
+                    ),
+                    provider_reader=reader,
+                ),
+                environment=ExecutionEnvironment.PRODUCTION,
+                replay_path=replay_path,
+            )
+            with _ModuleApiServer(restarted_adapter) as server:
+                replayed = ModuleHttpClientV1.from_openapi(
+                    base_url=server.base_url,
+                    document=openapi,
+                ).invoke(payload)
+
+        self.assertEqual(first.body, replayed.body)
+        self.assertEqual(1, len(reader.calls))
+
+    def test_concurrent_same_key_uses_one_durable_provider_read(self) -> None:
+        reader = _CoordinatedMetrikaReader()
+        openapi = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+        payload = metrika_provider_read()
+        results: list[dict[str, Any]] = []
+        errors: list[BaseException] = []
+        result_lock = threading.Lock()
+        with tempfile.TemporaryDirectory() as temporary:
+            replay_path = Path(temporary) / "analysis-replays.sqlite3"
+            first_adapter = HttpJsonModuleAdapterV1.for_durable_host(
+                MetrikaModuleV1(
+                    clock=lambda: datetime(
+                        2026,
+                        7,
+                        30,
+                        12,
+                        0,
+                        tzinfo=timezone.utc,
+                    ),
+                    provider_reader=reader,
+                ),
+                environment=ExecutionEnvironment.PRODUCTION,
+                replay_path=replay_path,
+            )
+            second_adapter = HttpJsonModuleAdapterV1.for_durable_host(
+                MetrikaModuleV1(
+                    clock=lambda: datetime(
+                        2026,
+                        7,
+                        30,
+                        12,
+                        1,
+                        tzinfo=timezone.utc,
+                    ),
+                    provider_reader=reader,
+                ),
+                environment=ExecutionEnvironment.PRODUCTION,
+                replay_path=replay_path,
+            )
+            with (
+                _ModuleApiServer(first_adapter) as first_server,
+                _ModuleApiServer(second_adapter) as second_server,
+            ):
+                first_client = ModuleHttpClientV1.from_openapi(
+                    base_url=first_server.base_url,
+                    document=openapi,
+                )
+                second_client = ModuleHttpClientV1.from_openapi(
+                    base_url=second_server.base_url,
+                    document=openapi,
+                )
+
+                def invoke(client: ModuleHttpClientV1) -> None:
+                    try:
+                        body = dict(client.invoke(payload).body)
+                        with result_lock:
+                            results.append(body)
+                    except BaseException as raised:
+                        with result_lock:
+                            errors.append(raised)
+
+                first_thread = threading.Thread(
+                    target=invoke,
+                    args=(first_client,),
+                )
+                second_thread = threading.Thread(
+                    target=invoke,
+                    args=(second_client,),
+                )
+                first_thread.start()
+                self.assertTrue(reader.started.wait(timeout=5.0))
+                second_thread.start()
+                self.assertTrue(second_server.wait_for_requests(1))
+                reader.release.set()
+                first_thread.join(timeout=5.0)
+                second_thread.join(timeout=5.0)
+                self.assertFalse(first_thread.is_alive())
+                self.assertFalse(second_thread.is_alive())
+
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(1, reader.attempts)
+        self.assertEqual(1, len(reader.calls))
+
     def test_http_read_idempotency_key_cannot_be_rebound(self) -> None:
         reader = RecordingAuthorizedMetrikaReader()
-        adapter = HttpJsonModuleAdapterV1(
+        adapter = HttpJsonModuleAdapterV1.for_embedded(
             MetrikaModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -206,7 +376,7 @@ class ReferenceHttpClientE2ETests(unittest.TestCase):
         self,
     ) -> None:
         reader = _OneTransientFailureMetrikaReader()
-        adapter = HttpJsonModuleAdapterV1(
+        adapter = HttpJsonModuleAdapterV1.for_embedded(
             MetrikaModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -241,7 +411,7 @@ class ReferenceHttpClientE2ETests(unittest.TestCase):
         self,
     ) -> None:
         reader = RecordingAuthorizedDirectReader()
-        adapter = HttpJsonModuleAdapterV1(
+        adapter = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -272,7 +442,7 @@ class ReferenceHttpClientE2ETests(unittest.TestCase):
     def test_submits_customer_evidence_and_consumes_provenance_and_typed_error(
         self,
     ) -> None:
-        adapter = HttpJsonModuleAdapterV1(
+        adapter = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -293,9 +463,7 @@ class ReferenceHttpClientE2ETests(unittest.TestCase):
                 document=openapi,
             )
             result = client.invoke(direct_customer_evidence())
-            invalid = direct_customer_evidence()
-            invalid["oauth_token"] = "must-not-cross-the-contract"
-            rejected = client.invoke(invalid)
+            rejected = client.invoke(invalid_direct_customer_evidence())
 
         provenance = result.body["provenance"]
         self.assertEqual("SUCCEEDED", result.status)
@@ -310,10 +478,7 @@ class ReferenceHttpClientE2ETests(unittest.TestCase):
             rejected.errors[0].code,
         )
         self.assertFalse(rejected.errors[0].retryable)
-        self.assertNotIn(
-            "must-not-cross-the-contract",
-            rejected.errors[0].message,
-        )
+        self.assertIn("external_evidence.source", rejected.errors[0].message)
 
     def test_production_direct_intent_returns_proposal_then_dry_run_only(
         self,
@@ -337,7 +502,7 @@ class ReferenceHttpClientE2ETests(unittest.TestCase):
                 test_adapter=None,
                 environment=ExecutionEnvironment.PRODUCTION,
             )
-            adapter = HttpJsonModuleAdapterV1(
+            adapter = HttpJsonModuleAdapterV1.for_embedded(
                 DirectModuleV1(
                     clock=lambda: now,
                     provider_reader=ActionAuthorizedDirectReader(),
@@ -401,7 +566,7 @@ class ReferenceHttpClientE2ETests(unittest.TestCase):
                 test_adapter=write_adapter,
                 environment=ExecutionEnvironment.TEST,
             )
-            adapter = HttpJsonModuleAdapterV1(
+            adapter = HttpJsonModuleAdapterV1.for_embedded(
                 DirectModuleV1(
                     clock=lambda: now,
                     provider_reader=ActionAuthorizedDirectReader(),

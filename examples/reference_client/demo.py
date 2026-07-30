@@ -13,6 +13,7 @@ from examples.reference_client.requests import (
     direct_execute_proposal,
     direct_plan_intent,
     direct_provider_read,
+    invalid_direct_customer_evidence,
     metrika_provider_read,
 )
 
@@ -46,6 +47,9 @@ def run(
         "direct_provider_read": direct.invoke(direct_provider_read()).body,
         "direct_customer_evidence": direct.invoke(
             direct_customer_evidence()
+        ).body,
+        "direct_validation_error": direct.invoke(
+            invalid_direct_customer_evidence()
         ).body,
     }
     planned = direct.invoke(direct_plan_intent(environment=environment))

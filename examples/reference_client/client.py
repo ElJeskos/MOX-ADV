@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import socket
 from dataclasses import dataclass
-from typing import Any, List, Mapping, Optional
+from typing import Any, List, Mapping, Optional, Tuple
 from urllib import error, request
 
 
@@ -55,7 +55,15 @@ class ModuleResultEnvelopeV1:
     module_id: str
     module_version: str
     status: str
+    metrics: Tuple[Mapping[str, Any], ...]
+    assessment: Optional[Mapping[str, Any]]
+    recommendations: Tuple[Mapping[str, Any], ...]
+    provenance: Tuple[Mapping[str, Any], ...]
+    warnings: Tuple[Mapping[str, Any], ...]
     errors: List[TypedModuleErrorV1]
+    proposal: Optional[Mapping[str, Any]]
+    execution_result: Optional[Mapping[str, Any]]
+    decision_record_ref: Optional[str]
     body: Mapping[str, Any]
 
     @classmethod
@@ -77,7 +85,24 @@ class ModuleResultEnvelopeV1:
         run_id = value.get("run_id")
         module = value.get("module")
         status = value.get("status")
+        metrics = _object_array(value.get("metrics"), "metrics")
+        assessment = _optional_object(
+            value.get("assessment"),
+            "assessment",
+        )
+        recommendations = _object_array(
+            value.get("recommendations"),
+            "recommendations",
+        )
+        provenance = _object_array(value.get("provenance"), "provenance")
+        warnings = _object_array(value.get("warnings"), "warnings")
         raw_errors = value.get("errors")
+        proposal = _optional_object(value.get("proposal"), "proposal")
+        execution_result = _optional_object(
+            value.get("execution_result"),
+            "execution_result",
+        )
+        decision_record_ref = value.get("decision_record_ref")
         if not isinstance(run_id, str) or not run_id:
             raise ModuleTransportError("Module result run_id is missing.")
         if not isinstance(module, Mapping):
@@ -98,6 +123,17 @@ class ModuleResultEnvelopeV1:
             raise ModuleTransportError("Module result status is unsupported.")
         if not isinstance(raw_errors, list):
             raise ModuleTransportError("Module result errors must be an array.")
+        if decision_record_ref is not None and not isinstance(
+            decision_record_ref,
+            str,
+        ):
+            raise ModuleTransportError(
+                "Module result decision_record_ref must be a string or null."
+            )
+        if proposal is not None and execution_result is not None:
+            raise ModuleTransportError(
+                "Module result cannot contain proposal and execution_result."
+            )
         parsed_errors = [
             TypedModuleErrorV1.from_dict(item)
             for item in raw_errors
@@ -107,15 +143,56 @@ class ModuleResultEnvelopeV1:
             raise ModuleTransportError(
                 "Module result errors must contain JSON objects."
             )
+        if status in {"BLOCKED", "REJECTED", "FAILED"} and not parsed_errors:
+            raise ModuleTransportError(
+                "A non-successful module result must contain a typed error."
+            )
         return cls(
             schema_version=schema_version,
             run_id=run_id,
             module_id=module_id,
             module_version=module_version,
             status=status,
+            metrics=metrics,
+            assessment=assessment,
+            recommendations=recommendations,
+            provenance=provenance,
+            warnings=warnings,
             errors=parsed_errors,
+            proposal=proposal,
+            execution_result=execution_result,
+            decision_record_ref=decision_record_ref,
             body=dict(value),
         )
+
+
+def _object_array(
+    value: Any,
+    field: str,
+) -> Tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, list):
+        raise ModuleTransportError("Module result " + field + " must be an array.")
+    objects = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ModuleTransportError(
+                "Module result " + field + " must contain JSON objects."
+            )
+        objects.append(dict(item))
+    return tuple(objects)
+
+
+def _optional_object(
+    value: Any,
+    field: str,
+) -> Optional[Mapping[str, Any]]:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ModuleTransportError(
+            "Module result " + field + " must be an object or null."
+        )
+    return dict(value)
 
 
 class ModuleHttpClientV1:
@@ -193,27 +270,34 @@ class ModuleHttpClientV1:
             ensure_ascii=True,
             separators=(",", ":"),
         ).encode("utf-8")
+        maximum_attempts = self._maximum_attempts_for(payload)
         last_transport_error: Optional[BaseException] = None
-        for attempt in range(1, self._max_attempts + 1):
+        for attempt in range(1, maximum_attempts + 1):
             try:
                 status_code, response_body = self._post(encoded)
                 result = self._parse_result(response_body)
                 if (
                     status_code >= 500
                     and any(item.retryable for item in result.errors)
-                    and attempt < self._max_attempts
+                    and attempt < maximum_attempts
                 ):
                     continue
                 return result
             except (error.URLError, socket.timeout, TimeoutError) as transport_error:
                 last_transport_error = transport_error
-                if attempt == self._max_attempts:
+                if attempt == maximum_attempts:
                     break
         raise ModuleTransportError(
             "The module endpoint was unavailable after "
-            + str(self._max_attempts)
+            + str(maximum_attempts)
             + " attempt(s)."
         ) from last_transport_error
+
+    def _maximum_attempts_for(self, payload: Mapping[str, Any]) -> int:
+        operation = payload.get("operation")
+        if isinstance(operation, Mapping) and operation.get("kind") == "EXECUTE":
+            return 1
+        return self._max_attempts
 
     def _post(self, encoded: bytes) -> tuple[int, bytes]:
         http_request = request.Request(

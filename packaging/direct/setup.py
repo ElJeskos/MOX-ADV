@@ -58,6 +58,7 @@ PACKAGE_MODULES = {
         "goal_lifecycle_contracts",
         "impact_contracts",
         "provider_observations",
+        "replay_store",
     },
     "mox_adv.modules": {"__init__", "_bound", "direct"},
 }

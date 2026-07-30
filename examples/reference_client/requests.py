@@ -123,6 +123,17 @@ def direct_customer_evidence() -> Dict[str, Any]:
     return payload
 
 
+def invalid_direct_customer_evidence() -> Dict[str, Any]:
+    """Demonstrate a typed validation error without sending unsafe fields."""
+
+    payload = direct_customer_evidence()
+    evidence = payload["external_evidence"]
+    assert isinstance(evidence, dict)
+    evidence["source"] = "UNSUPPORTED_SOURCE"
+    payload["idempotency_key"] = "reference-direct-invalid-evidence-1"
+    return payload
+
+
 def direct_plan_intent(*, environment: str) -> Dict[str, Any]:
     """Ask Direct to plan one bounded high-level budget intent."""
 

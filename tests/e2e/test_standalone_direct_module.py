@@ -26,11 +26,11 @@ from mox_adv.module_api.v1 import (
     ModuleRequestV1,
     ModuleResultV1,
 )
-from mox_adv.monitoring import MonitoringStore
 from mox_adv.modules.direct import (
     BoundDirectReadProviderV1,
     DirectModuleV1,
 )
+from mox_adv.monitoring import MonitoringStore
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -599,7 +599,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             decision_records=decision_records,
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(direct_impact_request("IMPACT_MIXED_ADJUST"))
@@ -628,7 +628,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         policy = json.loads(
             (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
         )
-        http = HttpJsonModuleAdapterV1(
+        http = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(impact_policy=policy),
             environment=ExecutionEnvironment.PRODUCTION,
         )
@@ -667,7 +667,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             evaluated_at - timedelta(microseconds=1)
         ).isoformat()
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(impact_policy=policy),
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -692,7 +692,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         assert isinstance(scope, dict)
         scope["campaign_id"] = "another-campaign"
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(impact_policy=policy),
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -797,7 +797,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             environment=ExecutionEnvironment.TEST,
         )
         return (
-            HttpJsonModuleAdapterV1(
+            HttpJsonModuleAdapterV1.for_embedded(
                 module,
                 environment=adapter_environment,
             ),
@@ -1116,7 +1116,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             "proposal_id": "proposal-customer-17",
         }
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -1176,7 +1176,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 provider_reader=reader,
                 action_runtime=runtime,
             )
-            http = HttpJsonModuleAdapterV1(
+            http = HttpJsonModuleAdapterV1.for_embedded(
                 module,
                 environment=ExecutionEnvironment.TEST,
             )
@@ -1283,7 +1283,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 test_adapter=FakeWriteAdapter(),
                 environment=ExecutionEnvironment.TEST,
             )
-            http = HttpJsonModuleAdapterV1(
+            http = HttpJsonModuleAdapterV1.for_embedded(
                 DirectModuleV1(
                     clock=lambda: current_time[0],
                     provider_reader=ActionAuthorizedDirectReader(),
@@ -1346,7 +1346,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 test_adapter=adapter,
                 environment=ExecutionEnvironment.TEST,
             )
-            http = HttpJsonModuleAdapterV1(
+            http = HttpJsonModuleAdapterV1.for_embedded(
                 DirectModuleV1(
                     clock=lambda: now,
                     provider_reader=reader,
@@ -1426,7 +1426,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                     test_adapter=adapter,
                     environment=ExecutionEnvironment.TEST,
                 )
-                http = HttpJsonModuleAdapterV1(
+                http = HttpJsonModuleAdapterV1.for_embedded(
                     DirectModuleV1(
                         clock=lambda: now,
                         provider_reader=ActionAuthorizedDirectReader(),
@@ -1517,7 +1517,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                     test_adapter=adapter,
                     environment=ExecutionEnvironment.TEST,
                 )
-                http = HttpJsonModuleAdapterV1(
+                http = HttpJsonModuleAdapterV1.for_embedded(
                     DirectModuleV1(
                         clock=lambda: now,
                         provider_reader=ActionAuthorizedDirectReader(),
@@ -1620,7 +1620,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 test_adapter=adapter,
                 environment=ExecutionEnvironment.TEST,
             )
-            http = HttpJsonModuleAdapterV1(
+            http = HttpJsonModuleAdapterV1.for_embedded(
                 DirectModuleV1(
                     clock=lambda: now,
                     provider_reader=ActionAuthorizedDirectReader(),
@@ -1673,7 +1673,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
             decision_records=decision_records,
         )
-        adapter = HttpJsonModuleAdapterV1(
+        adapter = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         )
@@ -1749,7 +1749,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         request = customer_evidence_request()
         request.pop("external_evidence")
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -1822,7 +1822,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
         )
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             module,
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -1854,7 +1854,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         by_name["cost_micros"]["value"] = 12000000000
         metrics.append({"name": "conversions", "value": 3, "unit": "COUNT"})
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -1887,7 +1887,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             "result": {"Campaigns": []},
         }
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(),
             environment=ExecutionEnvironment.PRODUCTION,
         ).handle(request)
@@ -1907,7 +1907,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         assert isinstance(metrics, list)
         metrics.append({"name": "provider_http_body", "value": "opaque", "unit": "RAW"})
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -1936,7 +1936,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         assert isinstance(metrics, list)
         metrics.append({"name": "conversions", "value": 201, "unit": "COUNT"})
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -1972,7 +1972,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         by_name["current_weekly_budget_micros"]["value"] = 0
         metrics.append({"name": "conversions", "value": 5, "unit": "COUNT"})
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -2009,7 +2009,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         by_name["budget_period_end"]["value"] = "2026-08-07T12:00:00+00:00"
         metrics.append({"name": "conversions", "value": 5, "unit": "COUNT"})
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -2047,7 +2047,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         evidence["observed_at"] = "2026-07-30T11:29:59+00:00"
         evidence["watermark"] = "2026-07-30T11:25:00+00:00"
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 clock=lambda: datetime(
                     2026,
@@ -2082,7 +2082,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         request = customer_evidence_request()
         request.pop("external_evidence")
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 provider_reader=FailingAuthorizedDirectReader(),
                 clock=lambda: datetime(
@@ -2110,7 +2110,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         request = customer_evidence_request()
         request.pop("external_evidence")
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 provider_reader=StaleReportAuthorizedDirectReader(),
                 clock=lambda: datetime(
@@ -2139,7 +2139,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         request = customer_evidence_request()
         request.pop("external_evidence")
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 provider_reader=SkewedWatermarkDirectReader(),
                 clock=lambda: datetime(
@@ -2174,7 +2174,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         request = customer_evidence_request()
         request.pop("external_evidence")
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 provider_reader=MalformedAuthorizedDirectReader(),
                 clock=lambda: datetime(
@@ -2213,7 +2213,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         assert isinstance(scope, dict)
         scope["campaign_id"] = "rogue-campaign"
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 provider_reader=provider,
                 clock=lambda: datetime(
@@ -2250,7 +2250,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         request = customer_evidence_request()
         request.pop("external_evidence")
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 provider_reader=provider,
                 clock=lambda: datetime(
@@ -2274,7 +2274,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         request = customer_evidence_request()
         request.pop("external_evidence")
 
-        response = HttpJsonModuleAdapterV1(
+        response = HttpJsonModuleAdapterV1.for_embedded(
             DirectModuleV1(
                 provider_reader=RogueChangeAuthorDirectReader(),
                 clock=lambda: datetime(
@@ -2327,7 +2327,7 @@ from mox_adv.modules.direct import DirectModuleV1
 module = DirectModuleV1(
     clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 )
-response = HttpJsonModuleAdapterV1(
+response = HttpJsonModuleAdapterV1.for_embedded(
     module,
     environment=ExecutionEnvironment.PRODUCTION,
 ).handle(json.loads({payload!r}))
@@ -2417,7 +2417,7 @@ request = json.loads(__import__("os").environ["DIRECT_REQUEST"])
 module = DirectModuleV1(
     clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 )
-response = HttpJsonModuleAdapterV1(
+response = HttpJsonModuleAdapterV1.for_embedded(
     module,
     environment=ExecutionEnvironment.PRODUCTION,
 ).handle(request)
