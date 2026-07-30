@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import json
 import os
@@ -119,13 +120,7 @@ class MacOSLocalPrincipalAuthenticator:
         )
 
     def authenticate(self) -> AuthenticatedPrincipal:
-        try:
-            identity = pwd.getpwuid(os.getuid()).pw_name
-        except (KeyError, OSError) as error:
-            raise ControlRejected(
-                "UNAUTHENTICATED_PRINCIPAL",
-                "the local operating-system account cannot be resolved",
-            ) from error
+        identity = getpass.getuser()
         if identity != self.expected_identity:
             raise ControlRejected(
                 "UNAUTHENTICATED_PRINCIPAL",
