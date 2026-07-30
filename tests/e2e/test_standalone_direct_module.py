@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -105,6 +105,40 @@ def customer_evidence_request() -> dict[str, Any]:
         },
         "idempotency_key": "customer-direct-run-2026-07-30-001",
     }
+
+
+def direct_action_plan_request() -> dict[str, Any]:
+    request = customer_evidence_request()
+    request["connection_ref"] = {"connection_id": "sim-connection"}
+    request["environment"] = "TEST"
+    request["scope"] = {
+        "organization_id": "sim-organization",
+        "account_id": "sim-direct-account",
+        "campaign_id": "campaign-7",
+    }
+    evidence = request["external_evidence"]
+    assert isinstance(evidence, dict)
+    metrics = evidence["metrics"]
+    assert isinstance(metrics, list)
+    for metric in metrics:
+        assert isinstance(metric, dict)
+        if metric["name"] == "current_weekly_budget_micros":
+            metric["value"] = 2_000_000_000
+        elif metric["name"] == "cost_micros":
+            metric["value"] = 4_000_000_000
+    metrics.append({"name": "conversions", "value": 20, "unit": "COUNT"})
+    request["operation"] = {
+        "kind": "PLAN",
+        "operation_type": "PLAN_OPTIMIZATION",
+    }
+    request["direct_action_command"] = {
+        "schema_version": "direct-action-command-v1",
+        "command": "PLAN_INTENT",
+        "action": "INCREASE_WEEKLY_BUDGET",
+        "relative_step_percent": 10,
+    }
+    request["idempotency_key"] = "direct-action-plan-17"
+    return request
 
 
 class RecordingAuthorizedDirectReader:
@@ -279,6 +313,74 @@ class SkewedWatermarkDirectReader(RecordingAuthorizedDirectReader):
         )
 
 
+class ActionAuthorizedDirectReader(RecordingAuthorizedDirectReader):
+    def read_direct_state(
+        self,
+        connection_id: str,
+        query: DirectCampaignStateReadQuery,
+    ) -> DirectCampaignStateBlock:
+        state = super().read_direct_state(connection_id, query)
+        return DirectCampaignStateBlock(
+            source=state.source,
+            retrieved_at=state.retrieved_at,
+            watermark=state.watermark,
+            campaign=state.campaign,
+            campaign_state=state.campaign_state,
+            group_state=state.group_state,
+            ad_state=state.ad_state,
+            strategy=state.strategy,
+            current_weekly_budget_micros=2_000_000_000,
+            budget_period_start=state.budget_period_start,
+            budget_period_end=state.budget_period_end,
+            current_search_bid_micros=state.current_search_bid_micros,
+            ad_variant=state.ad_variant,
+            object_config_version=state.object_config_version,
+            last_change_author="sim-executor",
+            last_change_occurred_at=state.last_change_occurred_at,
+        )
+
+    def authorizes_change_author(
+        self,
+        connection_id: str,
+        author: str,
+    ) -> bool:
+        return connection_id == "sim-connection" and author == "sim-executor"
+
+
+class FingerprintDriftDirectReader(ActionAuthorizedDirectReader):
+    def __init__(self) -> None:
+        super().__init__()
+        self._trusted_state_reads = 0
+
+    def read_direct_state(
+        self,
+        connection_id: str,
+        query: DirectCampaignStateReadQuery,
+    ) -> DirectCampaignStateBlock:
+        state = super().read_direct_state(connection_id, query)
+        self._trusted_state_reads += 1
+        if self._trusted_state_reads == 1:
+            return state
+        return DirectCampaignStateBlock(
+            source=state.source,
+            retrieved_at=state.retrieved_at,
+            watermark=state.watermark,
+            campaign=state.campaign,
+            campaign_state=state.campaign_state,
+            group_state=state.group_state,
+            ad_state=state.ad_state,
+            strategy=state.strategy,
+            current_weekly_budget_micros=state.current_weekly_budget_micros,
+            budget_period_start=state.budget_period_start,
+            budget_period_end=state.budget_period_end,
+            current_search_bid_micros=state.current_search_bid_micros,
+            ad_variant=state.ad_variant,
+            object_config_version="campaign-config-v2",
+            last_change_author=state.last_change_author,
+            last_change_occurred_at=state.last_change_occurred_at,
+        )
+
+
 class RecordingDirectReportReader:
     def __init__(self) -> None:
         self.queries: list[DirectReportsReadQuery] = []
@@ -307,6 +409,303 @@ class RecordingDirectStateReader:
 
 
 class StandaloneDirectCustomerE2ETests(unittest.TestCase):
+    def test_customer_typed_action_is_blocked_before_direct_reads_in_production(
+        self,
+    ) -> None:
+        reader = RecordingAuthorizedDirectReader()
+        module = DirectModuleV1(
+            clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
+            provider_reader=reader,
+        )
+        request = customer_evidence_request()
+        request["operation"] = {
+            "kind": "EXECUTE",
+            "operation_type": "APPLY_OPTIMIZATION",
+        }
+        request["direct_action_command"] = {
+            "schema_version": "direct-action-command-v1",
+            "command": "EXECUTE_PROPOSAL",
+            "proposal_id": "proposal-customer-17",
+        }
+
+        response = HttpJsonModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(422, response.status_code)
+        self.assertEqual("BLOCKED", response.body["status"])
+        self.assertEqual(
+            "PRODUCTION_WRITE_FORBIDDEN",
+            response.body["errors"][0]["code"],
+        )
+        self.assertEqual(
+            {
+                "proposal_id": "proposal-customer-17",
+                "operation_type": "APPLY_OPTIMIZATION",
+                "status": "DRY_RUN",
+            },
+            response.body["proposal"],
+        )
+        self.assertIsNone(response.body["execution_result"])
+        self.assertEqual([], reader.report_calls)
+        self.assertEqual([], reader.state_calls)
+
+    def test_customer_plans_and_applies_one_approved_action_in_test(self) -> None:
+        from mox_adv.control_state import (
+            AuthenticatedPrincipal,
+            DurableControlState,
+        )
+        from mox_adv.direct_action import DirectActionRuntimeV1
+        from mox_adv.fake_write_adapter import FakeWriteAdapter
+        from mox_adv.proposal_store import ImmutableProposalStore
+
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        reader = ActionAuthorizedDirectReader()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = DurableControlState(root / "control.sqlite3")
+            adapter = FakeWriteAdapter(
+                initial_state={
+                    (
+                        "sim-organization:sim-connection:sim-direct-account:"
+                        "campaign-7:INCREASE_WEEKLY_BUDGET"
+                    ): 2_000_000_000
+                }
+            )
+            runtime = DirectActionRuntimeV1(
+                policy=json.loads(
+                    (ROOT / "config" / "gate0-policy.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                state=state,
+                proposal_store=ImmutableProposalStore(root / "proposals"),
+                test_adapter=adapter,
+                environment=ExecutionEnvironment.TEST,
+            )
+            module = DirectModuleV1(
+                clock=lambda: now,
+                provider_reader=reader,
+                action_runtime=runtime,
+            )
+            http = HttpJsonModuleAdapterV1(
+                module,
+                environment=ExecutionEnvironment.TEST,
+            )
+            plan_request = direct_action_plan_request()
+
+            planned = http.handle(plan_request)
+            planned_duplicate = http.handle(plan_request)
+
+            self.assertEqual(200, planned.status_code)
+            self.assertEqual("SUCCEEDED", planned.body["status"])
+            self.assertEqual("PROPOSED", planned.body["proposal"]["status"])
+            proposal_id = planned.body["proposal"]["proposal_id"]
+            self.assertEqual(
+                proposal_id,
+                planned_duplicate.body["proposal"]["proposal_id"],
+            )
+            state.grant_approval(
+                proposal_id=proposal_id,
+                expires_at=now + timedelta(minutes=15),
+                reason="Approve the exact standalone Direct test action.",
+                principal=AuthenticatedPrincipal(
+                    identity="sviridov",
+                    authentication="authenticated_macos_user",
+                ),
+                now=now,
+            )
+            execute_request = dict(plan_request)
+            execute_request["operation"] = {
+                "kind": "EXECUTE",
+                "operation_type": "APPLY_OPTIMIZATION",
+            }
+            execute_request["direct_action_command"] = {
+                "schema_version": "direct-action-command-v1",
+                "command": "EXECUTE_PROPOSAL",
+                "proposal_id": proposal_id,
+            }
+            execute_request["idempotency_key"] = "direct-action-execute-17"
+
+            applied = http.handle(execute_request)
+            duplicate = http.handle(execute_request)
+
+            self.assertEqual(200, applied.status_code)
+            self.assertEqual("SUCCEEDED", applied.body["status"])
+            self.assertEqual("APPLIED", applied.body["execution_result"]["status"])
+            self.assertTrue(applied.body["execution_result"]["applied"])
+            self.assertEqual(
+                "2200000000",
+                applied.body["execution_result"]["provider_reference"],
+            )
+            self.assertEqual(
+                "ALREADY_PROCESSED",
+                duplicate.body["execution_result"]["status"],
+            )
+            self.assertEqual(1, adapter.write_calls)
+            self.assertGreaterEqual(len(reader.state_calls), 3)
+
+    def test_changed_direct_fingerprint_blocks_before_test_adapter_write(
+        self,
+    ) -> None:
+        from mox_adv.control_state import (
+            AuthenticatedPrincipal,
+            DurableControlState,
+        )
+        from mox_adv.direct_action import DirectActionRuntimeV1
+        from mox_adv.fake_write_adapter import FakeWriteAdapter
+        from mox_adv.proposal_store import ImmutableProposalStore
+
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        reader = FingerprintDriftDirectReader()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = DurableControlState(root / "control.sqlite3")
+            adapter = FakeWriteAdapter(
+                initial_state={
+                    (
+                        "sim-organization:sim-connection:sim-direct-account:"
+                        "campaign-7:INCREASE_WEEKLY_BUDGET"
+                    ): 2_000_000_000
+                }
+            )
+            runtime = DirectActionRuntimeV1(
+                policy=json.loads(
+                    (ROOT / "config" / "gate0-policy.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                state=state,
+                proposal_store=ImmutableProposalStore(root / "proposals"),
+                test_adapter=adapter,
+                environment=ExecutionEnvironment.TEST,
+            )
+            http = HttpJsonModuleAdapterV1(
+                DirectModuleV1(
+                    clock=lambda: now,
+                    provider_reader=reader,
+                    action_runtime=runtime,
+                ),
+                environment=ExecutionEnvironment.TEST,
+            )
+            plan_request = direct_action_plan_request()
+            planned = http.handle(plan_request)
+            proposal_id = planned.body["proposal"]["proposal_id"]
+            state.grant_approval(
+                proposal_id=proposal_id,
+                expires_at=now + timedelta(minutes=15),
+                reason="Approve the exact pre-drift Direct state.",
+                principal=AuthenticatedPrincipal(
+                    identity="sviridov",
+                    authentication="authenticated_macos_user",
+                ),
+                now=now,
+            )
+            execute_request = dict(plan_request)
+            execute_request["operation"] = {
+                "kind": "EXECUTE",
+                "operation_type": "APPLY_OPTIMIZATION",
+            }
+            execute_request["direct_action_command"] = {
+                "schema_version": "direct-action-command-v1",
+                "command": "EXECUTE_PROPOSAL",
+                "proposal_id": proposal_id,
+            }
+
+            response = http.handle(execute_request)
+
+            self.assertEqual(422, response.status_code)
+            self.assertEqual("BLOCKED", response.body["status"])
+            self.assertEqual(
+                "FINGERPRINT_MISMATCH",
+                response.body["errors"][0]["code"],
+            )
+            self.assertEqual(0, adapter.write_calls)
+
+    def test_timeout_unknown_result_retries_only_reconcile_without_second_write(
+        self,
+    ) -> None:
+        from mox_adv.control_state import (
+            AuthenticatedPrincipal,
+            DurableControlState,
+        )
+        from mox_adv.direct_action import DirectActionRuntimeV1
+        from mox_adv.fake_write_adapter import FakeWriteAdapter
+        from mox_adv.proposal_store import ImmutableProposalStore
+
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = DurableControlState(root / "control.sqlite3")
+            adapter = FakeWriteAdapter(
+                initial_state={
+                    (
+                        "sim-organization:sim-connection:sim-direct-account:"
+                        "campaign-7:INCREASE_WEEKLY_BUDGET"
+                    ): 2_000_000_000
+                },
+                timeout_after_write=True,
+                timeout_readback=None,
+            )
+            runtime = DirectActionRuntimeV1(
+                policy=json.loads(
+                    (ROOT / "config" / "gate0-policy.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                state=state,
+                proposal_store=ImmutableProposalStore(root / "proposals"),
+                test_adapter=adapter,
+                environment=ExecutionEnvironment.TEST,
+            )
+            http = HttpJsonModuleAdapterV1(
+                DirectModuleV1(
+                    clock=lambda: now,
+                    provider_reader=ActionAuthorizedDirectReader(),
+                    action_runtime=runtime,
+                ),
+                environment=ExecutionEnvironment.TEST,
+            )
+            plan_request = direct_action_plan_request()
+            planned = http.handle(plan_request)
+            proposal_id = planned.body["proposal"]["proposal_id"]
+            state.grant_approval(
+                proposal_id=proposal_id,
+                expires_at=now + timedelta(minutes=15),
+                reason="Approve the timeout reconciliation scenario.",
+                principal=AuthenticatedPrincipal(
+                    identity="sviridov",
+                    authentication="authenticated_macos_user",
+                ),
+                now=now,
+            )
+            execute_request = dict(plan_request)
+            execute_request["operation"] = {
+                "kind": "EXECUTE",
+                "operation_type": "APPLY_OPTIMIZATION",
+            }
+            execute_request["direct_action_command"] = {
+                "schema_version": "direct-action-command-v1",
+                "command": "EXECUTE_PROPOSAL",
+                "proposal_id": proposal_id,
+            }
+
+            first = http.handle(execute_request)
+            retry = http.handle(execute_request)
+
+            self.assertEqual(500, first.status_code)
+            self.assertEqual("FAILED", first.body["status"])
+            self.assertEqual(
+                "UNKNOWN_RESULT",
+                first.body["execution_result"]["status"],
+            )
+            self.assertEqual(
+                "UNKNOWN_RESULT",
+                retry.body["execution_result"]["status"],
+            )
+            self.assertEqual(1, adapter.write_calls)
+
     def test_customer_evidence_returns_headless_direct_analysis(self) -> None:
         decision_records = InMemoryDecisionRecordStoreV1()
         module = DirectModuleV1(
@@ -1067,6 +1466,7 @@ assert blocked == [], blocked
             script = """
 import json
 from datetime import datetime, timezone
+from mox_adv.direct_action import DirectActionRuntimeV1
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.module_api.v1 import HttpJsonModuleAdapterV1
 from mox_adv.modules.direct import DirectModuleV1
@@ -1081,6 +1481,7 @@ response = HttpJsonModuleAdapterV1(
 assert response.status_code == 200, response.body
 assert response.body["status"] == "PARTIAL", response.body
 assert response.body["module"]["module_id"] == "YANDEX_DIRECT", response.body
+assert DirectActionRuntimeV1.__name__ == "DirectActionRuntimeV1"
 """
             completed = subprocess.run(
                 [sys.executable, "-c", script],

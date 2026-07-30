@@ -40,6 +40,12 @@ from mox_adv.module_api.v1.decision_records import (
     ModuleDecisionRecordStoreV1,
     ModuleDecisionV1,
 )
+from mox_adv.module_api.v1.direct_action_contracts import (
+    DIRECT_ACTION_COMMAND_SCHEMA_VERSION,
+    DirectActionCommandV1,
+    ExecuteDirectActionCommandV1,
+    PlanDirectActionCommandV1,
+)
 from mox_adv.module_api.v1.goal_lifecycle_contracts import (
     GOAL_CANDIDATE_INPUT_SCHEMA_VERSION,
     GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION,
@@ -59,6 +65,7 @@ from mox_adv.module_api.v1.goal_lifecycle_contracts import (
 
 __all__ = [
     "EXTERNAL_EVIDENCE_SCHEMA_VERSION",
+    "DIRECT_ACTION_COMMAND_SCHEMA_VERSION",
     "GOAL_CANDIDATE_INPUT_SCHEMA_VERSION",
     "GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION",
     "MODULE_REQUEST_SCHEMA_VERSION",
@@ -72,6 +79,8 @@ __all__ = [
     "DecideGoalSemanticsCommandV1",
     "EvaluateGoalEligibilityCommandV1",
     "ExternalEvidenceV1",
+    "DirectActionCommandV1",
+    "ExecuteDirectActionCommandV1",
     "GoalCandidateInputV1",
     "GoalEventEvidenceV1",
     "GoalLifecycleCommandV1",
@@ -103,6 +112,7 @@ __all__ = [
     "ModuleStatus",
     "ModuleV1",
     "ModuleWarningV1",
+    "PlanDirectActionCommandV1",
     "PublishGoalEventCommandV1",
     "StoredConnectionRefV1",
     "VerifyGoalDeliveryCommandV1",

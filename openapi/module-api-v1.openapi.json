@@ -634,6 +634,68 @@
           }
         ]
       },
+      "PlanDirectActionCommandV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "command",
+          "action",
+          "relative_step_percent"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "direct-action-command-v1"
+          },
+          "command": {
+            "const": "PLAN_INTENT"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "INCREASE_WEEKLY_BUDGET"
+            ]
+          },
+          "relative_step_percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          }
+        }
+      },
+      "ExecuteDirectActionCommandV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "command",
+          "proposal_id"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "direct-action-command-v1"
+          },
+          "command": {
+            "const": "EXECUTE_PROPOSAL"
+          },
+          "proposal_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          }
+        }
+      },
+      "DirectActionCommandV1": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/PlanDirectActionCommandV1"
+          },
+          {
+            "$ref": "#/components/schemas/ExecuteDirectActionCommandV1"
+          }
+        ]
+      },
       "ModuleOperationV1": {
         "type": "object",
         "additionalProperties": false,
@@ -748,6 +810,9 @@
           },
           "goal_lifecycle_command": {
             "$ref": "#/components/schemas/GoalLifecycleCommandV1"
+          },
+          "direct_action_command": {
+            "$ref": "#/components/schemas/DirectActionCommandV1"
           },
           "operation": {
             "$ref": "#/components/schemas/ModuleOperationV1"

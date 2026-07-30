@@ -217,6 +217,34 @@ class ModuleRequestContractTests(unittest.TestCase):
                 operation_type="CREATE_CAMPAIGN",
             )
 
+    def test_direct_action_rejects_raw_provider_authority(self) -> None:
+        payload = valid_request_payload()
+        payload["operation"] = {
+            "kind": "EXECUTE",
+            "operation_type": "APPLY_OPTIMIZATION",
+        }
+        payload["direct_action_command"] = {
+            "schema_version": "direct-action-command-v1",
+            "command": "EXECUTE_PROPOSAL",
+            "proposal_id": "proposal-17",
+            "endpoint": "https://api.direct.yandex.com/json/v501/campaigns",
+        }
+        with self.assertRaisesRegex(
+            ContractValidationError,
+            "unexpected field",
+        ):
+            ModuleRequestV1.from_dict(payload)
+
+        command = payload["direct_action_command"]
+        assert isinstance(command, dict)
+        command.pop("endpoint")
+        command["proposal_id"] = "POST /campaigns with caller payload"
+        with self.assertRaisesRegex(
+            ContractValidationError,
+            "proposal_id is invalid",
+        ):
+            ModuleRequestV1.from_dict(payload)
+
     def test_closed_wire_values_fail_closed_on_direct_construction(self) -> None:
         request = ModuleRequestV1.from_dict(valid_request_payload())
         result = ModuleResultV1.from_dict(successful_result_payload())
@@ -497,6 +525,40 @@ class OpenAPIContractTests(unittest.TestCase):
         self.assertEqual(
             2,
             len(schemas["ModuleRequestV1"]["allOf"]),
+        )
+
+    def test_openapi_publishes_the_closed_direct_action_contract(self) -> None:
+        document = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+        schemas = document["components"]["schemas"]
+        request_properties = schemas["ModuleRequestV1"]["properties"]
+        command_schemas = {
+            branch["$ref"].rsplit("/", 1)[-1]
+            for branch in schemas["DirectActionCommandV1"]["oneOf"]
+        }
+
+        self.assertEqual(
+            {"$ref": "#/components/schemas/DirectActionCommandV1"},
+            request_properties["direct_action_command"],
+        )
+        self.assertEqual(
+            {
+                "PlanDirectActionCommandV1",
+                "ExecuteDirectActionCommandV1",
+            },
+            command_schemas,
+        )
+        plan = schemas["PlanDirectActionCommandV1"]
+        self.assertEqual(
+            ["INCREASE_WEEKLY_BUDGET"],
+            plan["properties"]["action"]["enum"],
+        )
+        self.assertEqual(
+            10,
+            plan["properties"]["relative_step_percent"]["maximum"],
+        )
+        self.assertFalse(plan["additionalProperties"])
+        self.assertFalse(
+            schemas["ExecuteDirectActionCommandV1"]["additionalProperties"]
         )
 
     def test_result_proposal_and_execution_are_optional_inputs(self) -> None:

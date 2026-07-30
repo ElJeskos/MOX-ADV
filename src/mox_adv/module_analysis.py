@@ -15,7 +15,7 @@ from mox_adv.module_api.v1 import (
     ModuleResultV1,
 )
 
-TerminalModuleStatus = Literal["REJECTED", "FAILED"]
+TerminalModuleStatus = Literal["BLOCKED", "REJECTED", "FAILED"]
 
 
 def normalized_utc_now(

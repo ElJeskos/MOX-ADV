@@ -47,6 +47,12 @@ from mox_adv.module_api.v1.contract_validation import (
 from mox_adv.module_api.v1.contract_validation import (
     timezone_name as _timezone,
 )
+from mox_adv.module_api.v1.direct_action_contracts import (
+    DirectActionCommandV1,
+    ExecuteDirectActionCommandV1,
+    PlanDirectActionCommandV1,
+    direct_action_command_object,
+)
 from mox_adv.module_api.v1.goal_lifecycle_contracts import (
     GoalLifecycleCommandV1,
     GoalLifecycleOutcomeV1,
@@ -391,6 +397,7 @@ class ModuleRequestV1:
     operation: ModuleOperationV1
     idempotency_key: str
     goal_lifecycle_command: Optional[GoalLifecycleCommandV1] = None
+    direct_action_command: Optional[DirectActionCommandV1] = None
 
     def __post_init__(self) -> None:
         _one_of(
@@ -447,6 +454,35 @@ class ModuleRequestV1:
                 raise ContractValidationError(
                     "goal lifecycle requests require scope.counter_id"
                 )
+        if self.direct_action_command is not None:
+            if self.operation.operation_type not in {
+                "PLAN_OPTIMIZATION",
+                "APPLY_OPTIMIZATION",
+            }:
+                raise ContractValidationError(
+                    "direct_action_command is allowed only for Direct "
+                    "optimization operations"
+                )
+            if (
+                self.operation.kind == "PLAN"
+                and not isinstance(
+                    self.direct_action_command,
+                    PlanDirectActionCommandV1,
+                )
+            ):
+                raise ContractValidationError(
+                    "PLAN_OPTIMIZATION requires a PLAN_INTENT command"
+                )
+            if (
+                self.operation.kind == "EXECUTE"
+                and not isinstance(
+                    self.direct_action_command,
+                    ExecuteDirectActionCommandV1,
+                )
+            ):
+                raise ContractValidationError(
+                    "APPLY_OPTIMIZATION requires an EXECUTE_PROPOSAL command"
+                )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleRequestV1":
@@ -464,10 +500,15 @@ class ModuleRequestV1:
                 "operation",
                 "idempotency_key",
             ),
-            optional=("external_evidence", "goal_lifecycle_command"),
+            optional=(
+                "external_evidence",
+                "goal_lifecycle_command",
+                "direct_action_command",
+            ),
         )
         external_evidence = value.get("external_evidence")
         goal_lifecycle_command = value.get("goal_lifecycle_command")
+        direct_action_command = value.get("direct_action_command")
         if "external_evidence" in value and external_evidence is None:
             raise ContractValidationError(
                 "external_evidence must be an object when present"
@@ -516,6 +557,11 @@ class ModuleRequestV1:
                     )
                 )
             ),
+            direct_action_command=(
+                None
+                if direct_action_command is None
+                else direct_action_command_object(direct_action_command)
+            ),
         )
 
     def as_dict(self) -> Dict[str, Any]:
@@ -533,6 +579,8 @@ class ModuleRequestV1:
             value["external_evidence"] = self.external_evidence.as_dict()
         if self.goal_lifecycle_command is not None:
             value["goal_lifecycle_command"] = self.goal_lifecycle_command.as_dict()
+        if self.direct_action_command is not None:
+            value["direct_action_command"] = self.direct_action_command.as_dict()
         return value
 
 
@@ -1176,6 +1224,14 @@ class ModuleResultV1:
         decision_id: str,
         decision_record_ref: str,
     ) -> "ModuleResultV1":
+        direct_proposal = (
+            request.direct_action_command
+            if isinstance(
+                request.direct_action_command,
+                ExecuteDirectActionCommandV1,
+            )
+            else None
+        )
         return cls(
             schema_version=MODULE_RESULT_SCHEMA_VERSION,
             run_id="blocked-" + decision_id,
@@ -1184,12 +1240,24 @@ class ModuleResultV1:
             metrics=(),
             assessment=None,
             recommendations=(),
-            proposal=None,
-            execution_result=ModuleExecutionResultV1(
-                execution_id="blocked-" + decision_id,
-                operation_type=request.operation.operation_type,
-                status="BLOCKED",
-                applied=False,
+            proposal=(
+                None
+                if direct_proposal is None
+                else ModuleProposalV1(
+                    proposal_id=direct_proposal.proposal_id,
+                    operation_type=request.operation.operation_type,
+                    status="DRY_RUN",
+                )
+            ),
+            execution_result=(
+                ModuleExecutionResultV1(
+                    execution_id="blocked-" + decision_id,
+                    operation_type=request.operation.operation_type,
+                    status="BLOCKED",
+                    applied=False,
+                )
+                if direct_proposal is None
+                else None
             ),
             provenance=(),
             warnings=(),
