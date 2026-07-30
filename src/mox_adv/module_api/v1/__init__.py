@@ -44,6 +44,7 @@ from mox_adv.module_api.v1.contracts import (
 )
 from mox_adv.module_api.v1.decision_records import (
     MODULE_DECISION_RECORD_SCHEMA_VERSION,
+    DirectoryDecisionRecordStoreV1,
     InMemoryDecisionRecordStoreV1,
     ModuleDecisionFactsV1,
     ModuleDecisionRecordReceiptV1,
@@ -112,6 +113,7 @@ __all__ = [
     "ExternalEvidenceV1",
     "DirectActionCommandV1",
     "DirectProviderObservationV1",
+    "DirectoryDecisionRecordStoreV1",
     "ExecuteDirectActionCommandV1",
     "GoalCandidateInputV1",
     "GoalEventEvidenceV1",

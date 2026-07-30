@@ -61,10 +61,14 @@ CAPABILITY_EVIDENCE_PATHS = {
     "APPROVAL_REQUIRED": (
         "approval.json",
         "change_diff.json",
+        "direct-module-result.json",
+        "direct-decision-record.json",
         "events.jsonl",
     ),
     "BOUNDED_AUTONOMY": (
         "change_diff.json",
+        "direct-module-result.json",
+        "direct-decision-record.json",
         "events.jsonl",
     ),
     "MONITORING_AND_ALERTING": (
@@ -73,6 +77,8 @@ CAPABILITY_EVIDENCE_PATHS = {
     ),
     "IMPACT_EVALUATION": (
         "impact_report.json",
+        "impact-module-result.json",
+        "impact-decision-record.json",
         "result.json",
     ),
     "OPERATIONAL_MODES": (
@@ -107,6 +113,10 @@ REQUIRED_SUPPLEMENTAL_ARTIFACTS = frozenset(
         "observe-evidence.json",
         "monitoring-evidence.json",
         "lifecycle-evidence.json",
+        "direct-module-result.json",
+        "direct-decision-record.json",
+        "impact-module-result.json",
+        "impact-decision-record.json",
     }
 )
 REQUIRED_RUN_SUMMARY_FIELDS = frozenset(

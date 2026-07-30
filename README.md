@@ -81,6 +81,10 @@ Generating the complete OpenAPI document from code is intentionally deferred to 
 The paired runtime now invokes `DirectModuleV1` and `MetrikaModuleV1` through `InProcessModuleAdapterV1` and reconstructs the unchanged integrated snapshot only from their canonical `ModuleResultV1` values.
 Provider-backed results carry an optional lossless normalized observation with the validated daily grain and Direct state needed by paired analytics.
 The observation contains no credential or arbitrary provider payload and remains absent for customer-supplied aggregate evidence.
+The paired TEST cycle passes its existing sanitized projection and immutable proposal to `DirectModuleV1`, while the module derives the same policy facts, execution key, target validation, Approval or Mandate authority, and sealed fake-adapter readback.
+Paired module evidence uses the closed `PAIRED_MODULE_RESULT` source marker and the integrated snapshot fingerprint; it cannot supply an arbitrary execution plan or provider request.
+Post-change impact is evaluated through the Direct `EVALUATE_IMPACT` operation and preserves the existing observed-association classification without making a causal claim.
+Each paired Direct execution and impact result persists an immutable module Decision Record below the public run directory.
 The paired Dashboard routes, controls, reports, operating modes, and Russian user-facing behavior remain unchanged.
 
 ## Standalone Metrika

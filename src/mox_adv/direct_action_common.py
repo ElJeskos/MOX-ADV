@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, Optional, Tuple
 
-from mox_adv.commands import OptimizationAction
+from mox_adv.approval_execution import ExecutionFacts
+from mox_adv.commands import ACTION_SPECS, ActionFamily, OptimizationAction
 from mox_adv.control_state import (
     ExecutionStatus,
+    PreparedChange,
     TrustedScope,
     canonical_hash,
 )
@@ -22,7 +24,6 @@ from mox_adv.module_api.v1 import (
     ModuleRecommendationV1,
     ModuleRequestV1,
     ModuleStatus,
-    PlanDirectActionCommandV1,
 )
 
 SUPPORTED_ACTION = OptimizationAction.INCREASE_WEEKLY_BUDGET
@@ -68,9 +69,7 @@ def eligibility_snapshot(
         impressions=context.evidence.impressions,
         spend_rub=context.evidence.cost_micros // 1_000_000,
         cpa_rub=str(context.metrics["cpa_rub"]),
-        budget_utilization_percent=str(
-            context.metrics["budget_utilization_percent"]
-        ),
+        budget_utilization_percent=str(context.metrics["budget_utilization_percent"]),
         ctr_percent=str(context.metrics["ctr_percent"]),
     )
 
@@ -117,13 +116,13 @@ def proposal_projection(
     runtime: DirectActionRuntimeV1,
     metrics: Mapping[str, DirectMetric],
 ) -> Mapping[str, Any]:
+    if runtime.paired_context is not None:
+        return runtime.paired_context.projection
     return {
         "observed_facts": ["BUDGET_UTILIZATION_AT_OR_ABOVE_THRESHOLD"],
         "budget_utilization": metrics["budget_utilization_percent"],
         "policy_limits": {
-            "maximum_step_percent": runtime.policy["limits"][
-                "maximum_step_percent"
-            ]
+            "maximum_step_percent": runtime.policy["limits"]["maximum_step_percent"]
         },
     }
 
@@ -143,11 +142,94 @@ def trusted_scope(
     )
 
 
+def execution_result_metrics(
+    calculated: Mapping[str, DirectMetric],
+    current: DirectObservationV1,
+    prepared: PreparedChange,
+    facts: ExecutionFacts,
+) -> Tuple[MetricValueV1, ...]:
+    common = (
+        MetricValueV1("impressions", facts.impressions, "COUNT"),
+        MetricValueV1("clicks", facts.clicks, "COUNT"),
+        MetricValueV1(
+            "cost_micros",
+            facts.spend_rub * 1_000_000,
+            "MICROS_RUB",
+        ),
+        MetricValueV1("conversions", facts.conversions, "COUNT"),
+        MetricValueV1("ctr_percent", facts.ctr_percent, "PERCENT"),
+        MetricValueV1("cpa_rub", facts.cpa_rub, "RUB"),
+        MetricValueV1(
+            "budget_utilization_percent",
+            facts.budget_utilization_percent,
+            "PERCENT",
+        ),
+        MetricValueV1("pacing_percent", calculated["pacing_percent"], "PERCENT"),
+        MetricValueV1(
+            "current_weekly_budget_micros",
+            current.state.current_weekly_budget_micros,
+            "MICROS_RUB",
+        ),
+    )
+    target: tuple[MetricValueV1, ...]
+    family = ACTION_SPECS[prepared.action].family
+    if family is ActionFamily.WEEKLY_BUDGET:
+        target = (
+            MetricValueV1(
+                "target_weekly_budget_micros",
+                prepared.target_value,
+                "MICROS_RUB",
+            ),
+        )
+    elif family is ActionFamily.SEARCH_BID:
+        target = (
+            MetricValueV1(
+                "current_search_bid_micros",
+                current.state.current_search_bid_micros,
+                "MICROS_RUB",
+            ),
+            MetricValueV1(
+                "target_search_bid_micros",
+                prepared.target_value,
+                "MICROS_RUB",
+            ),
+        )
+    elif family is ActionFamily.CAMPAIGN_STATE:
+        target = (
+            MetricValueV1(
+                "current_campaign_state",
+                current.state.campaign_state,
+                "CODE",
+            ),
+            MetricValueV1(
+                "target_campaign_state",
+                prepared.target_value,
+                "CODE",
+            ),
+        )
+    else:
+        target = (
+            MetricValueV1(
+                "current_ad_variant",
+                current.state.ad_variant,
+                "CODE",
+            ),
+            MetricValueV1(
+                "target_ad_variant",
+                prepared.target_value,
+                "CODE",
+            ),
+        )
+    return common + target
+
+
 def result_metrics(
     calculated: Mapping[str, DirectMetric],
     current: DirectObservationV1,
     target_budget: int,
 ) -> Tuple[MetricValueV1, ...]:
+    """Preserve the standalone Direct planning projection."""
+
     return (
         MetricValueV1("impressions", calculated["impressions"], "COUNT"),
         MetricValueV1("clicks", calculated["clicks"], "COUNT"),
@@ -176,7 +258,39 @@ def result_metrics(
 
 def decision_summary(
     runtime: DirectActionRuntimeV1,
+    action: OptimizationAction = SUPPORTED_ACTION,
 ) -> Tuple[ModuleAssessmentV1, Tuple[ModuleRecommendationV1, ...]]:
+    summaries = {
+        OptimizationAction.INCREASE_WEEKLY_BUDGET: (
+            "Increase the weekly budget by the approved step.",
+            "The deterministic policy accepted the validated budget change.",
+        ),
+        OptimizationAction.DECREASE_WEEKLY_BUDGET: (
+            "Decrease the weekly budget by the approved step.",
+            "The deterministic policy accepted the validated budget change.",
+        ),
+        OptimizationAction.INCREASE_SEARCH_BID: (
+            "Increase the search bid by the approved step.",
+            "The deterministic policy accepted the validated bid change.",
+        ),
+        OptimizationAction.DECREASE_SEARCH_BID: (
+            "Decrease the search bid by the approved step.",
+            "The deterministic policy accepted the validated bid change.",
+        ),
+        OptimizationAction.SET_AD_VARIANT: (
+            "Activate the approved ad variant.",
+            "The deterministic policy accepted the validated ad change.",
+        ),
+        OptimizationAction.SUSPEND_CAMPAIGN: (
+            "Suspend the approved campaign.",
+            "The deterministic policy accepted the validated state change.",
+        ),
+        OptimizationAction.RESUME_CAMPAIGN: (
+            "Resume the approved campaign.",
+            "The deterministic policy accepted the validated state change.",
+        ),
+    }
+    summary, rationale = summaries[action]
     return (
         ModuleAssessmentV1(
             summary=(
@@ -188,12 +302,9 @@ def decision_summary(
         ),
         (
             ModuleRecommendationV1(
-                code="INCREASE_WEEKLY_BUDGET",
-                summary="Increase the weekly budget by the approved step.",
-                rationale=(
-                    "The deterministic policy accepted the validated "
-                    "evidence and current target state."
-                ),
+                code=action.value,
+                summary=summary,
+                rationale=rationale,
                 executable=runtime.environment is ExecutionEnvironment.TEST,
             ),
         ),

@@ -20,6 +20,15 @@ class ReadOnlyRunnerTests(unittest.TestCase):
                 (path / "lifecycle-evidence.json").read_text(encoding="utf-8")
             )
             proposal = json.loads((path / "proposal.json").read_text(encoding="utf-8"))
+            direct_module_result = json.loads(
+                (path / "direct-module-result.json").read_text(encoding="utf-8")
+            )
+            direct_decision_record = json.loads(
+                (path / "direct-decision-record.json").read_text(encoding="utf-8")
+            )
+            impact_module_result = json.loads(
+                (path / "impact-module-result.json").read_text(encoding="utf-8")
+            )
             first_stability = json.loads(
                 (path / "stability-fingerprint.json").read_text(encoding="utf-8")
             )
@@ -40,8 +49,27 @@ class ReadOnlyRunnerTests(unittest.TestCase):
         self.assertTrue(result["snapshot_id"])
         self.assertEqual("deterministic-fake", result["provider"])
         self.assertEqual(
-            "SEALED_FAKE_ADAPTERS_AND_LOCAL_INTERCEPTION_ONLY",
+            "DIRECT_TEST_MODULE_AND_SEALED_FAKE_ADAPTERS_ONLY",
             result["technical_command"],
+        )
+        self.assertEqual("SUCCEEDED", direct_module_result["status"])
+        self.assertEqual(
+            "APPLIED",
+            direct_module_result["execution_result"]["status"],
+        )
+        self.assertEqual(
+            direct_module_result["decision_record_ref"],
+            "decision-records/" + direct_decision_record["decision_id"] + ".json",
+        )
+        self.assertEqual(
+            "APPLY_OPTIMIZATION",
+            direct_decision_record["operation_type"],
+        )
+        self.assertEqual("SUCCEEDED", direct_decision_record["outcome"])
+        self.assertEqual("SUCCEEDED", impact_module_result["status"])
+        self.assertEqual(
+            "OBSERVED_POST_CHANGE",
+            impact_module_result["impact_outcome"]["status"],
         )
         self.assertEqual(
             sorted(proposal["observed_facts"]),

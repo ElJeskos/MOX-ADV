@@ -63,6 +63,22 @@ def sample_artifacts() -> dict[str, dict[str, Any]]:
             "campaign_status": "APPLIED",
             "goal_technical_status": "VERIFIED",
         },
+        "direct-module-result.json": {
+            "schema_version": "module-result-v1",
+            "status": "SUCCEEDED",
+        },
+        "direct-decision-record.json": {
+            "schema_version": "module-decision-record-v1",
+            "operation_type": "APPLY_OPTIMIZATION",
+        },
+        "impact-module-result.json": {
+            "schema_version": "module-result-v1",
+            "status": "SUCCEEDED",
+        },
+        "impact-decision-record.json": {
+            "schema_version": "module-decision-record-v1",
+            "operation_type": "EVALUATE_IMPACT",
+        },
     }
 
 

@@ -16,13 +16,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
-from mox_adv.approval_execution import (
-    ApprovalExecutionService,
-    ExecutionFacts,
-    ExecutionRequest,
-)
-from mox_adv.autonomy_contracts import BoundedAutonomyRequest
-from mox_adv.autonomy_execution import BoundedAutonomyService
 from mox_adv.commands import (
     ACTION_SPECS,
     ActionFamily,
@@ -35,14 +28,13 @@ from mox_adv.control_state import (
     PreparedChange,
     TrustedScope,
 )
-from mox_adv.fake_write_adapter import FakeWriteAdapter
-from mox_adv.environment import ExecutionEnvironment
 from mox_adv.mandate_store import DurableMandateAuthority
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.observe import run_observe_fixture
+from mox_adv.paired_cycle import execute_paired_direct_test_action
 from mox_adv.proposal_store import ImmutableProposalStore
-from mox_adv.recommend_contracts import OptimizationProposalV1
-from mox_adv.recommend_projection import build_sanitized_projection
+from mox_adv.recommend_contracts import OptimizationProposalV1, ProviderMetadata
+from mox_adv.recommend_projection import SanitizedProjection, build_sanitized_projection
 from mox_adv.recommend_service import RecommendationService
 from mox_adv.ui_automation import (
     AutomationConfigurationError,
@@ -240,18 +232,14 @@ def _prepare_simulated_change(
     step = int(proposal.expected_diff.get("relative_step_percent", 0))
     if action_spec.family == ActionFamily.WEEKLY_BUDGET:
         current_value: Any = int(snapshot["campaign"]["current_weekly_budget_micros"])
-        relative_percent = (
-            step if int(action_spec.relative_percent or 0) > 0 else -step
-        )
+        relative_percent = step if int(action_spec.relative_percent or 0) > 0 else -step
         target_value: Any = calculate_relative_target(
             current_value,
             relative_percent,
         )
     elif action_spec.family == ActionFamily.SEARCH_BID:
         current_value = int(snapshot["campaign"]["current_search_bid_micros"])
-        relative_percent = (
-            step if int(action_spec.relative_percent or 0) > 0 else -step
-        )
+        relative_percent = step if int(action_spec.relative_percent or 0) > 0 else -step
         target_value = calculate_relative_target(
             current_value,
             relative_percent,
@@ -302,6 +290,8 @@ def _execute_simulated_change(
     snapshot: Mapping[str, Any],
     proposal: Any,
     proposal_hash: str,
+    projection: SanitizedProjection,
+    proposal_store: ImmutableProposalStore,
     now: datetime,
     control_state: DurableControlState | None = None,
     grant_approval: bool = True,
@@ -352,66 +342,39 @@ def _execute_simulated_change(
             prepared.proposal_id,
             prepared.binding_hash(),
         )
-    adapter = FakeWriteAdapter(
-        initial_state={prepared.target_key(): prepared.current_value}
+    module_outcome = execute_paired_direct_test_action(
+        run_directory=run_directory,
+        policy=policy,
+        snapshot=snapshot,
+        projection=projection,
+        prepared=prepared,
+        state=state,
+        proposal_store=proposal_store,
+        now=now,
     )
-    metrics = snapshot["metrics"]
-    freshness = _projection_source(snapshot)["freshness"]
-    request = ExecutionRequest(
-        proposal_id=prepared.proposal_id,
-        execution_key=prepared.execution_key(),
-        scope=prepared.scope,
-        facts=ExecutionFacts(
-            mode="APPROVAL_REQUIRED",
-            automation_enabled=True,
-            comparability_status=str(snapshot["comparability_status"]),
-            confidence_status=str(snapshot["confidence_status"]),
-            financial_recommendations_allowed=bool(
-                snapshot["financial_recommendations_allowed"]
-            ),
-            direct_age_minutes=int(freshness["direct_minutes"]),
-            metrika_age_minutes=int(freshness["metrika_minutes"]),
-            watermark_skew_minutes=int(freshness["watermark_skew_minutes"]),
-            clicks=int(metrics["clicks"]),
-            conversions=int(metrics["goal_visits"]),
-            impressions=int(metrics["impressions"]),
-            spend_rub=int(metrics["cost_micros"]) // 1_000_000,
-            cpa_rub=str(metrics["cpa_rub"]),
-            budget_utilization_percent=str(metrics["budget_utilization_percent"]),
-            ctr_percent=str(metrics["ctr_percent"]),
-            campaign_state=str(snapshot["campaign"]["state"]),
-            campaign_strategy=str(snapshot["campaign"]["strategy"]),
-            current_fingerprint=prepared.expected_fingerprint,
-            cooldown_active=False,
-            observation_window_active=False,
-            actions_in_last_24h=0,
-            cumulative_daily_change_percent=0,
-            monetary_exposure_rub=(
-                abs(target_value - current_value) // 1_000_000
-                if isinstance(target_value, int) and isinstance(current_value, int)
-                else 0
-            ),
-            kill_switch_available=True,
-        ),
-    )
-    outcome = ApprovalExecutionService(
-        policy,
-        state,
-        adapter,
-        clock=lambda: now,
-        environment=ExecutionEnvironment.TEST,
-    ).execute(request)
+    execution_result = module_outcome.result.execution_result
+    if execution_result is None:
+        errors = module_outcome.result.errors
+        reason = errors[0].code if errors else "DIRECT_MODULE_EXECUTION_FAILED"
+        raise UiRunRejected(
+            reason,
+            "The paired Direct module did not return an execution result.",
+        )
     return (
         {
-            "status": outcome.status.value,
-            "reason_code": outcome.reason_code,
+            "status": execution_result.status,
+            "reason_code": (
+                None
+                if not module_outcome.result.errors
+                else module_outcome.result.errors[0].code
+            ),
             "approval_id": approval.approval_id,
             "action": action.value,
             "before_micros": current_value,
             "after_micros": target_value,
-            "readback_micros": outcome.observed_value,
+            "readback_micros": module_outcome.observed_value,
             "relative_step_percent": step,
-            "write_calls": adapter.write_calls,
+            "write_calls": module_outcome.write_calls,
             "external_write_sent": False,
             "adapter": "SEALED_FAKE",
             "executor_invoked": True,
@@ -422,12 +385,15 @@ def _execute_simulated_change(
 
 def _execute_bounded_simulated_change(
     *,
+    run_directory: Path,
     policy: Mapping[str, Any],
     state: DurableControlState,
     mandate_authority: DurableMandateAuthority,
     snapshot: Mapping[str, Any],
     proposal: Any,
     proposal_hash: str,
+    projection: SanitizedProjection,
+    proposal_store: ImmutableProposalStore,
     mandate_id: str,
     now: datetime,
 ) -> dict[str, Any]:
@@ -454,54 +420,41 @@ def _execute_bounded_simulated_change(
         proposal_hash=proposal_hash,
     )
     state.register_prepared_change(prepared)
-    adapter = FakeWriteAdapter(
-        initial_state={prepared.target_key(): prepared.current_value}
-    )
-    metrics = snapshot["metrics"]
-    freshness = _projection_source(snapshot)["freshness"]
-    request = BoundedAutonomyRequest(
+    module_outcome = execute_paired_direct_test_action(
+        run_directory=run_directory,
+        policy=policy,
+        snapshot=snapshot,
+        projection=projection,
+        prepared=prepared,
+        state=state,
+        proposal_store=proposal_store,
+        now=now,
+        mandate_authority=mandate_authority,
         mandate_id=mandate_id,
-        proposal_id=prepared.proposal_id,
-        execution_key=prepared.execution_key(),
-        scope=prepared.scope,
-        mode="BOUNDED_AUTONOMY",
-        automation_enabled=True,
-        comparability_status=str(snapshot["comparability_status"]),
-        confidence_status=str(snapshot["confidence_status"]),
-        financial_recommendations_allowed=bool(
-            snapshot["financial_recommendations_allowed"]
-        ),
-        direct_age_minutes=int(freshness["direct_minutes"]),
-        metrika_age_minutes=int(freshness["metrika_minutes"]),
-        watermark_skew_minutes=int(freshness["watermark_skew_minutes"]),
-        clicks=int(metrics["clicks"]),
-        conversions=int(metrics["goal_visits"]),
-        spend_rub=int(metrics["cost_micros"]) // 1_000_000,
-        cpa_rub=str(metrics["cpa_rub"]),
-        budget_utilization_percent=str(metrics["budget_utilization_percent"]),
-        campaign_state=str(snapshot["campaign"]["state"]),
-        campaign_strategy=str(snapshot["campaign"]["strategy"]),
-        current_fingerprint=prepared.expected_fingerprint,
     )
-    outcome = BoundedAutonomyService(
-        policy,
-        state,
-        mandate_authority,
-        adapter,
-        clock=lambda: now,
-        environment=ExecutionEnvironment.TEST,
-    ).execute(request)
+    execution_result = module_outcome.result.execution_result
+    if execution_result is None:
+        errors = module_outcome.result.errors
+        reason = errors[0].code if errors else "DIRECT_MODULE_EXECUTION_FAILED"
+        raise UiRunRejected(
+            reason,
+            "The paired Direct module did not return a Mandate execution result.",
+        )
     return {
-        "status": outcome.status.value,
-        "reason_code": outcome.reason_code,
+        "status": execution_result.status,
+        "reason_code": (
+            None
+            if not module_outcome.result.errors
+            else module_outcome.result.errors[0].code
+        ),
         "approval_id": None,
         "mandate_id": mandate_id,
         "action": prepared.action.value,
         "before_micros": prepared.current_value,
         "after_micros": prepared.target_value,
-        "readback_micros": outcome.observed_value,
+        "readback_micros": module_outcome.observed_value,
         "relative_step_percent": step,
-        "write_calls": adapter.write_calls,
+        "write_calls": module_outcome.write_calls,
         "external_write_sent": False,
         "adapter": "SEALED_FAKE",
         "executor_invoked": True,
@@ -1276,9 +1229,10 @@ class UiRunService:
                     recommendation_rules_value,
                 ),
             )
+            proposal_store = ImmutableProposalStore(run_directory / "proposals")
             recommendation = RecommendationService(
                 DeterministicFakeModelProvider(),
-                ImmutableProposalStore(run_directory / "proposals"),
+                proposal_store,
             ).recommend(
                 projection=projection,
                 run_id=run_id,
@@ -1331,6 +1285,8 @@ class UiRunService:
                     snapshot=snapshot,
                     proposal=proposal,
                     proposal_hash=recommendation.canonical_hash,
+                    projection=projection,
+                    proposal_store=proposal_store,
                     now=now,
                 )
             elif read_only or effective_operating_mode == "RECOMMEND":
@@ -1359,12 +1315,15 @@ class UiRunService:
                         "The Dashboard Mandate authority is unavailable.",
                     )
                 execution = _execute_bounded_simulated_change(
+                    run_directory=run_directory,
                     policy=self.policy,
                     state=self.autonomy_control_state,
                     mandate_authority=self.autonomy_mandate_authority,
                     snapshot=snapshot,
                     proposal=proposal,
                     proposal_hash=recommendation.canonical_hash,
+                    projection=projection,
+                    proposal_store=proposal_store,
                     mandate_id=str(mandate_id),
                     now=now,
                 )
@@ -1375,6 +1334,8 @@ class UiRunService:
                     snapshot=snapshot,
                     proposal=proposal,
                     proposal_hash=recommendation.canonical_hash,
+                    projection=projection,
+                    proposal_store=proposal_store,
                     now=now,
                 )
         if read_only and progress_callback is not None:
@@ -1866,6 +1827,18 @@ class UiRunService:
         source_directory = self.runs_root / run_id
         run_directory = self.runs_root / revision_run_id
         run_directory.mkdir(parents=True, exist_ok=False)
+        source_result = _read_json(source_directory / "result.json")
+        ImmutableProposalStore(run_directory / "proposals").save(
+            revised_proposal,
+            ProviderMetadata(
+                provider=str(source_result["provider"]),
+                model_id=str(source_result["model_id"]),
+                input_tokens=int(source_result["input_tokens"]),
+                output_tokens=int(source_result["output_tokens"]),
+                cost_rub=str(source_result["cost_rub"]),
+                duration_ms=int(source_result["duration_ms"]),
+            ),
+        )
         shutil.copytree(
             source_directory / "components",
             run_directory / "components",
@@ -1925,7 +1898,6 @@ class UiRunService:
             + "\n",
             encoding="utf-8",
         )
-        source_result = _read_json(source_directory / "result.json")
         self._write_normative_evidence(
             run_directory=run_directory,
             report=report,
@@ -1975,6 +1947,14 @@ class UiRunService:
             snapshot=snapshot,
             proposal=proposal,
             proposal_hash=proposal_hash,
+            projection=build_sanitized_projection(
+                _projection_source(snapshot),
+                recommendation_policy(
+                    self.policy,
+                    pending["decision"]["recommendation_rules"],
+                ),
+            ),
+            proposal_store=ImmutableProposalStore(source_directory / "proposals"),
             now=now,
             control_state=self.autonomy_control_state,
             grant_approval=False,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -71,7 +71,7 @@ from mox_adv.goal_lifecycle import (
 from mox_adv.goal_lifecycle import (
     CreationReservation as GoalCreationReservation,
 )
-from mox_adv.impact import ImpactEvaluator, load_impact_fixture
+from mox_adv.impact import load_impact_fixture
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.monitoring import MonitoringRead, MonitoringScheduler, MonitoringStore
 from mox_adv.observe import (
@@ -80,6 +80,10 @@ from mox_adv.observe import (
     read_observe_snapshot,
     run_observe_fixture,
     trusted_fixture_scope,
+)
+from mox_adv.paired_cycle import (
+    evaluate_paired_direct_impact,
+    execute_paired_direct_test_action,
 )
 from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_contracts import CampaignDraftV1
@@ -165,6 +169,58 @@ def _approval_request(prepared: PreparedChange) -> ExecutionRequest:
             kill_switch_available=True,
         ),
     )
+
+
+def _approval_module_snapshot(
+    observe_result: Mapping[str, Any],
+    prepared: PreparedChange,
+    facts: ExecutionFacts,
+) -> Mapping[str, Any]:
+    """Adapt the legacy approval fixture to one typed paired module snapshot."""
+
+    observed = observe_result["snapshot"]
+    records = observed["records"]
+
+    def split(total: int) -> list[int]:
+        quotient, remainder = divmod(total, len(records))
+        return [
+            quotient + (1 if index < remainder else 0) for index in range(len(records))
+        ]
+
+    impressions = split(facts.impressions)
+    clicks = split(facts.clicks)
+    costs = split(facts.spend_rub * 1_000_000)
+    paired_records = [
+        {
+            **dict(record),
+            "impressions": impressions[index],
+            "clicks": clicks[index],
+            "cost_micros": costs[index],
+        }
+        for index, record in enumerate(records)
+    ]
+    campaign = {
+        **dict(observed["campaign"]),
+        "current_weekly_budget_micros": prepared.current_value,
+    }
+    metrics = {
+        **dict(observed["metrics"]),
+        "impressions": facts.impressions,
+        "clicks": facts.clicks,
+        "cost_micros": facts.spend_rub * 1_000_000,
+        "goal_visits": facts.conversions,
+        "ctr_percent": facts.ctr_percent,
+        "cpa_rub": facts.cpa_rub,
+        "budget_utilization_percent": facts.budget_utilization_percent,
+    }
+    return {
+        **dict(observed),
+        "snapshot_id": prepared.snapshot_id,
+        "generated_at": NOW.isoformat(),
+        "campaign": campaign,
+        "metrics": metrics,
+        "records": paired_records,
+    }
 
 
 def _autonomy_prepared(proposal_id: str) -> PreparedChange:
@@ -439,14 +495,16 @@ def _analytics_optimization_workflow(
         raise AssertionError("OBSERVE reported external write egress.")
 
     provider = DeterministicFakeModelProvider()
+    projection = build_sanitized_projection(
+        json.loads(LLM_FIXTURE.read_text(encoding="utf-8")),
+        policy,
+    )
+    proposal_store = ImmutableProposalStore(working / "proposals")
     recommendation = RecommendationService(
         provider,
-        ImmutableProposalStore(working / "proposals"),
+        proposal_store,
     ).recommend(
-        projection=build_sanitized_projection(
-            json.loads(LLM_FIXTURE.read_text(encoding="utf-8")),
-            policy,
-        ),
+        projection=projection,
         run_id="recommend",
         snapshot_id=str(observe_result["snapshot_id"]),
         expected_fingerprint="sha256:" + "2" * 64,
@@ -458,7 +516,13 @@ def _analytics_optimization_workflow(
 
     principal = _FixedAuthenticator().authenticate()
     approval_state = DurableControlState(working / "approval.sqlite3")
-    prepared = _approval_prepared(recommendation.proposal.proposal_id)
+    prepared = replace(
+        _approval_prepared(recommendation.proposal.proposal_id),
+        proposal_hash=recommendation.canonical_hash,
+        expected_diff=dict(recommendation.proposal.expected_diff),
+        snapshot_id=recommendation.proposal.snapshot_id,
+        expected_fingerprint=recommendation.proposal.expected_fingerprint,
+    )
     approval_state.register_prepared_change(prepared)
     approval = approval_state.grant_approval(
         prepared.proposal_id,
@@ -470,16 +534,47 @@ def _analytics_optimization_workflow(
     approval_adapter = FakeWriteAdapter(
         initial_state={prepared.target_key(): prepared.current_value}
     )
-    approval_service = ApprovalExecutionService(
-        policy,
-        approval_state,
-        approval_adapter,
-        clock=tests_now,
-        environment=ExecutionEnvironment.TEST,
+    approval_request = _approval_request(prepared)
+    paired_snapshot = _approval_module_snapshot(
+        observe_result,
+        prepared,
+        approval_request.facts,
     )
-    first = approval_service.execute(_approval_request(prepared))
-    repeated = approval_service.execute(_approval_request(prepared))
-    if first.status != "APPLIED" or repeated.status != "ALREADY_PROCESSED":
+    direct_run_directory = working / "paired-direct"
+    direct_run_directory.mkdir(parents=True, exist_ok=True)
+    first_module = execute_paired_direct_test_action(
+        run_directory=direct_run_directory,
+        policy=policy,
+        snapshot=paired_snapshot,
+        projection=projection,
+        prepared=prepared,
+        state=approval_state,
+        proposal_store=proposal_store,
+        now=tests_now(),
+        execution_facts=approval_request.facts,
+        test_adapter=approval_adapter,
+    )
+    repeated_module = execute_paired_direct_test_action(
+        run_directory=direct_run_directory,
+        policy=policy,
+        snapshot=paired_snapshot,
+        projection=projection,
+        prepared=prepared,
+        state=approval_state,
+        proposal_store=proposal_store,
+        now=tests_now(),
+        execution_facts=approval_request.facts,
+        test_adapter=approval_adapter,
+        persist_artifacts=False,
+    )
+    first_execution = first_module.result.execution_result
+    repeated_execution = repeated_module.result.execution_result
+    if (
+        first_execution is None
+        or repeated_execution is None
+        or first_execution.status != "APPLIED"
+        or repeated_execution.status != "ALREADY_PROCESSED"
+    ):
         raise AssertionError("Approval fake execution was not idempotent.")
     if approval_adapter.write_calls != 1:
         raise AssertionError("Approval fake execution wrote more than once.")
@@ -555,9 +650,12 @@ def _analytics_optimization_workflow(
     if monitoring.status != "POLLED":
         raise AssertionError("Monitoring did not produce a new snapshot.")
 
-    impact = ImpactEvaluator(policy).evaluate(
-        load_impact_fixture(IMPACT_FIXTURE, policy)
+    impact_module = evaluate_paired_direct_impact(
+        run_directory=working / "paired-impact",
+        policy=policy,
+        request=load_impact_fixture(IMPACT_FIXTURE, policy),
     )
+    impact = impact_module.report
     if impact.status != "OBSERVED_POST_CHANGE":
         raise AssertionError("Impact evaluation did not complete.")
 
@@ -568,8 +666,8 @@ def _analytics_optimization_workflow(
             "operation": dict(prepared.expected_diff),
             "before": prepared.current_value,
             "after": prepared.target_value,
-            "readback": first.observed_value,
-            "status": first.status,
+            "readback": first_module.observed_value,
+            "status": first_execution.status,
         },
         "bounded_autonomy": {
             "proposal_id": autonomy_prepared.proposal_id,
@@ -600,6 +698,10 @@ def _analytics_optimization_workflow(
         "impact_report.json": impact.as_dict(),
         "observe-evidence.json": observe_evidence,
         "monitoring-evidence.json": monitoring_evidence,
+        "direct-module-result.json": first_module.result.as_dict(),
+        "direct-decision-record.json": dict(first_module.decision_record),
+        "impact-module-result.json": impact_module.result.as_dict(),
+        "impact-decision-record.json": dict(impact_module.decision_record),
     }
     run_summary = {
         "source": observe_result["source"],
@@ -622,13 +724,13 @@ def _analytics_optimization_workflow(
         },
         "proposal_id": recommendation.proposal.proposal_id,
         "policy_decision": {
-            "approval_required": first.status,
+            "approval_required": first_execution.status,
             "bounded_autonomy": autonomy_result.status,
             "kill_switch": blocked.status,
             "kill_switch_reason": blocked.reason_code,
         },
         "execution": {
-            "technical_command": "SEALED_FAKE_ADAPTERS_AND_LOCAL_INTERCEPTION_ONLY",
+            "technical_command": "DIRECT_TEST_MODULE_AND_SEALED_FAKE_ADAPTERS_ONLY",
             "before": {
                 "approval_required": prepared.current_value,
                 "bounded_autonomy": autonomy_prepared.current_value,
@@ -638,11 +740,11 @@ def _analytics_optimization_workflow(
                 "bounded_autonomy": autonomy_prepared.target_value,
             },
             "readback": {
-                "approval_required": first.observed_value,
+                "approval_required": first_module.observed_value,
                 "bounded_autonomy": autonomy_result.observed_value,
             },
             "final_object_state": {
-                "approval_required": first.status,
+                "approval_required": first_execution.status,
                 "bounded_autonomy": autonomy_result.status,
                 "kill_switch": blocked.status,
             },
@@ -831,14 +933,14 @@ def _campaign_goal_workflow(
         raise AssertionError("Goal cleanup did not stay in fake rollback.")
 
     return {
-        "campaign_status": campaign_result.status.value,
+        "campaign_status": _status_value(campaign_result.status),
         "campaign_completed_steps": [
             str(item) for item in campaign_result.completed_steps
         ],
         "campaign_fake_call_count": len(calls_after_repeat),
-        "campaign_rollback_status": rollback.status.value,
-        "goal_technical_status": technical.status.value,
-        "goal_semantic_status": rejected.status.value,
+        "campaign_rollback_status": _status_value(rollback.status),
+        "goal_technical_status": _status_value(technical.status),
+        "goal_semantic_status": _status_value(rejected.status),
         "goal_event": asdict(event_evidence),
         "goal_technical_evidence": asdict(technical),
         "goal_site_diff": dict(publication.exact_diff),
@@ -852,6 +954,10 @@ def _campaign_goal_workflow(
 
 def tests_now() -> datetime:
     return NOW
+
+
+def _status_value(value: object) -> str:
+    return str(getattr(value, "value", value))
 
 
 def run_readonly_e2e(

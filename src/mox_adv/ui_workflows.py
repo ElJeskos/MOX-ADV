@@ -58,10 +58,10 @@ from mox_adv.goal_store import GoalLifecycleStore
 from mox_adv.impact import (
     ImpactArtifactStore,
     ImpactEvaluationRequest,
-    ImpactEvaluator,
     ImpactObservation,
     ImpactRejected,
 )
+from mox_adv.paired_cycle import evaluate_paired_direct_impact
 
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 ControlledPilotExecutor = Callable[
@@ -445,7 +445,7 @@ class DashboardWorkflowFacade:
             raise DashboardWorkflowRejected("SEMANTIC_DECISION_INVALID")
         if execution_mode == "PRODUCTION":
             raise DashboardWorkflowRejected(PRODUCTION_WRITE_FORBIDDEN)
-        preview = self.preview_goal(
+        self.preview_goal(
             run_id=run_id,
             proposal_id=proposal_id,
             candidate_payload=candidate_payload,
@@ -777,11 +777,15 @@ class DashboardWorkflowFacade:
 
         request = self._impact_request(request_payload)
         self._require_identifier(request.run_id, "RUN_ID_INVALID")
-        try:
-            report = ImpactEvaluator(self.policy).evaluate(request)
-        except ImpactRejected as error:
-            raise DashboardWorkflowRejected(str(error)) from error
         run_directory = self._run_directory(request.run_id)
+        try:
+            report = evaluate_paired_direct_impact(
+                run_directory=run_directory,
+                policy=self.policy,
+                request=request,
+            ).report
+        except (ImpactRejected, ValueError) as error:
+            raise DashboardWorkflowRejected(str(error)) from error
         canonical_path = run_directory / "impact_report.json"
         stored = ImpactArtifactStore(run_directory).write(report)
         options = self._impact_decision_options(request.change_id)

@@ -299,7 +299,7 @@ class ExternalEvidenceV1:
         _one_of(
             self.source,
             "external_evidence.source",
-            ("CUSTOMER_ECOSYSTEM",),
+            ("CUSTOMER_ECOSYSTEM", "PAIRED_MODULE_RESULT"),
         )
 
     @classmethod

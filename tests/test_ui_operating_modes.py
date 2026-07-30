@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -115,6 +116,20 @@ class UiOperatingModeTests(unittest.TestCase):
             )
             usage = dashboard.mandate_authority.usage(str(mandate["mandate_id"]))
             self.assertEqual(1, usage.action_count)
+            run_directory = root / report["run_id"]
+            module_result = json.loads(
+                (run_directory / "direct-module-result.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            decision = json.loads(
+                (run_directory / "direct-decision-record.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual("APPLIED", module_result["execution_result"]["status"])
+            self.assertEqual("APPLY_OPTIMIZATION", decision["operation_type"])
+            self.assertEqual("SUCCEEDED", decision["outcome"])
 
     def test_bounded_quota_rejection_still_produces_normative_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -155,6 +170,16 @@ class UiOperatingModeTests(unittest.TestCase):
             self.assertTrue((run_directory / "result.json").is_file())
             self.assertTrue((run_directory / "events.jsonl").is_file())
             self.assertFalse((run_directory / "change_diff.json").exists())
+            module_result = json.loads(
+                (run_directory / "direct-module-result.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual("BLOCKED", module_result["status"])
+            self.assertEqual(
+                "ACTION_QUOTA_REACHED",
+                module_result["errors"][0]["code"],
+            )
 
     def test_suspended_effective_campaign_recommends_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

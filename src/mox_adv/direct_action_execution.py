@@ -7,6 +7,8 @@ from mox_adv.approval_execution import (
     ExecutionFacts,
     ExecutionRequest,
 )
+from mox_adv.autonomy_contracts import BoundedAutonomyRequest
+from mox_adv.autonomy_execution import BoundedAutonomyService
 from mox_adv.control_state import (
     ControlRejected,
     PreparedChange,
@@ -17,9 +19,9 @@ from mox_adv.direct_action_common import (
     DirectActionContext,
     age_minutes,
     decision_summary,
+    execution_result_metrics,
     proposal_projection,
     public_execution_status,
-    result_metrics,
     state_fingerprint,
     watermark_skew_minutes,
 )
@@ -89,45 +91,112 @@ class DirectActionExecutionV1:
                 "PRODUCTION_WRITE_FORBIDDEN",
                 "No Direct write adapter is present outside TEST.",
             )
-        executor = ApprovalExecutionService(
+        approval_executor = ApprovalExecutionService(
             self._runtime.policy,
             self._runtime.state,
             adapter,
             clock=lambda: now,
             environment=self._runtime.environment,
         )
-        try:
-            existing = self._runtime.state.load_execution(
-                prepared.execution_key()
+        mandate_id = command.mandate_id
+        autonomy_executor = None
+        if mandate_id is not None:
+            if self._runtime.mandate_authority is None:
+                return self._blocked(
+                    request,
+                    "MANDATE_NOT_FOUND",
+                    "The Direct Mandate authority is unavailable.",
+                )
+            autonomy_executor = BoundedAutonomyService(
+                self._runtime.policy,
+                self._runtime.state,
+                self._runtime.mandate_authority,
+                adapter,
+                clock=lambda: now,
+                environment=self._runtime.environment,
             )
+        try:
+            existing = self._runtime.state.load_execution(prepared.execution_key())
         except ControlRejected as error:
             if error.reason_code != "EXECUTION_NOT_FOUND":
                 raise
             existing = None
+        current_fingerprint = state_fingerprint(request, current)
+        if self._runtime.paired_context is not None:
+            paired = self._runtime.paired_context
+            if (
+                paired.snapshot_id == proposal.snapshot_id
+                and paired.expected_fingerprint == prepared.expected_fingerprint
+                and paired.expected_state == current.state
+            ):
+                current_fingerprint = paired.expected_fingerprint
+        facts = self._facts(
+            context,
+            prepared,
+            current_fingerprint,
+        )
+        if (
+            self._runtime.paired_context is not None
+            and self._runtime.paired_context.execution_facts is not None
+        ):
+            facts = self._runtime.paired_context.execution_facts
         if existing is not None:
-            outcome = executor.reconcile(prepared.execution_key())
-        else:
-            outcome = executor.execute(
-                ExecutionRequest(
-                    proposal_id=proposal.proposal_id,
-                    execution_key=prepared.execution_key(),
-                    scope=prepared.scope,
-                    facts=self._facts(
-                        context,
-                        prepared,
-                        state_fingerprint(request, current),
-                    ),
-                )
+            outcome = (
+                approval_executor.reconcile(prepared.execution_key())
+                if autonomy_executor is None
+                else autonomy_executor.reconcile(prepared.execution_key())
             )
+        else:
+            if autonomy_executor is None:
+                outcome = approval_executor.execute(
+                    ExecutionRequest(
+                        proposal_id=proposal.proposal_id,
+                        execution_key=prepared.execution_key(),
+                        scope=prepared.scope,
+                        facts=facts,
+                    )
+                )
+            else:
+                assert mandate_id is not None
+                outcome = autonomy_executor.execute(
+                    BoundedAutonomyRequest(
+                        mandate_id=mandate_id,
+                        proposal_id=proposal.proposal_id,
+                        execution_key=prepared.execution_key(),
+                        scope=prepared.scope,
+                        mode="BOUNDED_AUTONOMY",
+                        automation_enabled=facts.automation_enabled,
+                        comparability_status=facts.comparability_status,
+                        confidence_status=facts.confidence_status,
+                        financial_recommendations_allowed=(
+                            facts.financial_recommendations_allowed
+                        ),
+                        direct_age_minutes=facts.direct_age_minutes,
+                        metrika_age_minutes=facts.metrika_age_minutes,
+                        watermark_skew_minutes=facts.watermark_skew_minutes,
+                        clicks=facts.clicks,
+                        conversions=facts.conversions,
+                        spend_rub=facts.spend_rub,
+                        cpa_rub=facts.cpa_rub,
+                        budget_utilization_percent=(facts.budget_utilization_percent),
+                        campaign_state=facts.campaign_state,
+                        campaign_strategy=facts.campaign_strategy,
+                        current_fingerprint=facts.current_fingerprint,
+                    )
+                )
         status, execution_status, reason_code = public_execution_status(
             outcome.status,
             outcome.reason_code,
         )
-        assessment, recommendations = decision_summary(self._runtime)
-        public_metrics = result_metrics(
+        assessment, recommendations = decision_summary(
+            self._runtime,
+            prepared.action,
+        )
+        public_metrics = execution_result_metrics(
             metrics,
             current,
-            prepared.target_value,
+            prepared,
+            facts,
         )
         provenance = evidence.provenance + current.provenance
         receipt = self._decision_records.record_module_decision(
@@ -152,7 +221,8 @@ class DirectActionExecutionV1:
                     code=reason_code or execution_status,
                     message="The Direct action failed closed.",
                     field=None,
-                    retryable=execution_status in {
+                    retryable=execution_status
+                    in {
                         "UNKNOWN_RESULT",
                         "BLOCKED",
                     },
@@ -199,9 +269,7 @@ class DirectActionExecutionV1:
         operational = self._runtime.state.load_operational_execution_facts(
             prepared.scope,
             now,
-            cooldown_hours=int(
-                self._runtime.policy["timing"]["cooldown_hours"]
-            ),
+            cooldown_hours=int(self._runtime.policy["timing"]["cooldown_hours"]),
             observation_window_hours=int(
                 self._runtime.policy["timing"]["observation_window_hours"]
             ),
@@ -223,24 +291,24 @@ class DirectActionExecutionV1:
             impressions=evidence.impressions,
             spend_rub=evidence.cost_micros // 1_000_000,
             cpa_rub=str(metrics["cpa_rub"]),
-            budget_utilization_percent=str(
-                metrics["budget_utilization_percent"]
-            ),
+            budget_utilization_percent=str(metrics["budget_utilization_percent"]),
             ctr_percent=str(metrics["ctr_percent"]),
             campaign_state=current.state.campaign_state,
             campaign_strategy=current.state.strategy,
             current_fingerprint=fingerprint,
             cooldown_active=operational.cooldown_active,
-            observation_window_active=(
-                operational.observation_window_active
-            ),
+            observation_window_active=(operational.observation_window_active),
             actions_in_last_24h=operational.actions_in_last_24h,
             cumulative_daily_change_percent=(
                 operational.cumulative_daily_change_percent
             ),
             monetary_exposure_rub=(
-                abs(prepared.target_value - prepared.current_value)
-                // 1_000_000
+                abs(prepared.target_value - prepared.current_value) // 1_000_000
+                if (
+                    isinstance(prepared.target_value, int)
+                    and isinstance(prepared.current_value, int)
+                )
+                else 0
             ),
             kill_switch_available=operational.kill_switch_available,
         )

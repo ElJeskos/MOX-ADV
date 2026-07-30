@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Literal, Mapping, Union, cast
+from typing import Any, Dict, Literal, Mapping, Optional, Union, cast
 
 from mox_adv.module_api.v1.contract_validation import (
     ContractValidationError,
@@ -101,6 +101,7 @@ class ExecuteDirectActionCommandV1:
     schema_version: str
     command: Literal["EXECUTE_PROPOSAL"]
     proposal_id: str
+    mandate_id: Optional[str] = None
 
     @classmethod
     def from_dict(
@@ -111,6 +112,7 @@ class ExecuteDirectActionCommandV1:
             value,
             field="direct_action_command",
             required=("schema_version", "command", "proposal_id"),
+            optional=("mandate_id",),
         )
         proposal_id = identifier(
             value["proposal_id"],
@@ -139,14 +141,25 @@ class ExecuteDirectActionCommandV1:
                 ),
             ),
             proposal_id=proposal_id,
+            mandate_id=(
+                None
+                if value.get("mandate_id") is None
+                else identifier(
+                    value["mandate_id"],
+                    "direct_action_command.mandate_id",
+                )
+            ),
         )
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        result: Dict[str, Any] = {
             "schema_version": self.schema_version,
             "command": self.command,
             "proposal_id": self.proposal_id,
         }
+        if self.mandate_id is not None:
+            result["mandate_id"] = self.mandate_id
+        return result
 
 
 DirectActionCommandV1 = Union[
@@ -168,12 +181,9 @@ def direct_action_command_from_dict(
     if command == "EXECUTE_PROPOSAL":
         return ExecuteDirectActionCommandV1.from_dict(value)
     raise ContractValidationError(
-        "direct_action_command.command must be one of: "
-        "PLAN_INTENT, EXECUTE_PROPOSAL"
+        "direct_action_command.command must be one of: PLAN_INTENT, EXECUTE_PROPOSAL"
     )
 
 
 def direct_action_command_object(value: Any) -> DirectActionCommandV1:
-    return direct_action_command_from_dict(
-        object_value(value, "direct_action_command")
-    )
+    return direct_action_command_from_dict(object_value(value, "direct_action_command"))
