@@ -65,6 +65,13 @@ from mox_adv.module_api.v1.impact_contracts import (
     ImpactEvaluationCommandV1,
     ImpactEvaluationOutcomeV1,
 )
+from mox_adv.module_api.v1.provider_observations import (
+    DirectProviderObservationV1,
+    MetrikaProviderObservationV1,
+    ProviderObservationV1,
+    provider_observation_as_dict,
+    provider_observation_from_dict,
+)
 
 MODULE_REQUEST_SCHEMA_VERSION = "module-request-v1"
 MODULE_RESULT_SCHEMA_VERSION = "module-result-v1"
@@ -1237,6 +1244,7 @@ class ModuleResultV1:
     lifecycle_outcome: Optional[GoalLifecycleOutcomeV1] = None
     campaign_creation_outcome: Optional[CampaignCreationOutcomeV1] = None
     impact_outcome: Optional[ImpactEvaluationOutcomeV1] = None
+    provider_observation: Optional[ProviderObservationV1] = None
 
     def __post_init__(self) -> None:
         _one_of(
@@ -1278,6 +1286,22 @@ class ModuleResultV1:
             raise ContractValidationError(
                 "result.impact_outcome must be an ImpactEvaluationOutcomeV1"
             )
+        if self.provider_observation is not None:
+            if not isinstance(
+                self.provider_observation,
+                (DirectProviderObservationV1, MetrikaProviderObservationV1),
+            ):
+                raise ContractValidationError(
+                    "result.provider_observation has an unsupported type"
+                )
+            expected_kind = {
+                "YANDEX_DIRECT": "DIRECT",
+                "YANDEX_METRIKA": "METRIKA",
+            }.get(self.module.module_id)
+            if expected_kind != self.provider_observation.kind:
+                raise ContractValidationError(
+                    "result.provider_observation does not match the module identity"
+                )
         if status in ("BLOCKED", "REJECTED", "FAILED") and not self.errors:
             raise ContractValidationError(
                 f"result.errors must not be empty when status is {status}"
@@ -1335,6 +1359,7 @@ class ModuleResultV1:
                 "lifecycle_outcome",
                 "campaign_creation_outcome",
                 "impact_outcome",
+                "provider_observation",
             ),
         )
         proposal_value = value.get("proposal")
@@ -1342,6 +1367,7 @@ class ModuleResultV1:
         lifecycle_outcome = value.get("lifecycle_outcome")
         campaign_creation_outcome = value.get("campaign_creation_outcome")
         impact_outcome = value.get("impact_outcome")
+        provider_observation = value.get("provider_observation")
         errors = tuple(
             ModuleErrorV1.from_dict(
                 _object(item, f"errors[{index}]"),
@@ -1447,6 +1473,16 @@ class ModuleResultV1:
                 if impact_outcome is None
                 else ImpactEvaluationOutcomeV1.from_dict(
                     _object(impact_outcome, "impact_outcome")
+                )
+            ),
+            provider_observation=(
+                None
+                if provider_observation is None
+                else provider_observation_from_dict(
+                    _object(
+                        provider_observation,
+                        "provider_observation",
+                    )
                 )
             ),
         )
@@ -1570,4 +1606,8 @@ class ModuleResultV1:
             )
         if self.impact_outcome is not None:
             value["impact_outcome"] = self.impact_outcome.as_dict()
+        if self.provider_observation is not None:
+            value["provider_observation"] = provider_observation_as_dict(
+                self.provider_observation
+            )
         return value

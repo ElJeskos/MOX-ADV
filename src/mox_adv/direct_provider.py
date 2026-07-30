@@ -133,6 +133,8 @@ class DirectObservationV1:
     provenance: Tuple[ModuleProvenanceV1, ...]
     budget_period_mismatch: bool
     watermark_skew_exceeded: bool
+    provider_report: Optional[DirectReportBlock] = None
+    provider_state: Optional[DirectCampaignStateBlock] = None
 
 
 @dataclass(frozen=True)
@@ -360,6 +362,8 @@ class DirectObservationReaderV1:
             watermark_skew_exceeded=(
                 abs(report_watermark - state_watermark) > timedelta(hours=6)
             ),
+            provider_report=report,
+            provider_state=state,
         )
 
     @classmethod
@@ -419,7 +423,10 @@ class DirectObservationReaderV1:
             not isinstance(row, DirectReportRow) for row in report.rows
         ):
             raise ValueError("The provider response rows are malformed.")
-        if report.source != "DIRECT_REPORTS":
+        allowed_sources = {"DIRECT_REPORTS"}
+        if request.environment == "TEST":
+            allowed_sources.add("LOCAL_FIXTURE")
+        if report.source not in allowed_sources:
             raise ValueError("The provider report source is unsupported.")
         if (
             report.period_start != request.period.start_date
@@ -476,7 +483,10 @@ class DirectObservationReaderV1:
                 "The provider response does not match "
                 "DirectCampaignStateBlock."
             )
-        if state.source != "DIRECT_CAMPAIGN_STATE":
+        allowed_sources = {"DIRECT_CAMPAIGN_STATE"}
+        if request.environment == "TEST":
+            allowed_sources.add("LOCAL_FIXTURE")
+        if state.source not in allowed_sources:
             raise ValueError("The provider state source is unsupported.")
         if state.campaign != request.scope.campaign_id:
             raise ValueError(

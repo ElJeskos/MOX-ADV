@@ -21,6 +21,7 @@ from mox_adv.module_analysis import (
 from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
     MetricValueV1,
+    MetrikaProviderObservationV1,
     ModuleAssessmentV1,
     ModuleDecisionFactsV1,
     ModuleDecisionRecordStoreV1,
@@ -171,6 +172,13 @@ class StandaloneMetrikaAnalysisV1:
             warnings=warnings,
             errors=(),
             decision_record_ref=receipt.reference,
+            provider_observation=(
+                None
+                if observation.provider_report is None
+                else MetrikaProviderObservationV1(
+                    report=observation.provider_report,
+                )
+            ),
         )
 
     def _validate_request(

@@ -12,8 +12,8 @@ from mox_adv.direct_conclusions import (
 from mox_adv.direct_metrics import DirectMetric, calculate_direct_metrics
 from mox_adv.direct_provider import (
     AuthorizedDirectReadProviderV1,
-    DirectObservationV1,
     DirectObservationReaderV1,
+    DirectObservationV1,
     DirectProviderUnavailable,
     DirectReadAuthorizationError,
 )
@@ -25,6 +25,7 @@ from mox_adv.module_analysis import (
 )
 from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
+    DirectProviderObservationV1,
     MetricValueV1,
     ModuleAssessmentV1,
     ModuleDecisionFactsV1,
@@ -166,6 +167,17 @@ class StandaloneDirectAnalysisV1:
             errors=(),
             decision_record_ref=receipt.reference,
             hypotheses=hypotheses,
+            provider_observation=(
+                None
+                if (
+                    observation.provider_report is None
+                    or observation.provider_state is None
+                )
+                else DirectProviderObservationV1(
+                    report=observation.provider_report,
+                    state=observation.provider_state,
+                )
+            ),
         )
 
     def _validate_request(

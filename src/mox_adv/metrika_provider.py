@@ -86,6 +86,7 @@ class MetrikaObservationV1:
     goal_visits: int
     observed_at: datetime
     provenance: ModuleProvenanceV1
+    provider_report: Optional[MetrikaReportBlock] = None
 
 
 class MetrikaObservationReaderV1:
@@ -185,6 +186,7 @@ class MetrikaObservationReaderV1:
                 retrieved_at=report.retrieved_at,
                 watermark=report.watermark,
             ),
+            provider_report=report,
         )
 
     @classmethod
@@ -199,7 +201,10 @@ class MetrikaObservationReaderV1:
             not isinstance(row, MetrikaReportRow) for row in report.rows
         ):
             raise ValueError("The provider response rows are malformed.")
-        if report.source != "METRIKA_REPORT":
+        allowed_sources = {"METRIKA_REPORT"}
+        if request.environment == "TEST":
+            allowed_sources.add("LOCAL_FIXTURE")
+        if report.source not in allowed_sources:
             raise ValueError("The provider response source is unsupported.")
         if (
             report.period_start != request.period.start_date

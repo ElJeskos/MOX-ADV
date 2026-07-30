@@ -31,13 +31,18 @@ from mox_adv.contracts import (
     RunOutcome,
     TrustedAnalyticsScope,
 )
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.errors import RunAlreadyExistsError, RunRejectedError
 from mox_adv.internal_api.v1 import (
     DirectCampaignStateReadAPI,
     DirectReportsReadAPI,
     MetrikaReportReadAPI,
 )
+from mox_adv.module_api.v1 import InProcessModuleAdapterV1
+from mox_adv.modules.direct import BoundDirectReadProviderV1, DirectModuleV1
+from mox_adv.modules.metrika import BoundMetrikaReadProviderV1, MetrikaModuleV1
 from mox_adv.normalization import IntegratedSnapshotNormalizerV1
+from mox_adv.paired_runtime import PairedConnectionRefsV1, PairedModuleRuntimeV1
 from mox_adv.trust_boundary import (
     capability_report_section,
     emit_run_capability_evidence,
@@ -409,16 +414,50 @@ def run_observe_fixture(
             connected.observation_id,
         )
         fixture_reads = FixtureAnalyticsReadConnectorsV1(connected)
-        snapshot = read_observe_snapshot(
+        observed_at = datetime.fromisoformat(connected.generated_at)
+        direct_module = DirectModuleV1(
+            clock=lambda: observed_at,
+            provider_reader=BoundDirectReadProviderV1(
+                connection_id=trusted_scope.connection,
+                account_id=trusted_scope.account,
+                campaign_id=trusted_scope.campaign,
+                trusted_change_author=connected.direct_state.last_change_author,
+                report_reader=fixture_reads,
+                state_reader=fixture_reads,
+            ),
+            environment=ExecutionEnvironment.TEST,
+        )
+        metrika_module = MetrikaModuleV1(
+            clock=lambda: observed_at,
+            provider_reader=BoundMetrikaReadProviderV1(
+                connection_id=trusted_scope.connection,
+                counter_id=trusted_scope.counter,
+                goal_id=trusted_scope.goal,
+                campaign_id=trusted_scope.campaign,
+                reader=fixture_reads,
+            ),
+        )
+        snapshot = PairedModuleRuntimeV1(
+            direct=InProcessModuleAdapterV1(
+                direct_module,
+                environment=ExecutionEnvironment.TEST,
+            ),
+            metrika=InProcessModuleAdapterV1(
+                metrika_module,
+                environment=ExecutionEnvironment.TEST,
+            ),
+            environment=ExecutionEnvironment.TEST,
+        ).collect_snapshot(
             policy=policy,
             observation_id=connected.observation_id,
             generated_at=connected.generated_at,
             period_start=connected.direct_report.period_start,
             period_end=connected.direct_report.period_end,
             trusted_scope=trusted_scope,
-            direct_reports=fixture_reads,
-            direct_state=fixture_reads,
-            metrika_report=fixture_reads,
+            connection_refs=PairedConnectionRefsV1(
+                direct=trusted_scope.connection,
+                metrika=trusted_scope.connection,
+            ),
             baseline=connected.baseline,
         )
         journal.append(

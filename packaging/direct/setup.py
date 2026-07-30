@@ -57,6 +57,7 @@ PACKAGE_MODULES = {
         "direct_action_contracts",
         "goal_lifecycle_contracts",
         "impact_contracts",
+        "provider_observations",
     },
     "mox_adv.modules": {"__init__", "_bound", "direct"},
 }

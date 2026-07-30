@@ -78,6 +78,11 @@ from mox_adv.module_api.v1.impact_contracts import (
     ImpactEvaluationCommandV1,
     ImpactEvaluationOutcomeV1,
 )
+from mox_adv.module_api.v1.provider_observations import (
+    DirectProviderObservationV1,
+    MetrikaProviderObservationV1,
+    ProviderObservationV1,
+)
 
 __all__ = [
     "EXTERNAL_EVIDENCE_SCHEMA_VERSION",
@@ -106,6 +111,7 @@ __all__ = [
     "EvaluateGoalEligibilityCommandV1",
     "ExternalEvidenceV1",
     "DirectActionCommandV1",
+    "DirectProviderObservationV1",
     "ExecuteDirectActionCommandV1",
     "GoalCandidateInputV1",
     "GoalEventEvidenceV1",
@@ -120,6 +126,7 @@ __all__ = [
     "ImpactEvaluationOutcomeV1",
     "MODULE_DECISION_RECORD_SCHEMA_VERSION",
     "MetricValueV1",
+    "MetrikaProviderObservationV1",
     "ModuleAssessmentV1",
     "ModuleErrorV1",
     "ModuleExecutionResultV1",
@@ -141,6 +148,7 @@ __all__ = [
     "ModuleV1",
     "ModuleWarningV1",
     "PlanDirectActionCommandV1",
+    "ProviderObservationV1",
     "PublishGoalEventCommandV1",
     "StoredConnectionRefV1",
     "VerifyGoalDeliveryCommandV1",

@@ -78,7 +78,10 @@ An `EXECUTE` request expresses typed intent but grants no authority: the trusted
 The published HTTP contract is [`openapi/module-api-v1.openapi.json`](openapi/module-api-v1.openapi.json).
 The Python operation mapping is canonical for the closed operation vocabulary, and a parity test requires OpenAPI to publish the same valid kind/type pairs.
 Generating the complete OpenAPI document from code is intentionally deferred to a dedicated contract-tooling slice.
-The existing paired runtime and Dashboard continue to use the legacy composition until their dedicated migration slice.
+The paired runtime now invokes `DirectModuleV1` and `MetrikaModuleV1` through `InProcessModuleAdapterV1` and reconstructs the unchanged integrated snapshot only from their canonical `ModuleResultV1` values.
+Provider-backed results carry an optional lossless normalized observation with the validated daily grain and Direct state needed by paired analytics.
+The observation contains no credential or arbitrary provider payload and remains absent for customer-supplied aggregate evidence.
+The paired Dashboard routes, controls, reports, operating modes, and Russian user-facing behavior remain unchanged.
 
 ## Standalone Metrika
 
@@ -116,6 +119,15 @@ The Dashboard keeps its routes and simulated workflows, but it cannot be compose
 Both public module adapters require a trusted server-side environment at composition time.
 The environment in `ModuleRequestV1` is an untrusted declaration and cannot enable execution unless the trusted composition is also explicitly `TEST`.
 A blocked public request returns `ModuleResultV1.status = BLOCKED`, an unapplied blocked execution result, and a Decision Record reference containing the same stable reason code.
+
+## Paired production read-only composition
+
+The Dashboard production reader composes isolated Direct and Metrika provider implementations through the same in-process modules used by standalone integrations.
+The Direct provider resolves only `YANDEX_DIRECT_OAUTH_TOKEN` and `YANDEX_DIRECT_CLIENT_LOGIN`.
+The Metrika provider resolves only `YANDEX_METRIKA_OAUTH_TOKEN`.
+The paired composition itself receives only stored connection references and typed `ModuleResultV1` values.
+It performs one Direct Reports read, one Direct campaign-state read, and one Metrika report read, and it exposes no provider write operation.
+The local configuration path defaults to `config/yandex-production-read.json`, and credentials are read from the local `.env` file without being added to reports, snapshots, or request records.
 
 ## Tests
 
