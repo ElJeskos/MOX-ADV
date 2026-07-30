@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from mox_adv.goal_contracts import (
@@ -27,10 +27,12 @@ class FakeMetrikaGoalAdapter:
         allowed_counter_ids: Iterable[str],
         write_delay_seconds: float = 0,
         timeout_after_write: bool = False,
+        before_add_goal: Callable[[str], None] | None = None,
     ) -> None:
         self.allowed_counter_ids = frozenset(allowed_counter_ids)
         self.write_delay_seconds = write_delay_seconds
         self.timeout_after_write = timeout_after_write
+        self.before_add_goal = before_add_goal
         self._goals: dict[str, dict[str, dict[str, Any]]] = {
             counter_id: {} for counter_id in self.allowed_counter_ids
         }
@@ -65,6 +67,8 @@ class FakeMetrikaGoalAdapter:
         execution_key: str,
     ) -> Mapping[str, Any]:
         self._require_counter(counter_id)
+        if self.before_add_goal is not None:
+            self.before_add_goal(execution_key)
         if self.write_delay_seconds:
             time.sleep(self.write_delay_seconds)
         with self._lock:

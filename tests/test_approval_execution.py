@@ -960,18 +960,22 @@ class EgressGuardTests(unittest.TestCase):
             policy,
             environment=ExecutionEnvironment.TEST,
         )
-        guard.authorize(
-            "POST",
-            "https://api.direct.yandex.com/json/v501/campaigns",
-            version="v501",
-            service="Campaigns",
-            operation="update",
-            authority=EgressAuthority(
-                CredentialProfile.DIRECT_PILOT_WRITE,
-                "pilot-account",
-            ),
-            pilot_armed=True,
-        )
+        with self.assertRaisesRegex(
+            EgressDenied,
+            "TEST_WRITE_ADAPTER_REQUIRED",
+        ):
+            guard.authorize(
+                "POST",
+                "https://api.direct.yandex.com/json/v501/campaigns",
+                version="v501",
+                service="Campaigns",
+                operation="update",
+                authority=EgressAuthority(
+                    CredentialProfile.DIRECT_PILOT_WRITE,
+                    "pilot-account",
+                ),
+                pilot_armed=True,
+            )
         cases = (
             (
                 "DELETE",

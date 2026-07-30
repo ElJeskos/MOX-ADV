@@ -428,19 +428,23 @@ class ExactEgressBoundaryTests(unittest.TestCase):
             environment=ExecutionEnvironment.TEST,
         )
 
-        guard.authorize(
-            "POST",
-            "https://mc.yandex.ru/watch/test-counter",
-            version="tag-v1",
-            service="BrowserTag",
-            operation="reachGoal",
-            authority=EgressAuthority(
-                CredentialProfile.TEST_SITE_PUBLISH,
-                "test-site-zone",
-                counter_id="test-counter",
-            ),
-            pilot_armed=True,
-        )
+        with self.assertRaisesRegex(
+            EgressDenied,
+            "TEST_WRITE_ADAPTER_REQUIRED",
+        ):
+            guard.authorize(
+                "POST",
+                "https://mc.yandex.ru/watch/test-counter",
+                version="tag-v1",
+                service="BrowserTag",
+                operation="reachGoal",
+                authority=EgressAuthority(
+                    CredentialProfile.TEST_SITE_PUBLISH,
+                    "test-site-zone",
+                    counter_id="test-counter",
+                ),
+                pilot_armed=True,
+            )
 
         cases = (
             EgressAuthority(

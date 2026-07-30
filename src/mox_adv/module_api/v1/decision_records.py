@@ -6,9 +6,13 @@ import copy
 import hashlib
 import json
 import threading
+from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Protocol
 
-from mox_adv.environment import PRODUCTION_WRITE_FORBIDDEN
+from mox_adv.environment import (
+    PRODUCTION_WRITE_FORBIDDEN,
+    ExecutionEnvironment,
+)
 from mox_adv.module_api.v1.contracts import (
     ModuleIdentityV1,
     ModuleRequestV1,
@@ -18,6 +22,14 @@ from mox_adv.module_api.v1.contracts import (
 MODULE_DECISION_RECORD_SCHEMA_VERSION = "module-decision-record-v1"
 
 
+@dataclass(frozen=True)
+class ModuleDecisionRecordReceiptV1:
+    """Typed identity and opaque reference returned by a Decision Record store."""
+
+    decision_id: str
+    reference: str
+
+
 class ModuleDecisionRecordStoreV1(Protocol):
     """Persist a blocked module decision and return its opaque reference."""
 
@@ -25,7 +37,8 @@ class ModuleDecisionRecordStoreV1(Protocol):
         self,
         module: ModuleIdentityV1,
         request: ModuleRequestV1,
-    ) -> str: ...
+        trusted_environment: ExecutionEnvironment,
+    ) -> ModuleDecisionRecordReceiptV1: ...
 
 
 class InMemoryDecisionRecordStoreV1:
@@ -39,12 +52,15 @@ class InMemoryDecisionRecordStoreV1:
         self,
         module: ModuleIdentityV1,
         request: ModuleRequestV1,
-    ) -> str:
+        trusted_environment: ExecutionEnvironment,
+    ) -> ModuleDecisionRecordReceiptV1:
         record: Dict[str, Any] = {
             "schema_version": MODULE_DECISION_RECORD_SCHEMA_VERSION,
             "module": module.as_dict(),
             "idempotency_key": request.idempotency_key,
             "environment": request.environment,
+            "requested_environment": request.environment,
+            "trusted_environment": trusted_environment.value,
             "operation_kind": request.operation.kind,
             "operation_type": request.operation.operation_type,
             "outcome": "BLOCKED",
@@ -62,7 +78,10 @@ class InMemoryDecisionRecordStoreV1:
         stored["decision_id"] = decision_id
         with self._lock:
             self._records[reference] = stored
-        return reference
+        return ModuleDecisionRecordReceiptV1(
+            decision_id=decision_id,
+            reference=reference,
+        )
 
     def read(self, reference: str) -> Mapping[str, Any]:
         with self._lock:

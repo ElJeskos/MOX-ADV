@@ -56,10 +56,10 @@ class GoalLifecycleService:
         *,
         environment: ExecutionEnvironment,
     ) -> None:
-        if not isinstance(
-            goal_adapter,
-            FakeMetrikaGoalAdapter,
-        ) or not isinstance(site_adapter, FakeSitePublishAdapter):
+        if (
+            type(goal_adapter) is not FakeMetrikaGoalAdapter
+            or type(site_adapter) is not FakeSitePublishAdapter
+        ):
             raise GoalLifecycleRejected("FAKE_ADAPTER_REQUIRED")
         self.policy = policy
         self.store = store

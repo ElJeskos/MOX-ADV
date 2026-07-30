@@ -190,7 +190,7 @@ class CampaignWorkflowFacadeTests(WorkflowFacadeTestCase):
     def test_campaign_production_run_fails_closed_without_exact_authority(self) -> None:
         with self.assertRaisesRegex(
             DashboardWorkflowRejected,
-            "PRODUCTION_AUTHORITY_REQUIRED",
+            "PRODUCTION_WRITE_FORBIDDEN",
         ):
             self.facade.run_campaign(
                 run_id="dashboard-campaign-production-1",
@@ -203,100 +203,34 @@ class CampaignWorkflowFacadeTests(WorkflowFacadeTestCase):
 
         self.assertFalse((self.runs_root / "dashboard-campaign-production-1").exists())
 
-    def test_campaign_production_runs_only_with_exact_preview_authority(self) -> None:
-        policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
-        policy["bindings"]["pilot"].update(
-            {
-                "direct_account": "pilot-direct-account",
-                "campaign_creation_reservation": "pilot-campaign-reservation",
-            }
-        )
-        policy_path = self.runs_root / "pilot-policy.json"
-        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    def test_campaign_production_cannot_compose_a_write_executor(self) -> None:
         calls = []
-        authority_checks = []
 
         def controlled_executor(plan):
             calls.append(plan)
-            return {
-                "status": "APPLIED",
-                "execution_status": "APPLIED",
-                "external_write_sent": True,
-                "evidence_paths": ["controlled-pilot-readback.json"],
-            }
+            raise AssertionError("Production executor must never be called.")
 
-        def verify_authority(workflow, authority, requirement, requested_at):
-            authority_checks.append((workflow, authority, requirement, requested_at))
-            if authority["binding_hash"] != requirement["exact_binding"]:
-                raise DashboardWorkflowRejected(
-                    "PRODUCTION_AUTHORITY_NOT_EXACTLY_BOUND"
-                )
-            return {
-                "status": "VERIFIED",
-                "authority_ids": [authority["approval_id"]],
-                "binding_hashes": [authority["binding_hash"]],
-                "evidence_paths": ["approval.json"],
-            }
-
-        facade = DashboardWorkflowFacade(
-            runs_root=self.runs_root,
-            policy_path=policy_path,
-            campaign_safety=campaign_safety(),
-            production_campaign_executor=controlled_executor,
-            production_authority_verifier=verify_authority,
-        )
-        preview = facade.preview_campaign(
-            run_id="dashboard-campaign-production-2",
-            proposal_id="proposal-dashboard-campaign-production-2",
-            draft_payload=campaign_draft_payload(),
-            execution_mode="PRODUCTION",
-        )
-        authority = {
-            "kind": "APPROVAL",
-            "approval_id": "approval-controlled-campaign-2",
-            "proposal_id": "proposal-dashboard-campaign-production-2",
-            "binding_hash": preview["authority_requirement"]["exact_binding"],
-            "approver": "sviridov",
-            "authentication": "authenticated_macos_user",
-            "expires_at": "2026-07-30T09:15:00+00:00",
-            "snapshot_id": "snapshot-controlled-campaign-2",
-            "expected_fingerprint": "sha256:" + "1" * 64,
-        }
-
-        result = facade.run_campaign(
-            run_id="dashboard-campaign-production-2",
-            proposal_id="proposal-dashboard-campaign-production-2",
-            draft_payload=campaign_draft_payload(),
-            execution_mode="PRODUCTION",
-            requested_at="2026-07-30T09:00:00+00:00",
-            authority=authority,
-        )
-
-        self.assertEqual("READY_FOR_CONTROLLED_PILOT", preview["status"])
-        self.assertEqual("pilot-direct-account", preview["target"]["account"])
-        self.assertEqual("APPLIED", result["status"])
-        self.assertTrue(result["external_write_sent"])
-        self.assertEqual(1, len(calls))
-        self.assertEqual(1, len(authority_checks))
-        self.assertEqual(
-            ["approval-controlled-campaign-2"],
-            calls[0]["authority_evidence"]["authority_ids"],
-        )
-        changed_authority = dict(authority)
-        changed_authority["binding_hash"] = "sha256:" + "0" * 64
         with self.assertRaisesRegex(
             DashboardWorkflowRejected,
-            "PRODUCTION_AUTHORITY_NOT_EXACTLY_BOUND",
+            "PRODUCTION_WRITE_FORBIDDEN",
         ):
-            facade.run_campaign(
+            DashboardWorkflowFacade(
+                runs_root=self.runs_root,
+                policy_path=POLICY_PATH,
+                campaign_safety=campaign_safety(),
+                production_campaign_executor=controlled_executor,
+            )
+        with self.assertRaisesRegex(
+            DashboardWorkflowRejected,
+            "PRODUCTION_WRITE_FORBIDDEN",
+        ):
+            self.facade.preview_campaign(
                 run_id="dashboard-campaign-production-2",
                 proposal_id="proposal-dashboard-campaign-production-2",
                 draft_payload=campaign_draft_payload(),
                 execution_mode="PRODUCTION",
-                requested_at="2026-07-30T09:00:00+00:00",
-                authority=changed_authority,
             )
-        self.assertEqual(1, len(calls))
+        self.assertEqual([], calls)
 
 
 class GoalWorkflowFacadeTests(WorkflowFacadeTestCase):
@@ -431,7 +365,7 @@ class GoalWorkflowFacadeTests(WorkflowFacadeTestCase):
     def test_goal_production_run_fails_closed_without_exact_authority(self) -> None:
         with self.assertRaisesRegex(
             DashboardWorkflowRejected,
-            "PRODUCTION_GOAL_AUTHORITY_REQUIRED",
+            "PRODUCTION_WRITE_FORBIDDEN",
         ):
             self.facade.run_goal(
                 run_id="dashboard-goal-production-1",
@@ -447,129 +381,35 @@ class GoalWorkflowFacadeTests(WorkflowFacadeTestCase):
 
         self.assertFalse((self.runs_root / "dashboard-goal-production-1").exists())
 
-    def test_goal_production_runs_only_with_both_exact_authorities(self) -> None:
-        policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
-        policy["bindings"]["pilot"].update(
-            {
-                "pilot_counter": "pilot-counter",
-                "pilot_site_zone": "pilot-site-zone",
-                "pilot_candidate_goal_reservation": "pilot-goal-reservation",
-            }
-        )
-        policy_path = self.runs_root / "pilot-goal-policy.json"
-        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    def test_goal_production_cannot_compose_a_write_executor(self) -> None:
         calls = []
-        authority_checks = []
 
         def controlled_executor(plan):
             calls.append(plan)
-            return {
-                "status": "APPLIED",
-                "execution_status": "APPLIED",
-                "external_write_sent": True,
-                "evidence_paths": ["controlled-goal-readback.json"],
-            }
+            raise AssertionError("Production executor must never be called.")
 
-        def verify_authority(workflow, authority, requirement, requested_at):
-            authority_checks.append((workflow, authority, requirement, requested_at))
-            expected = {
-                requirement["goal_creation"]["exact_binding"],
-                requirement["site_publish"]["exact_binding"],
-            }
-            supplied = {
-                authority["goal_creation"]["binding_hash"],
-                authority["site_publish"]["binding_hash"],
-            }
-            if supplied != expected:
-                raise DashboardWorkflowRejected(
-                    "PRODUCTION_GOAL_AUTHORITY_NOT_EXACTLY_BOUND"
-                )
-            return {
-                "status": "VERIFIED",
-                "authority_ids": [
-                    authority["goal_creation"]["authority_id"],
-                    authority["site_publish"]["authority_id"],
-                ],
-                "binding_hashes": sorted(supplied),
-                "evidence_paths": ["goal-authority.json", "site-approval.json"],
-            }
-
-        facade = DashboardWorkflowFacade(
-            runs_root=self.runs_root,
-            policy_path=policy_path,
-            campaign_safety=campaign_safety(),
-            production_goal_executor=controlled_executor,
-            production_authority_verifier=verify_authority,
-        )
-        preview = facade.preview_goal(
-            run_id="dashboard-goal-production-2",
-            proposal_id="proposal-dashboard-goal-production-2",
-            candidate_payload=goal_candidate_payload(),
-            expected_site_version="pilot-page-v1",
-            execution_mode="PRODUCTION",
-        )
-        authority = {
-            "goal_creation": {
-                "kind": "MANDATE",
-                "authority_id": "mandate-controlled-goal-2",
-                "binding_hash": preview["authority_requirement"]["goal_creation"][
-                    "exact_binding"
-                ],
-                "expires_at": "2026-07-30T10:00:00+00:00",
-            },
-            "site_publish": {
-                "kind": "APPROVAL",
-                "authority_id": "approval-controlled-site-2",
-                "binding_hash": preview["authority_requirement"]["site_publish"][
-                    "exact_binding"
-                ],
-                "expires_at": "2026-07-30T09:15:00+00:00",
-            },
-        }
-
-        result = facade.run_goal(
-            run_id="dashboard-goal-production-2",
-            proposal_id="proposal-dashboard-goal-production-2",
-            candidate_payload=goal_candidate_payload(),
-            expected_site_version="pilot-page-v1",
-            execution_mode="PRODUCTION",
-            requested_at="2026-07-30T09:00:00+00:00",
-            semantic_decision="APPROVE",
-            reviewer="sviridov",
-            authority=authority,
-        )
-
-        self.assertEqual("READY_FOR_CONTROLLED_PILOT", preview["status"])
-        self.assertEqual("pilot-counter", preview["target"]["counter_id"])
-        self.assertEqual("APPLIED", result["status"])
-        self.assertTrue(result["external_write_sent"])
-        self.assertEqual(1, len(calls))
-        self.assertEqual(1, len(authority_checks))
-        self.assertEqual(
-            [
-                "mandate-controlled-goal-2",
-                "approval-controlled-site-2",
-            ],
-            calls[0]["authority_evidence"]["authority_ids"],
-        )
-        changed_authority = json.loads(json.dumps(authority))
-        changed_authority["site_publish"]["binding_hash"] = "sha256:" + "0" * 64
         with self.assertRaisesRegex(
             DashboardWorkflowRejected,
-            "PRODUCTION_GOAL_AUTHORITY_NOT_EXACTLY_BOUND",
+            "PRODUCTION_WRITE_FORBIDDEN",
         ):
-            facade.run_goal(
+            DashboardWorkflowFacade(
+                runs_root=self.runs_root,
+                policy_path=POLICY_PATH,
+                campaign_safety=campaign_safety(),
+                production_goal_executor=controlled_executor,
+            )
+        with self.assertRaisesRegex(
+            DashboardWorkflowRejected,
+            "PRODUCTION_WRITE_FORBIDDEN",
+        ):
+            self.facade.preview_goal(
                 run_id="dashboard-goal-production-2",
                 proposal_id="proposal-dashboard-goal-production-2",
                 candidate_payload=goal_candidate_payload(),
                 expected_site_version="pilot-page-v1",
                 execution_mode="PRODUCTION",
-                requested_at="2026-07-30T09:00:00+00:00",
-                semantic_decision="APPROVE",
-                reviewer="sviridov",
-                authority=changed_authority,
             )
-        self.assertEqual(1, len(calls))
+        self.assertEqual([], calls)
 
 
 class ImpactWorkflowFacadeTests(WorkflowFacadeTestCase):

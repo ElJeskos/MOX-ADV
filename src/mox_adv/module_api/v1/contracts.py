@@ -1101,14 +1101,12 @@ class ModuleResultV1:
         *,
         module: ModuleIdentityV1,
         request: ModuleRequestV1,
+        decision_id: str,
         decision_record_ref: str,
     ) -> "ModuleResultV1":
-        run_id = decision_record_ref.removeprefix(
-            "decision-records/"
-        ).removesuffix(".json")
         return cls(
             schema_version=MODULE_RESULT_SCHEMA_VERSION,
-            run_id="blocked-" + run_id,
+            run_id="blocked-" + decision_id,
             module=module,
             status="BLOCKED",
             metrics=(),
@@ -1116,7 +1114,7 @@ class ModuleResultV1:
             recommendations=(),
             proposal=None,
             execution_result=ModuleExecutionResultV1(
-                execution_id="blocked-" + run_id,
+                execution_id="blocked-" + decision_id,
                 operation_type=request.operation.operation_type,
                 status="BLOCKED",
                 applied=False,

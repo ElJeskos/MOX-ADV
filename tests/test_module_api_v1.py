@@ -20,6 +20,7 @@ from mox_adv.module_api.v1 import (
     ModuleResultV1,
     OPERATION_TYPES_BY_KIND,
 )
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.modules.direct import DirectModuleV1
 from mox_adv.modules.metrika import MetrikaModuleV1
 
@@ -286,8 +287,14 @@ class ModuleAdapterContractTests(unittest.TestCase):
         request = ModuleRequestV1.from_dict(request_payload)
         module = RecordingModule("YANDEX_METRIKA")
 
-        in_process_result = InProcessModuleAdapterV1(module).invoke(request)
-        http_response = HttpJsonModuleAdapterV1(module).handle(request_payload)
+        in_process_result = InProcessModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).invoke(request)
+        http_response = HttpJsonModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request_payload)
 
         self.assertEqual(200, http_response.status_code)
         self.assertEqual(in_process_result.as_dict(), http_response.body)
@@ -298,7 +305,10 @@ class ModuleAdapterContractTests(unittest.TestCase):
         payload = valid_request_payload()
         payload["oauth_token"] = "must-not-cross-the-boundary"
 
-        response = HttpJsonModuleAdapterV1(module).handle(payload)
+        response = HttpJsonModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(payload)
 
         self.assertEqual(400, response.status_code)
         self.assertEqual("module-result-v1", response.body["schema_version"])
@@ -313,10 +323,16 @@ class ModuleAdapterContractTests(unittest.TestCase):
         direct = DirectModuleV1(RecordingModule("YANDEX_DIRECT").invoke)
         metrika = MetrikaModuleV1(RecordingModule("YANDEX_METRIKA").invoke)
 
-        direct_result = InProcessModuleAdapterV1(direct).invoke(
+        direct_result = InProcessModuleAdapterV1(
+            direct,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).invoke(
             ModuleRequestV1.from_dict(valid_request_payload())
         )
-        metrika_result = InProcessModuleAdapterV1(metrika).invoke(
+        metrika_result = InProcessModuleAdapterV1(
+            metrika,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).invoke(
             ModuleRequestV1.from_dict(valid_request_payload())
         )
 

@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Protocol
 
-from mox_adv.environment import ExecutionEnvironment
+from mox_adv.environment import (
+    ExecutionEnvironment,
+    parse_execution_environment,
+)
 
 from mox_adv.module_api.v1.contracts import (
     ContractValidationError,
@@ -40,9 +43,11 @@ class InProcessModuleAdapterV1:
         self,
         module: ModuleV1,
         *,
+        environment: ExecutionEnvironment,
         decision_records: Optional[ModuleDecisionRecordStoreV1] = None,
     ) -> None:
         self._module = module
+        self._environment = parse_execution_environment(environment)
         self.decision_records = (
             InMemoryDecisionRecordStoreV1()
             if decision_records is None
@@ -54,6 +59,7 @@ class InProcessModuleAdapterV1:
         blocked = _block_production_execution(
             self._module,
             canonical_request,
+            self._environment,
             self.decision_records,
         )
         if blocked is not None:
@@ -69,9 +75,11 @@ class HttpJsonModuleAdapterV1:
         self,
         module: ModuleV1,
         *,
+        environment: ExecutionEnvironment,
         decision_records: Optional[ModuleDecisionRecordStoreV1] = None,
     ) -> None:
         self._module = module
+        self._environment = parse_execution_environment(environment)
         self.decision_records = (
             InMemoryDecisionRecordStoreV1()
             if decision_records is None
@@ -91,6 +99,7 @@ class HttpJsonModuleAdapterV1:
         blocked = _block_production_execution(
             self._module,
             request,
+            self._environment,
             self.decision_records,
         )
         result = (
@@ -114,19 +123,25 @@ class HttpJsonModuleAdapterV1:
 def _block_production_execution(
     module: ModuleV1,
     request: ModuleRequestV1,
+    trusted_environment: ExecutionEnvironment,
     decision_records: ModuleDecisionRecordStoreV1,
 ) -> Optional[ModuleResultV1]:
     if (
-        request.environment != ExecutionEnvironment.PRODUCTION.value
-        or request.operation.kind != "EXECUTE"
+        request.operation.kind != "EXECUTE"
+        or (
+            trusted_environment is ExecutionEnvironment.TEST
+            and request.environment == ExecutionEnvironment.TEST.value
+        )
     ):
         return None
-    reference = decision_records.record_production_write_block(
+    receipt = decision_records.record_production_write_block(
         module.identity,
         request,
+        trusted_environment,
     )
     return ModuleResultV1.blocked_production_write(
         module=module.identity,
         request=request,
-        decision_record_ref=reference,
+        decision_id=receipt.decision_id,
+        decision_record_ref=receipt.reference,
     )

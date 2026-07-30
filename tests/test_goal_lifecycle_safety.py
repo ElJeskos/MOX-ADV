@@ -81,27 +81,6 @@ class FailingSiteFinalizeStore(GoalLifecycleStore):
         return super().complete_site_publication(*args, **kwargs)
 
 
-class InspectingGoalAdapter(FakeMetrikaGoalAdapter):
-    def __init__(self, store: GoalLifecycleStore) -> None:
-        super().__init__(("sim-test-counter", "sim-pilot-counter"))
-        self.store = store
-        self.saw_reserved_boundary = False
-
-    def add_goal(self, counter_id, payload, signature, execution_key):
-        self.saw_reserved_boundary = (
-            self.store.load_execution(execution_key).status
-            == GoalExecutionStatus.IN_FLIGHT
-            and self.store.reservation_status("reservation-inspection") == "RESERVED"
-            and self.store.authority_status("approval-inspection") == "RESERVED"
-        )
-        return super().add_goal(
-            counter_id,
-            payload,
-            signature,
-            execution_key,
-        )
-
-
 class GoalLifecycleSafetyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.policy = load_policy()
@@ -281,7 +260,20 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
         self,
     ) -> None:
         store = GoalLifecycleStore(self.database)
-        adapter = InspectingGoalAdapter(store)
+        saw_reserved_boundary = []
+
+        def inspect_boundary(execution_key: str) -> None:
+            saw_reserved_boundary.append(
+                store.load_execution(execution_key).status
+                == GoalExecutionStatus.IN_FLIGHT
+                and store.reservation_status("reservation-inspection") == "RESERVED"
+                and store.authority_status("approval-inspection") == "RESERVED"
+            )
+
+        adapter = FakeMetrikaGoalAdapter(
+            ("sim-test-counter", "sim-pilot-counter"),
+            before_add_goal=inspect_boundary,
+        )
         service = self.service(store, adapter)
         self.register_creation(
             store,
@@ -302,7 +294,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
             goal_payload=payload(),
         )
 
-        self.assertTrue(adapter.saw_reserved_boundary)
+        self.assertEqual([True], saw_reserved_boundary)
         self.assertEqual("USED", store.reservation_status("reservation-inspection"))
         self.assertEqual("USED", store.authority_status("approval-inspection"))
 

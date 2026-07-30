@@ -437,25 +437,10 @@ class DirectManagementConnectorV1:
     def _require_adapter_authority(self) -> None:
         if type(self._adapter) is FakeDirectManagementAdapter:
             return
-        pilot = self._policy["bindings"]["pilot"]
-        record = self._policy["record"]
-        authority = self._authority
-        if (
-            record.get("production_write_authorized") is not True
-            or authority is None
-            or not authority.armed
-            or not authority.approval_id
-            or not authority.proposal_id
-            or not authority.execution_key
-            or not authority.binding_hash.startswith("sha256:")
-            or authority.credential_profile != "DIRECT_PILOT_WRITE"
-            or pilot.get("direct_account") != authority.account
-            or pilot.get("single_writer") is None
-            or not self._registry.production_authority_is_valid(authority)
-        ):
-            raise DirectStateTransitionRejected(
-                "PRODUCTION_CONNECTOR_DISABLED: validated pilot authority is absent."
-            )
+        raise DirectStateTransitionRejected(
+            "TEST_WRITE_ADAPTER_REQUIRED: "
+            "only the sealed fake Direct adapter is permitted."
+        )
 
     def _require_owned(
         self,

@@ -38,6 +38,10 @@ from mox_adv.goal_lifecycle import (
     GoalLifecycleService,
     GoalLifecycleStore,
 )
+from mox_adv.host_launcher import (
+    CredentialProfileRejected,
+    resolve_keychain_binding,
+)
 from mox_adv.fake_write_adapter import FakeWriteAdapter
 from mox_adv.module_api.v1 import (
     HttpJsonModuleAdapterV1,
@@ -144,6 +148,21 @@ class RecordingWriteModule:
 
 
 class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
+    def test_public_adapter_composition_requires_a_closed_trusted_environment(
+        self,
+    ) -> None:
+        implementation = RecordingWriteModule("YANDEX_DIRECT")
+        for adapter_type in (
+            HttpJsonModuleAdapterV1,
+            InProcessModuleAdapterV1,
+        ):
+            adapter_factory: Any = adapter_type
+            with self.subTest(adapter=adapter_type.__name__):
+                with self.assertRaises(TypeError):
+                    adapter_factory(implementation)
+                with self.assertRaises(EnvironmentWriteDenied):
+                    adapter_factory(implementation, environment="STAGING")
+
     def test_every_public_write_command_is_blocked_before_credentials_and_http(
         self,
     ) -> None:
@@ -169,6 +188,7 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
                     if adapter_kind == "HTTP_JSON":
                         response = HttpJsonModuleAdapterV1(
                             implementation,
+                            environment=ExecutionEnvironment.PRODUCTION,
                             decision_records=records,
                         ).handle(payload)
                         self.assertEqual(422, response.status_code)
@@ -177,6 +197,7 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
                         typed_request = ModuleRequestV1.from_dict(payload)
                         result = InProcessModuleAdapterV1(
                             implementation,
+                            environment=ExecutionEnvironment.PRODUCTION,
                             decision_records=records,
                         ).invoke(typed_request).as_dict()
 
@@ -201,6 +222,10 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
                         record["reason_code"],
                     )
                     self.assertEqual(operation_type, record["operation_type"])
+                    self.assertEqual(
+                        "PRODUCTION",
+                        record["trusted_environment"],
+                    )
 
     def test_retry_restart_external_evidence_and_adapter_choice_cannot_bypass_guard(
         self,
@@ -209,22 +234,62 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
         payload = request_payload(
             "YANDEX_DIRECT",
             "APPLY_OPTIMIZATION",
-            environment="PRODUCTION",
+            environment="TEST",
         )
         payload["external_evidence"]["metrics"].append(
             {"name": "approval", "value": "approved", "unit": "STATE"}
         )
-        for adapter_type in (HttpJsonModuleAdapterV1, HttpJsonModuleAdapterV1):
+        for adapter_name in ("HTTP_JSON", "IN_PROCESS"):
             records = InMemoryDecisionRecordStoreV1()
-            response = adapter_type(
-                implementation,
-                decision_records=records,
-            ).handle(copy.deepcopy(payload))
-            self.assertEqual("BLOCKED", response.body["status"])
-            self.assertEqual(
-                PRODUCTION_WRITE_FORBIDDEN,
-                response.body["errors"][0]["code"],
-            )
+            with self.subTest(adapter=adapter_name):
+                if adapter_name == "HTTP_JSON":
+                    http_adapter = HttpJsonModuleAdapterV1(
+                        implementation,
+                        environment=ExecutionEnvironment.PRODUCTION,
+                        decision_records=records,
+                    )
+                    results = [
+                        http_adapter.handle(copy.deepcopy(payload)).body,
+                        http_adapter.handle(copy.deepcopy(payload)).body,
+                        HttpJsonModuleAdapterV1(
+                            implementation,
+                            environment=ExecutionEnvironment.PRODUCTION,
+                            decision_records=records,
+                        ).handle(copy.deepcopy(payload)).body,
+                    ]
+                else:
+                    typed_request = ModuleRequestV1.from_dict(
+                        copy.deepcopy(payload)
+                    )
+                    in_process_adapter = InProcessModuleAdapterV1(
+                        implementation,
+                        environment=ExecutionEnvironment.PRODUCTION,
+                        decision_records=records,
+                    )
+                    results = [
+                        in_process_adapter.invoke(typed_request).as_dict(),
+                        in_process_adapter.invoke(typed_request).as_dict(),
+                        InProcessModuleAdapterV1(
+                            implementation,
+                            environment=ExecutionEnvironment.PRODUCTION,
+                            decision_records=records,
+                        ).invoke(typed_request).as_dict(),
+                    ]
+                for result in results:
+                    self.assertEqual("BLOCKED", result["status"])
+                    self.assertEqual(
+                        PRODUCTION_WRITE_FORBIDDEN,
+                        result["errors"][0]["code"],
+                    )
+                self.assertEqual(
+                    1,
+                    len(
+                        {
+                            result["decision_record_ref"]
+                            for result in results
+                        }
+                    ),
+                )
         self.assertEqual(0, implementation.credential_resolutions)
         self.assertEqual(0, implementation.write_http_requests)
 
@@ -238,7 +303,10 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
         ):
             with self.subTest(module_id=module_id, operation_type=operation_type):
                 implementation = RecordingWriteModule(module_id)
-                response = HttpJsonModuleAdapterV1(implementation).handle(
+                response = HttpJsonModuleAdapterV1(
+                    implementation,
+                    environment=ExecutionEnvironment.TEST,
+                ).handle(
                     request_payload(
                         module_id,
                         operation_type,
@@ -268,56 +336,86 @@ class LegacyEnvironmentSafetyE2ETests(unittest.TestCase):
             self.policy,
             environment=ExecutionEnvironment.PRODUCTION,
         )
-        cases = (
-            (
-                "POST",
-                "https://api.direct.yandex.com/json/v501/campaigns",
-                "v501",
-                "Campaigns",
-                "update",
-                EgressAuthority(
+        cases = tuple(
+            item
+            for item in self.policy["api_matrix"]
+            if not str(item["method"]).lower().startswith("get")
+        )
+        self.assertEqual(
+            {
+                ("Campaigns", "add"),
+                ("Campaigns", "update"),
+                ("Campaigns", "suspend"),
+                ("Campaigns", "resume"),
+                ("Campaigns", "archive"),
+                ("Campaigns", "unarchive"),
+                ("Campaigns", "delete"),
+                ("AdGroups", "add"),
+                ("AdGroups", "update"),
+                ("AdGroups", "delete"),
+                ("Ads", "add"),
+                ("Ads", "update"),
+                ("Ads", "suspend"),
+                ("Ads", "resume"),
+                ("Ads", "archive"),
+                ("Ads", "unarchive"),
+                ("Ads", "moderate"),
+                ("Ads", "delete"),
+                ("Keywords", "add"),
+                ("Keywords", "update"),
+                ("Keywords", "suspend"),
+                ("Keywords", "resume"),
+                ("Keywords", "delete"),
+                ("KeywordBids", "set"),
+                ("Goals", "addGoal"),
+                ("Goals", "deleteGoal"),
+                ("BrowserTag", "reachGoal"),
+            },
+            {
+                (str(item["service"]), str(item["method"]))
+                for item in cases
+            },
+        )
+        for item in cases:
+            path = (
+                str(item["path"])
+                .replace("{counter_id}", "test-counter")
+                .replace("{goal_id}", "goal-1")
+            )
+            system = str(item["system"])
+            if system == "DIRECT":
+                authority = EgressAuthority(
                     CredentialProfile.DIRECT_PILOT_WRITE,
                     "pilot-account",
-                ),
-            ),
-            (
-                "POST",
-                "https://api-metrika.yandex.net/management/v1/counter/test-counter/goals",
-                "v1",
-                "Goals",
-                "addGoal",
-                EgressAuthority(
+                )
+            elif system == "METRIKA":
+                authority = EgressAuthority(
                     CredentialProfile.METRIKA_TEST_WRITE,
                     "test-counter",
-                ),
-            ),
-            (
-                "POST",
-                "https://mc.yandex.ru/watch/test-counter",
-                "tag-v1",
-                "BrowserTag",
-                "reachGoal",
-                EgressAuthority(
+                )
+            else:
+                authority = EgressAuthority(
                     CredentialProfile.TEST_SITE_PUBLISH,
                     "test-site-zone",
                     counter_id="test-counter",
-                ),
-            ),
-        )
-        for method, url, version, service, operation, authority in cases:
+                )
             with (
-                self.subTest(service=service),
+                self.subTest(
+                    system=system,
+                    service=item["service"],
+                    operation=item["method"],
+                ),
                 self.assertRaisesRegex(
                     EgressDenied,
                     PRODUCTION_WRITE_FORBIDDEN,
                 ),
             ):
                 guard.authorize(
-                    method,
-                    url,
-                    version=version,
-                    service=service,
-                    operation=operation,
+                    str(item["http_verb"]),
+                    "https://" + str(item["host"]) + path,
+                    version=str(item["version"]),
+                    service=str(item["service"]),
+                    operation=str(item["method"]),
                     authority=authority,
                     pilot_armed=True,
                 )
@@ -328,6 +426,21 @@ class LegacyEnvironmentSafetyE2ETests(unittest.TestCase):
             guard_factory(self.policy)
         with self.assertRaises(EnvironmentWriteDenied):
             guard_factory(self.policy, environment="STAGING")
+
+    def test_production_credential_resolver_exposes_no_write_profile(self) -> None:
+        self.assertEqual(
+            "MOX_ADV_DIRECT_PROD_READ",
+            resolve_keychain_binding(self.policy, "DIRECT_PROD_READ"),
+        )
+        for profile in self.policy["credentials"]["profiles"]:
+            profile_name = str(profile["name"])
+            if profile_name == "DIRECT_PROD_READ":
+                continue
+            with (
+                self.subTest(profile=profile_name),
+                self.assertRaises(CredentialProfileRejected),
+            ):
+                resolve_keychain_binding(self.policy, profile_name)
 
     def test_production_direct_connector_blocks_even_a_fake_adapter(self) -> None:
         adapter = FakeDirectManagementAdapter()
@@ -424,65 +537,12 @@ class LegacyEnvironmentSafetyE2ETests(unittest.TestCase):
                 clock=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
                 environment=ExecutionEnvironment.PRODUCTION,
             )
-            approval_result = approval.execute(
-                ExecutionRequest(
-                    proposal_id="approved-proposal",
-                    execution_key="approved-execution",
-                    scope=scope,
-                    facts=ExecutionFacts(
-                        mode="APPROVAL_REQUIRED",
-                        automation_enabled=True,
-                        comparability_status="COMPARABLE",
-                        confidence_status="READY",
-                        financial_recommendations_allowed=True,
-                        direct_age_minutes=0,
-                        metrika_age_minutes=0,
-                        watermark_skew_minutes=0,
-                        clicks=100,
-                        conversions=10,
-                        impressions=1000,
-                        spend_rub=1000,
-                        cpa_rub="100",
-                        budget_utilization_percent="80",
-                        ctr_percent="10",
-                        campaign_state="ON",
-                        campaign_strategy="HIGHEST_POSITION",
-                        current_fingerprint="sha256:" + "1" * 64,
-                        cooldown_active=False,
-                        actions_in_last_24h=0,
-                        cumulative_daily_change_percent=0,
-                        monetary_exposure_rub=100,
-                        kill_switch_available=True,
-                    ),
-                )
-            )
-            self.assertEqual("BLOCKED", approval_result.status)
-            self.assertEqual(
-                PRODUCTION_WRITE_FORBIDDEN,
-                approval_result.reason_code,
-            )
-            self.assertEqual(0, approval_adapter.write_calls)
-
-            autonomy_adapter = FakeWriteAdapter()
-            autonomy = BoundedAutonomyService(
-                self.policy,
-                state,
-                DurableMandateAuthority(
-                    state.path,
-                    self.policy,
-                    HMACMandateSigner(b"test-only-environment-safety-key"),
-                ),
-                autonomy_adapter,
-                clock=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
-                environment=ExecutionEnvironment.PRODUCTION,
-            )
-            autonomy_result = autonomy.execute(
-                BoundedAutonomyRequest(
-                    mandate_id="active-mandate",
-                    proposal_id="mandated-proposal",
-                    execution_key="mandated-execution",
-                    scope=scope,
-                    mode="BOUNDED_AUTONOMY",
+            approval_request = ExecutionRequest(
+                proposal_id="approved-proposal",
+                execution_key="approved-execution",
+                scope=scope,
+                facts=ExecutionFacts(
+                    mode="APPROVAL_REQUIRED",
                     automation_enabled=True,
                     comparability_status="COMPARABLE",
                     confidence_status="READY",
@@ -492,19 +552,106 @@ class LegacyEnvironmentSafetyE2ETests(unittest.TestCase):
                     watermark_skew_minutes=0,
                     clicks=100,
                     conversions=10,
+                    impressions=1000,
                     spend_rub=1000,
                     cpa_rub="100",
                     budget_utilization_percent="80",
+                    ctr_percent="10",
                     campaign_state="ON",
                     campaign_strategy="HIGHEST_POSITION",
                     current_fingerprint="sha256:" + "1" * 64,
+                    cooldown_active=False,
+                    actions_in_last_24h=0,
+                    cumulative_daily_change_percent=0,
+                    monetary_exposure_rub=100,
+                    kill_switch_available=True,
+                ),
+            )
+            restarted_approval = ApprovalExecutionService(
+                self.policy,
+                state,
+                approval_adapter,
+                clock=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
+                environment=ExecutionEnvironment.PRODUCTION,
+            )
+            approval_results = (
+                approval.execute(approval_request),
+                approval.execute(approval_request),
+                restarted_approval.execute(approval_request),
+            )
+            for approval_result in approval_results:
+                self.assertEqual("BLOCKED", approval_result.status)
+                self.assertEqual(
+                    PRODUCTION_WRITE_FORBIDDEN,
+                    approval_result.reason_code,
                 )
+            reconciliation = restarted_approval.reconcile(
+                approval_request.execution_key
             )
-            self.assertEqual("BLOCKED", autonomy_result.status)
-            self.assertEqual(
-                PRODUCTION_WRITE_FORBIDDEN,
-                autonomy_result.reason_code,
+            self.assertEqual("BLOCKED", reconciliation.status)
+            self.assertEqual(0, approval_adapter.write_calls)
+
+            autonomy_adapter = FakeWriteAdapter()
+            mandate_authority = DurableMandateAuthority(
+                state.path,
+                self.policy,
+                HMACMandateSigner(b"test-only-environment-safety-key"),
             )
+            autonomy = BoundedAutonomyService(
+                self.policy,
+                state,
+                mandate_authority,
+                autonomy_adapter,
+                clock=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
+                environment=ExecutionEnvironment.PRODUCTION,
+            )
+            autonomy_request = BoundedAutonomyRequest(
+                mandate_id="active-mandate",
+                proposal_id="mandated-proposal",
+                execution_key="mandated-execution",
+                scope=scope,
+                mode="BOUNDED_AUTONOMY",
+                automation_enabled=True,
+                comparability_status="COMPARABLE",
+                confidence_status="READY",
+                financial_recommendations_allowed=True,
+                direct_age_minutes=0,
+                metrika_age_minutes=0,
+                watermark_skew_minutes=0,
+                clicks=100,
+                conversions=10,
+                spend_rub=1000,
+                cpa_rub="100",
+                budget_utilization_percent="80",
+                campaign_state="ON",
+                campaign_strategy="HIGHEST_POSITION",
+                current_fingerprint="sha256:" + "1" * 64,
+            )
+            restarted_autonomy = BoundedAutonomyService(
+                self.policy,
+                state,
+                mandate_authority,
+                autonomy_adapter,
+                clock=lambda: datetime(2026, 7, 30, tzinfo=timezone.utc),
+                environment=ExecutionEnvironment.PRODUCTION,
+            )
+            autonomy_results = (
+                autonomy.execute(autonomy_request),
+                autonomy.execute(autonomy_request),
+                restarted_autonomy.execute(autonomy_request),
+            )
+            for autonomy_result in autonomy_results:
+                self.assertEqual("BLOCKED", autonomy_result.status)
+                self.assertEqual(
+                    PRODUCTION_WRITE_FORBIDDEN,
+                    autonomy_result.reason_code,
+                )
+            recheck = restarted_autonomy.recheck(autonomy_request)
+            self.assertEqual("BLOCKED", recheck.status)
+            autonomy_reconciliation = restarted_autonomy.reconcile(
+                autonomy_request.execution_key
+            )
+            self.assertEqual("BLOCKED", autonomy_reconciliation.status)
             self.assertEqual(0, autonomy_adapter.write_calls)
 
 

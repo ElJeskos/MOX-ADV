@@ -86,7 +86,9 @@ Every legacy execution service and provider egress guard requires an explicit tr
 Every Direct, Metrika-goal, and site-changing operation is rejected before credential matching, state preparation, or provider dispatch with the stable reason code `PRODUCTION_WRITE_FORBIDDEN`.
 Approval, Mandate, retry, restart, external evidence, pilot flags, and adapter selection do not override this environment restriction.
 Existing simulated Dashboard and E2E flows explicitly select `TEST` and keep their sealed fake-adapter behavior.
-Public `ModuleRequestV1` execution requests use the same rule through both adapters.
+The Dashboard keeps its routes and simulated workflows, but it cannot be composed with a production write executor or expose production write authority.
+Both public module adapters require a trusted server-side environment at composition time.
+The environment in `ModuleRequestV1` is an untrusted declaration and cannot enable execution unless the trusted composition is also explicitly `TEST`.
 A blocked public request returns `ModuleResultV1.status = BLOCKED`, an unapplied blocked execution result, and a Decision Record reference containing the same stable reason code.
 
 ## Tests

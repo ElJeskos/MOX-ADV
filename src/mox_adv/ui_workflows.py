@@ -30,7 +30,10 @@ from mox_adv.direct_management import (
     DirectManagementConnectorV1,
     FakeDirectManagementAdapter,
 )
-from mox_adv.environment import ExecutionEnvironment
+from mox_adv.environment import (
+    PRODUCTION_WRITE_FORBIDDEN,
+    ExecutionEnvironment,
+)
 from mox_adv.goal_adapters import (
     FakeMetrikaGoalAdapter,
     FakeSitePublishAdapter,
@@ -101,12 +104,18 @@ class DashboardWorkflowFacade:
         production_goal_executor: ControlledPilotExecutor | None = None,
         production_authority_verifier: ProductionAuthorityVerifier | None = None,
     ) -> None:
+        if any(
+            capability is not None
+            for capability in (
+                production_campaign_executor,
+                production_goal_executor,
+                production_authority_verifier,
+            )
+        ):
+            raise DashboardWorkflowRejected(PRODUCTION_WRITE_FORBIDDEN)
         self.runs_root = Path(runs_root)
         self.policy_path = Path(policy_path)
         self.campaign_safety = campaign_safety
-        self.production_campaign_executor = production_campaign_executor
-        self.production_goal_executor = production_goal_executor
-        self.production_authority_verifier = production_authority_verifier
         try:
             self.policy: Mapping[str, Any] = json.loads(
                 self.policy_path.read_text(encoding="utf-8")
@@ -129,30 +138,19 @@ class DashboardWorkflowFacade:
         self._require_identifier(proposal_id, "PROPOSAL_ID_INVALID")
         if execution_mode not in {"SIMULATION", "PRODUCTION"}:
             raise DashboardWorkflowRejected("EXECUTION_MODE_INVALID")
+        if execution_mode == "PRODUCTION":
+            raise DashboardWorkflowRejected(PRODUCTION_WRITE_FORBIDDEN)
         draft = validate_campaign_draft(
             draft_payload,
             self.policy,
             self.campaign_safety,
         )
         bindings = self.policy["bindings"]
-        if execution_mode == "SIMULATION":
-            selected = bindings["simulation"]
-            account = str(selected["direct_account"])
-            reservation_id = str(selected["campaign_creation_reservation"])
-            status = "READY_FOR_SIMULATION"
-            evidence_type = "SIMULATED"
-        else:
-            selected = bindings["pilot"]
-            if not selected.get("direct_account") or not selected.get(
-                "campaign_creation_reservation"
-            ):
-                raise DashboardWorkflowRejected(
-                    "PRODUCTION_PREREQUISITES_NOT_CONFIGURED"
-                )
-            account = str(selected["direct_account"])
-            reservation_id = str(selected["campaign_creation_reservation"])
-            status = "READY_FOR_CONTROLLED_PILOT"
-            evidence_type = "CONTROLLED_PILOT"
+        selected = bindings["simulation"]
+        account = str(selected["direct_account"])
+        reservation_id = str(selected["campaign_creation_reservation"])
+        status = "READY_FOR_SIMULATION"
+        evidence_type = "SIMULATED"
         request = self._campaign_request(
             run_id,
             proposal_id,
@@ -170,7 +168,7 @@ class DashboardWorkflowFacade:
             "target": {
                 "account": account,
                 "credential_profile": "DIRECT_PILOT_WRITE",
-                "external_write_allowed": execution_mode == "PRODUCTION",
+                "external_write_allowed": False,
             },
             "exact_diff": {
                 "operation": "CREATE_UNIFIED_SEARCH_CAMPAIGN",
@@ -191,7 +189,7 @@ class DashboardWorkflowFacade:
                 "exact_binding": request.approval_binding(
                     str(self.policy["policy_id"])
                 ),
-                "armed": execution_mode == "PRODUCTION",
+                "armed": False,
                 "evidence_type": evidence_type,
             },
             "evidence_paths": [],
@@ -209,29 +207,14 @@ class DashboardWorkflowFacade:
     ) -> dict[str, Any]:
         """Run fake simulation or an authority-verified controlled-pilot executor."""
 
-        if execution_mode == "PRODUCTION" and authority is None:
-            raise DashboardWorkflowRejected("PRODUCTION_AUTHORITY_REQUIRED")
+        if execution_mode == "PRODUCTION":
+            raise DashboardWorkflowRejected(PRODUCTION_WRITE_FORBIDDEN)
         preview = self.preview_campaign(
             run_id=run_id,
             proposal_id=proposal_id,
             draft_payload=draft_payload,
             execution_mode=execution_mode,
         )
-        if execution_mode == "PRODUCTION":
-            if authority is None:
-                raise DashboardWorkflowRejected("PRODUCTION_AUTHORITY_REQUIRED")
-            if self.production_authority_verifier is None:
-                raise DashboardWorkflowRejected(
-                    "PRODUCTION_AUTHORITY_VERIFIER_NOT_CONFIGURED"
-                )
-            if self.production_campaign_executor is None:
-                raise DashboardWorkflowRejected("PRODUCTION_EXECUTOR_NOT_CONFIGURED")
-            return self._run_production_campaign(
-                preview=preview,
-                draft_payload=draft_payload,
-                authority=authority,
-                requested_at=requested_at,
-            )
         if execution_mode != "SIMULATION":
             raise DashboardWorkflowRejected("EXECUTION_MODE_INVALID")
         now = self._parse_utc(requested_at)
@@ -316,78 +299,6 @@ class DashboardWorkflowFacade:
         self._write_immutable_json(artifact_path, result)
         return result
 
-    def _run_production_campaign(
-        self,
-        *,
-        preview: Mapping[str, Any],
-        draft_payload: Mapping[str, Any],
-        authority: Mapping[str, Any],
-        requested_at: str,
-    ) -> dict[str, Any]:
-        now = self._parse_utc(requested_at)
-        run_id = str(preview["run_id"])
-        proposal_id = str(preview["proposal_id"])
-        requirement = preview["authority_requirement"]
-        authority_evidence = self._verify_production_authority(
-            workflow="CAMPAIGN_LIFECYCLE",
-            authority=authority,
-            requirement=requirement,
-            requested_at=now,
-        )
-        run_directory = self._run_directory(run_id)
-        artifact_path = run_directory / "campaign_workflow.json"
-        existing = self._load_matching_artifact(
-            artifact_path,
-            proposal_id=proposal_id,
-            exact_diff=preview["exact_diff"],
-        )
-        if existing is not None:
-            return existing
-        draft = validate_campaign_draft(
-            draft_payload,
-            self.policy,
-            self.campaign_safety,
-        )
-        target = preview["target"]
-        request = self._campaign_request(
-            run_id,
-            proposal_id,
-            draft,
-            account=str(target["account"]),
-            reservation_id=str(requirement["reservation_id"]),
-        )
-        intent_path = run_directory / "campaign_intent.json"
-        plan = {
-            "schema_version": "dashboard-controlled-pilot-plan-v1",
-            "workflow": "CAMPAIGN_LIFECYCLE",
-            "requested_at": now.isoformat(),
-            "canonical_plan": request.canonical_plan(str(self.policy["policy_id"])),
-            "exact_diff": preview["exact_diff"],
-            "risks": preview["risks"],
-            "authority_evidence": authority_evidence,
-        }
-        self._write_or_match_immutable(intent_path, plan)
-        executor = self.production_campaign_executor
-        if executor is None:
-            raise DashboardWorkflowRejected("PRODUCTION_EXECUTOR_NOT_CONFIGURED")
-        execution = self._validate_controlled_result(executor(plan))
-        result = {
-            **preview,
-            "status": execution["status"],
-            "execution_status": execution["execution_status"],
-            "requested_at": now.isoformat(),
-            "controlled_pilot_result": execution,
-            "external_write_sent": execution["external_write_sent"],
-            "evidence_paths": [
-                str(artifact_path),
-                str(intent_path),
-                *authority_evidence["evidence_paths"],
-                *execution["evidence_paths"],
-            ],
-        }
-        self._write_immutable_json(artifact_path, result)
-        return result
-
     def preview_goal(
         self,
         *,
@@ -407,32 +318,17 @@ class DashboardWorkflowFacade:
         )
         if execution_mode not in {"SIMULATION", "PRODUCTION"}:
             raise DashboardWorkflowRejected("EXECUTION_MODE_INVALID")
+        if execution_mode == "PRODUCTION":
+            raise DashboardWorkflowRejected(PRODUCTION_WRITE_FORBIDDEN)
         candidate_payload = validate_candidate(candidate_payload, self.policy)
         bindings = self.policy["bindings"]
-        if execution_mode == "SIMULATION":
-            selected = bindings["simulation"]
-            counter_id = str(selected["test_counter"])
-            site_zone = str(selected["test_site_zone"])
-            reservation_id = str(selected["test_candidate_goal_reservation"])
-            credential_profile = "METRIKA_TEST_WRITE"
-            status = "READY_FOR_SIMULATION"
-            evidence_type = "SIMULATED"
-        else:
-            selected = bindings["pilot"]
-            if (
-                not selected.get("pilot_counter")
-                or not selected.get("pilot_site_zone")
-                or not selected.get("pilot_candidate_goal_reservation")
-            ):
-                raise DashboardWorkflowRejected(
-                    "PRODUCTION_GOAL_PREREQUISITES_NOT_CONFIGURED"
-                )
-            counter_id = str(selected["pilot_counter"])
-            site_zone = str(selected["pilot_site_zone"])
-            reservation_id = str(selected["pilot_candidate_goal_reservation"])
-            credential_profile = "METRIKA_PILOT_WRITE"
-            status = "READY_FOR_CONTROLLED_PILOT"
-            evidence_type = "CONTROLLED_PILOT"
+        selected = bindings["simulation"]
+        counter_id = str(selected["test_counter"])
+        site_zone = str(selected["test_site_zone"])
+        reservation_id = str(selected["test_candidate_goal_reservation"])
+        credential_profile = "METRIKA_TEST_WRITE"
+        status = "READY_FOR_SIMULATION"
+        evidence_type = "SIMULATED"
         candidate_id = "candidate-" + run_id
         creation_binding = goal_creation_binding(
             policy_id=str(self.policy["policy_id"]),
@@ -483,7 +379,7 @@ class DashboardWorkflowFacade:
                 "counter_id": counter_id,
                 "site_zone": site_zone,
                 "credential_profile": credential_profile,
-                "external_write_allowed": execution_mode == "PRODUCTION",
+                "external_write_allowed": False,
             },
             "exact_diff": {
                 "operation": "CREATE_GOAL_AND_INSTALL_REACH_GOAL",
@@ -512,7 +408,7 @@ class DashboardWorkflowFacade:
                     "reservation_id": reservation_id,
                     "credential_profile": credential_profile,
                     "exact_binding": creation_binding,
-                    "armed": execution_mode == "PRODUCTION",
+                    "armed": False,
                     "evidence_type": evidence_type,
                 },
                 "site_publish": {
@@ -523,7 +419,7 @@ class DashboardWorkflowFacade:
                     "site_zone": site_zone,
                     "expected_page_version": expected_site_version,
                     "exact_binding": publication_binding,
-                    "armed": execution_mode == "PRODUCTION",
+                    "armed": False,
                     "evidence_type": evidence_type,
                 },
             },
@@ -547,8 +443,8 @@ class DashboardWorkflowFacade:
 
         if semantic_decision not in {"APPROVE", "REJECT"}:
             raise DashboardWorkflowRejected("SEMANTIC_DECISION_INVALID")
-        if execution_mode == "PRODUCTION" and authority is None:
-            raise DashboardWorkflowRejected("PRODUCTION_GOAL_AUTHORITY_REQUIRED")
+        if execution_mode == "PRODUCTION":
+            raise DashboardWorkflowRejected(PRODUCTION_WRITE_FORBIDDEN)
         preview = self.preview_goal(
             run_id=run_id,
             proposal_id=proposal_id,
@@ -556,25 +452,6 @@ class DashboardWorkflowFacade:
             expected_site_version=expected_site_version,
             execution_mode=execution_mode,
         )
-        if execution_mode == "PRODUCTION":
-            if authority is None:
-                raise DashboardWorkflowRejected("PRODUCTION_GOAL_AUTHORITY_REQUIRED")
-            if self.production_authority_verifier is None:
-                raise DashboardWorkflowRejected(
-                    "PRODUCTION_AUTHORITY_VERIFIER_NOT_CONFIGURED"
-                )
-            if self.production_goal_executor is None:
-                raise DashboardWorkflowRejected(
-                    "PRODUCTION_GOAL_EXECUTOR_NOT_CONFIGURED"
-                )
-            return self._run_production_goal(
-                preview=preview,
-                candidate_payload=candidate_payload,
-                authority=authority,
-                requested_at=requested_at,
-                semantic_decision=semantic_decision,
-                reviewer=reviewer,
-            )
         if execution_mode != "SIMULATION":
             raise DashboardWorkflowRejected("EXECUTION_MODE_INVALID")
         self.run_goal_technical(
@@ -892,78 +769,6 @@ class DashboardWorkflowFacade:
         self._goal_sessions[run_id] = session
         return session
 
-    def _run_production_goal(
-        self,
-        *,
-        preview: Mapping[str, Any],
-        candidate_payload: Mapping[str, Any],
-        authority: Mapping[str, Any],
-        requested_at: str,
-        semantic_decision: str,
-        reviewer: str,
-    ) -> dict[str, Any]:
-        now = self._parse_utc(requested_at)
-        run_id = str(preview["run_id"])
-        proposal_id = str(preview["proposal_id"])
-        authority_evidence = self._verify_production_authority(
-            workflow="GOAL_LIFECYCLE",
-            authority=authority,
-            requirement=preview["authority_requirement"],
-            requested_at=now,
-        )
-        run_directory = self._run_directory(run_id)
-        artifact_path = run_directory / "goal_workflow.json"
-        existing = self._load_matching_artifact(
-            artifact_path,
-            proposal_id=proposal_id,
-            exact_diff=preview["exact_diff"],
-        )
-        if existing is not None:
-            if existing.get("semantic_decision") != semantic_decision:
-                raise DashboardWorkflowRejected("IMMUTABLE_ARTIFACT_CONFLICT")
-            return existing
-        intent_path = run_directory / "goal_intent.json"
-        plan = {
-            "schema_version": "dashboard-controlled-pilot-plan-v1",
-            "workflow": "GOAL_LIFECYCLE",
-            "requested_at": now.isoformat(),
-            "proposal_id": proposal_id,
-            "candidate_id": preview["candidate_id"],
-            "candidate": dict(candidate_payload),
-            "target": dict(preview["target"]),
-            "exact_diff": preview["exact_diff"],
-            "risks": preview["risks"],
-            "authority_evidence": authority_evidence,
-            "semantic_review": {
-                "decision": semantic_decision,
-                "reviewer": reviewer,
-                "executor_must_authenticate": True,
-            },
-        }
-        self._write_or_match_immutable(intent_path, plan)
-        executor = self.production_goal_executor
-        if executor is None:
-            raise DashboardWorkflowRejected("PRODUCTION_GOAL_EXECUTOR_NOT_CONFIGURED")
-        execution = self._validate_controlled_result(executor(plan))
-        result = {
-            **preview,
-            "status": execution["status"],
-            "execution_status": execution["execution_status"],
-            "requested_at": now.isoformat(),
-            "semantic_decision": semantic_decision,
-            "semantic_reviewer": reviewer,
-            "controlled_pilot_result": execution,
-            "external_write_sent": execution["external_write_sent"],
-            "evidence_paths": [
-                str(artifact_path),
-                str(intent_path),
-                *authority_evidence["evidence_paths"],
-                *execution["evidence_paths"],
-            ],
-        }
-        self._write_immutable_json(artifact_path, result)
-        return result
-
     def evaluate_impact(
         self,
         request_payload: Mapping[str, Any],
@@ -1161,121 +966,6 @@ class DashboardWorkflowFacade:
                 "authority_requirement": {"kind": "HUMAN_REVIEW"},
             },
         ]
-
-    def _verify_production_authority(
-        self,
-        *,
-        workflow: str,
-        authority: Mapping[str, Any],
-        requirement: Mapping[str, Any],
-        requested_at: datetime,
-    ) -> dict[str, Any]:
-        verifier = self.production_authority_verifier
-        if verifier is None:
-            raise DashboardWorkflowRejected(
-                "PRODUCTION_AUTHORITY_VERIFIER_NOT_CONFIGURED"
-            )
-        try:
-            verified = verifier(
-                workflow,
-                authority,
-                requirement,
-                requested_at,
-            )
-        except DashboardWorkflowRejected:
-            raise
-        except BaseException as error:
-            raise DashboardWorkflowRejected(
-                "PRODUCTION_AUTHORITY_VERIFICATION_FAILED"
-            ) from error
-        required = {
-            "status",
-            "authority_ids",
-            "binding_hashes",
-            "evidence_paths",
-        }
-        if workflow == "CAMPAIGN_LIFECYCLE":
-            expected_bindings = {str(requirement["exact_binding"])}
-        elif workflow == "GOAL_LIFECYCLE":
-            expected_bindings = {
-                str(requirement["goal_creation"]["exact_binding"]),
-                str(requirement["site_publish"]["exact_binding"]),
-            }
-        else:
-            raise DashboardWorkflowRejected("WORKFLOW_INVALID")
-        if (
-            not isinstance(verified, Mapping)
-            or set(verified) != required
-            or verified.get("status") != "VERIFIED"
-            or not isinstance(verified.get("authority_ids"), list)
-            or not isinstance(verified.get("binding_hashes"), list)
-            or not isinstance(verified.get("evidence_paths"), list)
-        ):
-            raise DashboardWorkflowRejected("PRODUCTION_AUTHORITY_VERIFICATION_INVALID")
-        authority_ids = verified["authority_ids"]
-        binding_hashes = verified["binding_hashes"]
-        evidence_paths = verified["evidence_paths"]
-        if (
-            not authority_ids
-            or any(
-                not isinstance(value, str) or not value
-                for value in (*authority_ids, *binding_hashes, *evidence_paths)
-            )
-            or len(set(authority_ids)) != len(authority_ids)
-            or set(binding_hashes) != expected_bindings
-        ):
-            raise DashboardWorkflowRejected("PRODUCTION_AUTHORITY_VERIFICATION_INVALID")
-        return {
-            "status": "VERIFIED",
-            "authority_ids": list(authority_ids),
-            "binding_hashes": list(binding_hashes),
-            "evidence_paths": list(evidence_paths),
-        }
-
-    @staticmethod
-    def _validate_controlled_result(
-        result: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        required = {
-            "status",
-            "execution_status",
-            "external_write_sent",
-            "evidence_paths",
-        }
-        statuses = {
-            "APPLIED",
-            "NO_CHANGE",
-            "BLOCKED",
-            "ALREADY_PROCESSED",
-            "UNKNOWN_RESULT",
-            "FAILED",
-            "PARTIALLY_APPLIED",
-            "COMPENSATION_REQUIRED",
-        }
-        if (
-            not isinstance(result, Mapping)
-            or set(result) != required
-            or result.get("status") not in statuses
-            or result.get("execution_status") not in statuses
-            or not isinstance(result.get("external_write_sent"), bool)
-            or not isinstance(result.get("evidence_paths"), list)
-            or any(
-                not isinstance(path, str) or not path
-                for path in result.get("evidence_paths", [])
-            )
-        ):
-            raise DashboardWorkflowRejected("CONTROLLED_PILOT_RESULT_INVALID")
-        if (
-            result["execution_status"] in {"APPLIED", "NO_CHANGE"}
-            and not result["external_write_sent"]
-        ):
-            raise DashboardWorkflowRejected("CONTROLLED_PILOT_RESULT_INVALID")
-        return {
-            "status": str(result["status"]),
-            "execution_status": str(result["execution_status"]),
-            "external_write_sent": bool(result["external_write_sent"]),
-            "evidence_paths": list(result["evidence_paths"]),
-        }
 
     @classmethod
     def _write_or_match_immutable(

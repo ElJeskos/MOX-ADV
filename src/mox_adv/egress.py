@@ -8,7 +8,6 @@ from enum import Enum
 from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
-from mox_adv.commands import ACTION_SPECS, OptimizationAction
 from mox_adv.environment import (
     ExecutionEnvironment,
     EnvironmentWriteDenied,
@@ -146,11 +145,6 @@ class HttpEgressGuard:
         environment: ExecutionEnvironment,
     ) -> None:
         self._environment = parse_execution_environment(environment)
-        record = policy.get("record")
-        self._production_write_authorized = bool(
-            isinstance(record, Mapping)
-            and record.get("production_write_authorized") is True
-        )
         self._endpoints = tuple(
             ApprovedEndpoint(
                 system=EgressSystem(str(item["system"])),
@@ -233,16 +227,14 @@ class HttpEgressGuard:
                 require_test_write_environment(self._environment)
             except EnvironmentWriteDenied as error:
                 raise EgressDenied(str(error)) from error
+            raise EgressDenied(
+                "TEST_WRITE_ADAPTER_REQUIRED: raw HTTP writes are forbidden."
+            )
         if not self._credential_matches(endpoint, authority, parsed):
             raise EgressDenied(
                 "EXTERNAL_EGRESS_DENIED: credential profile does not match endpoint."
             )
-        if endpoint.is_read:
-            return
-        if not pilot_armed or not self._production_write_authorized:
-            raise EgressDenied(
-                "EXTERNAL_WRITE_EGRESS_DENIED: pilot process is not armed."
-            )
+        return
 
     def _credential_matches(
         self,
@@ -284,33 +276,13 @@ class HttpEgressGuard:
     def enforce_adapter(self, adapter: Any, command: Any) -> None:
         """Bind every non-fake adapter to its exact approved matrix operation."""
 
-        if type(adapter) is FakeWriteAdapter:
-            try:
-                require_test_write_environment(self._environment)
-            except EnvironmentWriteDenied as error:
-                raise EgressDenied(str(error)) from error
-            return
         try:
-            spec = ACTION_SPECS[OptimizationAction(command.action)]
-            if adapter.trusted_target != command.account:
-                raise EgressDenied(
-                    "EXTERNAL_WRITE_EGRESS_DENIED: command target is not bound."
-                )
-            self.authorize(
-                adapter.http_method,
-                adapter.url,
-                version=adapter.version,
-                service=spec.service,
-                operation=spec.method,
-                authority=EgressAuthority(
-                    credential_profile=CredentialProfile(adapter.credential_profile),
-                    trusted_target=adapter.trusted_target,
-                    counter_id=getattr(adapter, "counter_id", None),
-                ),
-                redirected=adapter.redirected,
-                pilot_armed=adapter.pilot_armed,
-            )
-        except (AttributeError, KeyError, ValueError) as error:
-            raise EgressDenied(
-                "EXTERNAL_WRITE_EGRESS_DENIED: adapter is not guard-connected."
-            ) from error
+            require_test_write_environment(self._environment)
+        except EnvironmentWriteDenied as error:
+            raise EgressDenied(str(error)) from error
+        if type(adapter) is FakeWriteAdapter:
+            return
+        del command
+        raise EgressDenied(
+            "TEST_WRITE_ADAPTER_REQUIRED: only the sealed fake adapter is permitted."
+        )
