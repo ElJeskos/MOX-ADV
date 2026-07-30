@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -10,10 +11,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.request
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from email.parser import BytesParser
@@ -240,6 +243,86 @@ def _diagnostics(
     return payload
 
 
+def _direct_request() -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    period_end = now.date() - timedelta(days=1)
+    return {
+        "schema_version": "module-request-v1",
+        "connection_ref": {"connection_id": "release-lifecycle-direct"},
+        "environment": "PRODUCTION",
+        "scope": {
+            "organization_id": "customer-42",
+            "account_id": "account-8",
+            "campaign_id": "campaign-7",
+        },
+        "period": {
+            "start_date": (period_end - timedelta(days=6)).isoformat(),
+            "end_date": period_end.isoformat(),
+            "timezone": "UTC",
+        },
+        "objective": {
+            "code": "REDUCE_CPA",
+            "description": "Keep the Direct release replay stable.",
+        },
+        "external_evidence": {
+            "schema_version": "normalized-metrics-evidence-v1",
+            "evidence_id": "release-lifecycle-direct-evidence-1",
+            "source": "CUSTOMER_ECOSYSTEM",
+            "observed_at": now.isoformat(),
+            "watermark": (now - timedelta(minutes=5)).isoformat(),
+            "metrics": [
+                {"name": "impressions", "value": 10_000, "unit": "COUNT"},
+                {"name": "clicks", "value": 200, "unit": "COUNT"},
+                {
+                    "name": "cost_micros",
+                    "value": 4_000_000_000,
+                    "unit": "MICROS_RUB",
+                },
+                {"name": "conversions", "value": 20, "unit": "COUNT"},
+                {"name": "campaign_state", "value": "ON", "unit": "CODE"},
+                {"name": "group_state", "value": "ON", "unit": "CODE"},
+                {"name": "ad_state", "value": "ON", "unit": "CODE"},
+                {
+                    "name": "strategy",
+                    "value": "HIGHEST_POSITION",
+                    "unit": "CODE",
+                },
+                {
+                    "name": "current_weekly_budget_micros",
+                    "value": 2_000_000_000,
+                    "unit": "MICROS_RUB",
+                },
+                {
+                    "name": "current_search_bid_micros",
+                    "value": 100_000_000,
+                    "unit": "MICROS_RUB",
+                },
+                {"name": "ad_variant", "value": "A", "unit": "CODE"},
+                {
+                    "name": "object_config_version",
+                    "value": "campaign-config-v1",
+                    "unit": "CODE",
+                },
+                {
+                    "name": "budget_period_start",
+                    "value": (now - timedelta(days=6)).isoformat(),
+                    "unit": "ISO_8601",
+                },
+                {
+                    "name": "budget_period_end",
+                    "value": (now + timedelta(days=1)).isoformat(),
+                    "unit": "ISO_8601",
+                },
+            ],
+        },
+        "operation": {
+            "kind": "ANALYZE",
+            "operation_type": "ANALYZE_PERFORMANCE",
+        },
+        "idempotency_key": "release-lifecycle-direct-request-1",
+    }
+
+
 def _metrika_request() -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     period_end = now.date() - timedelta(days=1)
@@ -281,14 +364,16 @@ def _metrika_request() -> dict[str, Any]:
     }
 
 
-def _run_metrika_request(
+def _run_provider_request(
     environment: Path,
     state_dir: Path,
     payload: Mapping[str, Any],
+    *,
+    program: str,
 ) -> tuple[bytes, dict[str, Any]]:
     process = subprocess.Popen(
         [
-            str(environment / "bin" / "mox-adv-metrika"),
+            str(environment / "bin" / program),
             "serve",
             "--environment",
             "PRODUCTION",
@@ -312,11 +397,11 @@ def _run_metrika_request(
         if not events:
             process.terminate()
             _, stderr = process.communicate(timeout=5)
-            raise AssertionError("Metrika host did not become ready: " + stderr)
+            raise AssertionError(program + " host did not become ready: " + stderr)
         ready_line = process.stdout.readline()
         if not ready_line:
             _, stderr = process.communicate(timeout=5)
-            raise AssertionError("Metrika host stopped before readiness: " + stderr)
+            raise AssertionError(program + " host stopped before readiness: " + stderr)
         ready = json.loads(ready_line)
         request = urllib.request.Request(
             ready["url"] + "/v1/runs",
@@ -338,6 +423,106 @@ def _run_metrika_request(
             process.stdout.close()
         if process.stderr is not None:
             process.stderr.close()
+
+
+def _run_metrika_request(
+    environment: Path,
+    state_dir: Path,
+    payload: Mapping[str, Any],
+) -> tuple[bytes, dict[str, Any]]:
+    return _run_provider_request(
+        environment,
+        state_dir,
+        payload,
+        program="mox-adv-metrika",
+    )
+
+
+def _run_direct_request(
+    environment: Path,
+    state_dir: Path,
+    payload: Mapping[str, Any],
+) -> tuple[bytes, dict[str, Any]]:
+    return _run_provider_request(
+        environment,
+        state_dir,
+        payload,
+        program="mox-adv-direct",
+    )
+
+
+@contextmanager
+def _dashboard_8878_lock() -> Iterator[None]:
+    lock_path = Path(tempfile.gettempdir()) / "mox-adv-dashboard-8878.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _run_paired_dashboard_probe(
+    environment: Path,
+    runs_dir: Path,
+) -> dict[str, Any]:
+    with _dashboard_8878_lock():
+        process = subprocess.Popen(
+            [
+                str(environment / "bin" / "mox-adv-paired"),
+                "ui",
+                "--port",
+                "8878",
+                "--runs-dir",
+                str(runs_dir),
+                "--no-open",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=_release_environment(),
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            last_error: OSError | None = None
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    break
+                try:
+                    with urllib.request.urlopen(
+                        "http://127.0.0.1:8878/api/status",
+                        timeout=1,
+                    ) as response:
+                        status = json.loads(response.read())
+                    with urllib.request.urlopen(
+                        "http://127.0.0.1:8878/overview",
+                        timeout=1,
+                    ) as response:
+                        overview = response.read()
+                    if not isinstance(status, dict):
+                        raise TypeError("Dashboard status must be an object.")
+                    if b"<html" not in overview:
+                        raise AssertionError("Dashboard overview must be HTML.")
+                    return status
+                except OSError as error:
+                    last_error = error
+                    time.sleep(0.05)
+            if process.poll() is None:
+                process.terminate()
+            _, stderr = process.communicate(timeout=5)
+            detail = "" if last_error is None else ": " + str(last_error)
+            raise AssertionError(
+                "Paired Dashboard did not start on 127.0.0.1:8878"
+                + detail
+                + "\n"
+                + stderr
+            )
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+            if process.stderr is not None:
+                process.stderr.close()
 
 
 class ReleaseLifecycleTests(unittest.TestCase):
@@ -539,6 +724,72 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 state_canary.read_text(encoding="utf-8"),
             )
 
+    def test_direct_patch_upgrade_and_rollback_replay_the_same_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = root / "venv"
+            state = root / "customer-owned" / "direct-state"
+            state.mkdir(parents=True, mode=0o700)
+            request = _direct_request()
+            _create_venv(environment)
+
+            _install(
+                environment,
+                self.wheelhouse,
+                "mox-adv-direct==1.0.0",
+            )
+            original_body, original = _run_direct_request(
+                environment,
+                state,
+                request,
+            )
+            self.assertEqual("module-result-v1", original["schema_version"])
+
+            _install(
+                environment,
+                self.wheelhouse,
+                "mox-adv-direct==1.0.1",
+                force=True,
+            )
+            upgraded_diagnostics = _diagnostics(
+                environment,
+                "mox-adv-direct",
+                state,
+            )
+            upgraded_body, upgraded = _run_direct_request(
+                environment,
+                state,
+                request,
+            )
+            self.assertEqual("1.0.1", upgraded_diagnostics["distribution_version"])
+            self.assertEqual("1.0.1", upgraded_diagnostics["core_version"])
+            self.assertEqual(original, upgraded)
+            self.assertEqual(original_body, upgraded_body)
+
+            _install(
+                environment,
+                self.wheelhouse,
+                "mox-adv-direct==1.0.0",
+                force=True,
+            )
+            rolled_back_diagnostics = _diagnostics(
+                environment,
+                "mox-adv-direct",
+                state,
+            )
+            rolled_back_body, rolled_back = _run_direct_request(
+                environment,
+                state,
+                request,
+            )
+            self.assertEqual(
+                "1.0.0",
+                rolled_back_diagnostics["distribution_version"],
+            )
+            self.assertEqual("1.0.0", rolled_back_diagnostics["core_version"])
+            self.assertEqual(original, rolled_back)
+            self.assertEqual(original_body, rolled_back_body)
+
     def test_paired_patch_upgrade_and_rollback_keep_one_exact_release_set(
         self,
     ) -> None:
@@ -547,6 +798,10 @@ class ReleaseLifecycleTests(unittest.TestCase):
             environment = root / "venv"
             external_runs = root / "customer-owned" / "paired-runs"
             external_runs.mkdir(parents=True)
+            direct_state = external_runs / "direct-state"
+            metrika_state = external_runs / "metrika-state"
+            direct_state.mkdir(mode=0o700)
+            metrika_state.mkdir(mode=0o700)
             state_canary = external_runs / "customer-owned.txt"
             state_canary.write_text("preserve-me\n", encoding="utf-8")
             _create_venv(environment)
@@ -580,6 +835,32 @@ class ReleaseLifecycleTests(unittest.TestCase):
                 },
                 _installed_release_versions(environment),
             )
+            upgraded_direct = _diagnostics(
+                environment,
+                "mox-adv-direct",
+                direct_state,
+            )
+            upgraded_metrika = _diagnostics(
+                environment,
+                "mox-adv-metrika",
+                metrika_state,
+            )
+            upgraded_dashboard = _run_paired_dashboard_probe(
+                environment,
+                external_runs,
+            )
+            for diagnostics in (upgraded_direct, upgraded_metrika):
+                self.assertEqual("1.0.1", diagnostics["distribution_version"])
+                self.assertEqual("1.0.1", diagnostics["core_version"])
+                self.assertEqual("READY", diagnostics["durable_state"]["status"])
+            self.assertEqual("MOX-ADV", upgraded_dashboard["service"])
+            self.assertEqual(
+                "READ_ONLY",
+                upgraded_dashboard["production_mode"]["access"],
+            )
+            self.assertFalse(
+                upgraded_dashboard["production_mode"]["write_requests_allowed"]
+            )
 
             _install_internal_release_set(
                 environment,
@@ -594,6 +875,34 @@ class ReleaseLifecycleTests(unittest.TestCase):
                     "mox-adv-paired": "1.0.0",
                 },
                 _installed_release_versions(environment),
+            )
+            rolled_back_direct = _diagnostics(
+                environment,
+                "mox-adv-direct",
+                direct_state,
+            )
+            rolled_back_metrika = _diagnostics(
+                environment,
+                "mox-adv-metrika",
+                metrika_state,
+            )
+            rolled_back_dashboard = _run_paired_dashboard_probe(
+                environment,
+                external_runs,
+            )
+            for diagnostics in (rolled_back_direct, rolled_back_metrika):
+                self.assertEqual("1.0.0", diagnostics["distribution_version"])
+                self.assertEqual("1.0.0", diagnostics["core_version"])
+                self.assertEqual("READY", diagnostics["durable_state"]["status"])
+            self.assertEqual("MOX-ADV", rolled_back_dashboard["service"])
+            self.assertEqual(
+                "READ_ONLY",
+                rolled_back_dashboard["production_mode"]["access"],
+            )
+            self.assertFalse(
+                rolled_back_dashboard["production_mode"][
+                    "write_requests_allowed"
+                ]
             )
             self.assertEqual(
                 "preserve-me\n",

@@ -103,6 +103,40 @@ def _install_standalone(
     return environment
 
 
+def _install_paired(
+    *,
+    root: Path,
+    wheelhouse: Path,
+) -> Path:
+    environment = root / "paired-venv"
+    created = subprocess.run(
+        [sys.executable, "-m", "venv", str(environment)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if created.returncode != 0:
+        raise AssertionError(created.stderr)
+    installed = subprocess.run(
+        [
+            str(environment / "bin" / "python"),
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--no-deps",
+            "--no-index",
+            *(str(wheel) for wheel in sorted(wheelhouse.glob("*.whl"))),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if installed.returncode != 0:
+        raise AssertionError(installed.stderr)
+    return environment
+
+
 def _write_poison_sitecustomize(root: Path) -> Path:
     support = root / "poison-support"
     support.mkdir()
@@ -293,7 +327,10 @@ def _installed_production_host(
 
 def _get_json(url: str) -> dict[str, Any]:
     with urllib.request.urlopen(url, timeout=5) as response:
-        return json.loads(response.read())
+        payload = json.loads(response.read())
+    if not isinstance(payload, dict):
+        raise TypeError("Expected one JSON object.")
+    return payload
 
 
 def _post_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -309,6 +346,139 @@ def _post_json(url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         return error.code, json.loads(error.read())
     with response:
         return response.status, json.loads(response.read())
+
+
+def _probe_installed_paired_production_guard(
+    *,
+    root: Path,
+    environment: Path,
+    poison_support: Path,
+) -> dict[str, Any]:
+    loaded_trap = root / "paired-sitecustomize-loaded"
+    called_trap = root / "paired-poison-called"
+    script = r"""
+import json
+import os
+import sys
+from pathlib import Path
+
+from mox_adv.campaign_lifecycle import CampaignDraftSafetyBindings
+from mox_adv.environment import PRODUCTION_WRITE_FORBIDDEN
+from mox_adv.ui_dashboard import DashboardApplication
+from mox_adv.ui_service import UiRunService
+from mox_adv.ui_workflows import DashboardWorkflowFacade, DashboardWorkflowRejected
+
+runs_root = Path(sys.argv[1])
+safety = CampaignDraftSafetyBindings(
+    allowed_landing_hosts=("allowlisted.example",),
+    prohibited_phrases=("guaranteed results",),
+    prepared_media_references=("prepared-media-1", "prepared-media-2"),
+)
+service = UiRunService(runs_root)
+dashboard = DashboardApplication(runs_root, service)
+blocked = []
+
+
+def require_blocked(name, invoke):
+    try:
+        invoke()
+    except DashboardWorkflowRejected as error:
+        if str(error) != PRODUCTION_WRITE_FORBIDDEN:
+            raise
+        blocked.append(name)
+        return
+    raise AssertionError(name + " did not reject production write")
+
+
+require_blocked(
+    "constructor_capability_injection",
+    lambda: DashboardWorkflowFacade(
+        runs_root=runs_root,
+        policy_path=dashboard.workflows.policy_path,
+        campaign_safety=safety,
+        production_campaign_executor=object(),
+    ),
+)
+require_blocked(
+    "preview_campaign",
+    lambda: dashboard.workflows.preview_campaign(
+        run_id="paired-release-campaign-preview",
+        proposal_id="paired-release-campaign-proposal",
+        draft_payload={},
+        execution_mode="PRODUCTION",
+    ),
+)
+require_blocked(
+    "run_campaign",
+    lambda: dashboard.workflows.run_campaign(
+        run_id="paired-release-campaign-run",
+        proposal_id="paired-release-campaign-proposal",
+        draft_payload={},
+        execution_mode="PRODUCTION",
+        requested_at="2026-07-30T00:00:00+00:00",
+    ),
+)
+require_blocked(
+    "preview_goal",
+    lambda: dashboard.workflows.preview_goal(
+        run_id="paired-release-goal-preview",
+        proposal_id="paired-release-goal-proposal",
+        candidate_payload={},
+        expected_site_version="test-page-v1",
+        execution_mode="PRODUCTION",
+    ),
+)
+require_blocked(
+    "run_goal",
+    lambda: dashboard.workflows.run_goal(
+        run_id="paired-release-goal-run",
+        proposal_id="paired-release-goal-proposal",
+        candidate_payload={},
+        expected_site_version="test-page-v1",
+        execution_mode="PRODUCTION",
+        requested_at="2026-07-30T00:00:00+00:00",
+        semantic_decision="APPROVE",
+        reviewer="release-security-reviewer",
+    ),
+)
+status = service.status()["production_mode"]
+print(
+    json.dumps(
+        {
+            "blocked_paths": sorted(blocked),
+            "dashboard_status": status,
+            "write_credentials": sorted(
+                name for name in os.environ if "WRITE" in name.upper()
+            ),
+        },
+        sort_keys=True,
+    )
+)
+"""
+    completed = subprocess.run(
+        [
+            str(environment / "bin" / "python"),
+            "-c",
+            script,
+            str(root / "paired-runs"),
+        ],
+        env=_sanitized_process_environment(
+            poison_support=poison_support,
+            loaded_trap=loaded_trap,
+            called_trap=called_trap,
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr)
+    evidence = json.loads(completed.stdout)
+    if not isinstance(evidence, dict):
+        raise TypeError("Paired production guard evidence must be an object.")
+    evidence["poison_loaded"] = loaded_trap.is_file()
+    evidence["poison_called"] = called_trap.exists()
+    return evidence
 
 
 def _base_execute_request(edition: str, operation_type: str) -> dict[str, Any]:
@@ -487,7 +657,7 @@ class ProductionReleaseSafetyTests(unittest.TestCase):
         cls.root = Path(cls._temporary.name)
         cls.wheelhouse = cls.root / "wheelhouse"
         cls.wheelhouse.mkdir()
-        for edition in ("core", "direct", "metrika"):
+        for edition in ("core", "direct", "metrika", "paired"):
             wheel = _build_wheel(
                 ROOT / "packaging" / edition / "setup.py",
                 cls.root / ("build-" + edition),
@@ -501,6 +671,10 @@ class ProductionReleaseSafetyTests(unittest.TestCase):
             )
             for edition in ("direct", "metrika")
         }
+        cls.environments["paired"] = _install_paired(
+            root=cls.root,
+            wheelhouse=cls.wheelhouse,
+        )
         cls.poison_support = _write_poison_sitecustomize(cls.root)
 
     def test_installed_production_editions_expose_no_write_credentials_or_secrets(
@@ -604,6 +778,32 @@ class ProductionReleaseSafetyTests(unittest.TestCase):
                                 result["execution_result"]["applied"]
                             )
                         self.assertFalse(called_trap.exists())
+
+    def test_installed_paired_production_write_paths_fail_before_credentials_and_http(
+        self,
+    ) -> None:
+        evidence = _probe_installed_paired_production_guard(
+            root=self.root,
+            environment=self.environments["paired"],
+            poison_support=self.poison_support,
+        )
+
+        self.assertEqual(
+            {
+                "constructor_capability_injection",
+                "preview_campaign",
+                "preview_goal",
+                "run_campaign",
+                "run_goal",
+            },
+            set(evidence["blocked_paths"]),
+        )
+        self.assertEqual([], evidence["write_credentials"])
+        self.assertEqual("READ_ONLY", evidence["dashboard_status"]["access"])
+        self.assertFalse(evidence["dashboard_status"]["write_requests_allowed"])
+        self.assertEqual("DISABLED", evidence["dashboard_status"]["write_flow"])
+        self.assertTrue(evidence["poison_loaded"])
+        self.assertFalse(evidence["poison_called"])
 
 
 if __name__ == "__main__":
