@@ -21,11 +21,17 @@ from mox_adv.autonomy import (
     MandateRecord,
 )
 from mox_adv.cli import build_parser, main
-from mox_adv.commands import OptimizationAction, calculate_relative_target
+from mox_adv.commands import (
+    HighLevelCommand,
+    OptimizationAction,
+    calculate_relative_target,
+)
 from mox_adv.control_state import (
     AuthenticatedPrincipal,
     ControlRejected,
     DurableControlState,
+    ExecutionRecord,
+    ExecutionStatus,
     PreparedChange,
     TrustedScope,
 )
@@ -743,7 +749,6 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
         self.control.register_prepared_change(prepared)
         adapter = FakeWriteAdapter(
             initial_state={prepared.target_key(): prepared.current_value},
-            write_delay_seconds=0.05,
         )
         service = BoundedAutonomyService(
             self.policy,
@@ -753,21 +758,60 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             clock=lambda: NOW,
             environment=ExecutionEnvironment.TEST,
         )
-        barrier = threading.Barrier(2)
+        reservation_barrier = threading.Barrier(2)
+        dispatch_started = threading.Event()
+        release_dispatch = threading.Event()
+        first_attempt_finished = threading.Event()
         results: list[str] = []
+        original_reserve = self.authority.reserve_execution
+        original_apply = adapter.apply
+
+        def synchronized_reserve(
+            change: PreparedChange,
+            mandate_id: str,
+            now: datetime,
+        ) -> tuple[ExecutionStatus, ExecutionRecord]:
+            status, execution = original_reserve(change, mandate_id, now)
+            if status == "RESERVED":
+                reservation_barrier.wait(timeout=1)
+            return status, execution
+
+        def delayed_apply(target_key: str, command: HighLevelCommand) -> None:
+            dispatch_started.set()
+            if not release_dispatch.wait(timeout=2):
+                raise AssertionError("test did not release the claimed dispatch")
+            original_apply(target_key, command)
 
         def execute() -> None:
-            barrier.wait()
-            results.append(service.execute(make_request(prepared, self.mandate)).status)
+            try:
+                results.append(
+                    service.execute(make_request(prepared, self.mandate)).status
+                )
+            finally:
+                first_attempt_finished.set()
 
-        threads = [threading.Thread(target=execute) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        with (
+            mock.patch.object(
+                self.authority,
+                "reserve_execution",
+                side_effect=synchronized_reserve,
+            ),
+            mock.patch.object(adapter, "apply", side_effect=delayed_apply),
+        ):
+            threads = [threading.Thread(target=execute) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            self.assertTrue(dispatch_started.wait(timeout=1))
+            self.assertTrue(first_attempt_finished.wait(timeout=1))
+            release_dispatch.set()
+            for thread in threads:
+                thread.join(timeout=1)
+                self.assertFalse(thread.is_alive())
 
         self.assertEqual(1, adapter.write_calls)
-        self.assertIn("APPLIED", results)
+        self.assertCountEqual(["IN_FLIGHT", "APPLIED"], results)
+        execution = self.control.load_execution(prepared.execution_key())
+        self.assertEqual("APPLIED", execution.status)
         self.assertEqual(1, self.authority.usage(self.mandate.mandate_id).action_count)
 
     def test_restart_preserves_activation_revocation_and_consumed_quotas(self) -> None:

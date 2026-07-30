@@ -325,18 +325,25 @@ class BoundedAutonomyService:
     ) -> BoundedAutonomyOutcome:
         minimum, maximum = self.policy.numeric_bounds(prepared)
         command = build_high_level_command(prepared, minimum, maximum)
+        dispatch_owned = False
+
+        def send() -> None:
+            nonlocal dispatch_owned
+            dispatch_owned = True
+            self.adapter.apply(prepared.target_key(), command)
+
         send_status, execution = self.mandate_authority.send_once(
             prepared,
             mandate_id,
             self.clock(),
-            lambda: self.adapter.apply(prepared.target_key(), command),
+            send,
             before_dispatch=self.before_dispatch,
             at_dispatch_boundary=lambda: self.dispatch_boundary.authorize(
                 prepared.execution_key(),
                 prepared.target_key(),
             ),
         )
-        if send_status != ExecutionStatus.IN_FLIGHT:
+        if send_status != ExecutionStatus.IN_FLIGHT or not dispatch_owned:
             return BoundedAutonomyOutcome(
                 send_status,
                 execution.detail,
