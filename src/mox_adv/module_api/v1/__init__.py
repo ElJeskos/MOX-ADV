@@ -33,8 +33,10 @@ from mox_adv.module_api.v1.contracts import (
 from mox_adv.module_api.v1.decision_records import (
     MODULE_DECISION_RECORD_SCHEMA_VERSION,
     InMemoryDecisionRecordStoreV1,
+    ModuleDecisionFactsV1,
     ModuleDecisionRecordReceiptV1,
     ModuleDecisionRecordStoreV1,
+    ModuleDecisionV1,
 )
 
 __all__ = [
@@ -57,6 +59,8 @@ __all__ = [
     "ModuleIdentityV1",
     "ModuleDecisionRecordReceiptV1",
     "ModuleDecisionRecordStoreV1",
+    "ModuleDecisionFactsV1",
+    "ModuleDecisionV1",
     "ModuleObjectiveV1",
     "ModuleOperationV1",
     "ModuleProposalV1",

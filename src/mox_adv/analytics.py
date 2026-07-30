@@ -15,6 +15,7 @@ from mox_adv.contracts import (
     NormalizedSnapshot,
     RunContext,
 )
+from mox_adv.metrika_metrics import calculate_metrika_metrics
 from mox_adv.normalization import IntegratedSnapshotNormalizerV1
 
 
@@ -79,22 +80,6 @@ def _decimal_text(value: MetricValue) -> str:
     if normalized == normalized.to_integral():
         return str(normalized.quantize(Decimal(1)))
     return format(normalized, "f")
-
-
-def calculate_metrika_metrics(
-    *,
-    visits: int,
-    goal_visits: int,
-) -> Mapping[str, Union[int, str]]:
-    """Calculate the provider-native Metrika aggregate with legacy precision."""
-
-    return {
-        "visits": visits,
-        "goal_visits": goal_visits,
-        "conversion_rate_percent": _decimal_text(
-            _ratio(goal_visits, visits, ONE_HUNDRED)
-        ),
-    }
 
 
 def _display(value: MetricValue) -> str:

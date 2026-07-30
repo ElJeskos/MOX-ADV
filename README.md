@@ -83,6 +83,8 @@ The existing paired runtime and Dashboard continue to use the legacy composition
 
 `MetrikaModuleV1` runs headlessly through either the HTTP/JSON or in-process module adapter.
 It can start without Direct, the Dashboard, or a provider reader when the customer supplies validated `visits` and `goal_visits` evidence.
+Build the independently installable headless wheel with `python3 packaging/metrika/setup.py bdist_wheel`.
+The resulting `mox-adv-metrika` distribution contains neither the Direct module nor Dashboard assets.
 Provider-owned reads use `BoundMetrikaReadProviderV1` to bind a stored connection to one allowlisted counter, goal, and campaign before the underlying read connector is called.
 The module validates the closed period, daily grain, scope, attribution, timestamps, watermark ordering, and the six-hour Metrika freshness window.
 It returns the existing exact conversion-rate calculation, assessment, non-executable recommendations, provenance, warnings, typed errors, and a Decision Record reference.

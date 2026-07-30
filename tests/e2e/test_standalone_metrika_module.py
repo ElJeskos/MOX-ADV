@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,15 @@ from mox_adv.modules.metrika import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+EXPECTED_METRIKA_METRICS = [
+    {"name": "visits", "value": 150, "unit": "COUNT"},
+    {"name": "goal_visits", "value": 10, "unit": "COUNT"},
+    {
+        "name": "conversion_rate_percent",
+        "value": "6.666666666666666666666666667",
+        "unit": "PERCENT",
+    },
+]
 
 
 def customer_evidence_request() -> dict[str, Any]:
@@ -105,6 +116,25 @@ class FailingAuthorizedMetrikaReader:
         raise RuntimeError("provider temporarily unavailable: OAuth secret")
 
 
+class NonUtcAuthorizedMetrikaReader(RecordingAuthorizedMetrikaReader):
+    def read_metrika_report(
+        self,
+        connection_id: str,
+        query: MetrikaReportReadQuery,
+    ) -> MetrikaReportBlock:
+        report = super().read_metrika_report(connection_id, query)
+        return MetrikaReportBlock(
+            source=report.source,
+            retrieved_at="2026-07-30T14:55:00+03:00",
+            watermark="2026-07-30T14:50:00+03:00",
+            period_start=report.period_start,
+            period_end=report.period_end,
+            timezone="Europe/Moscow",
+            attribution=report.attribution,
+            rows=report.rows,
+        )
+
+
 class RecordingMetrikaReportReader:
     def __init__(self) -> None:
         self.queries: list[MetrikaReportReadQuery] = []
@@ -137,18 +167,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         result = response.body
         self.assertEqual("PARTIAL", result["status"])
-        self.assertEqual(
-            [
-                {"name": "visits", "value": 150, "unit": "COUNT"},
-                {"name": "goal_visits", "value": 10, "unit": "COUNT"},
-                {
-                    "name": "conversion_rate_percent",
-                    "value": "6.666666666666666666666666667",
-                    "unit": "PERCENT",
-                },
-            ],
-            result["metrics"],
-        )
+        self.assertEqual(EXPECTED_METRIKA_METRICS, result["metrics"])
         self.assertEqual("PARTIAL", result["assessment"]["data_quality_status"])
         self.assertEqual(
             ["CAMPAIGN_CONTEXT_REQUIRED"],
@@ -208,18 +227,7 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         self.assertEqual("PARTIAL", response.body["status"])
-        self.assertEqual(
-            [
-                {"name": "visits", "value": 150, "unit": "COUNT"},
-                {"name": "goal_visits", "value": 10, "unit": "COUNT"},
-                {
-                    "name": "conversion_rate_percent",
-                    "value": "6.666666666666666666666666667",
-                    "unit": "PERCENT",
-                },
-            ],
-            response.body["metrics"],
-        )
+        self.assertEqual(EXPECTED_METRIKA_METRICS, response.body["metrics"])
         self.assertEqual(
             [
                 {
@@ -330,6 +338,61 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
             [item["code"] for item in response.body["warnings"]],
         )
         self.assertIsNone(response.body["proposal"])
+
+    def test_stale_small_sample_reports_both_quality_gaps(self) -> None:
+        request = customer_evidence_request()
+        evidence = request["external_evidence"]
+        assert isinstance(evidence, dict)
+        evidence["observed_at"] = "2026-07-30T05:59:59+00:00"
+        evidence["watermark"] = "2026-07-30T05:55:00+00:00"
+        metrics = evidence["metrics"]
+        assert isinstance(metrics, list)
+        metrics[1]["value"] = 2
+        module = MetrikaModuleV1(
+            clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        )
+
+        response = HttpJsonModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(
+            {
+                "CAMPAIGN_SPEND_UNAVAILABLE",
+                "CAMPAIGN_STATE_UNAVAILABLE",
+                "INSUFFICIENT_SAMPLE",
+                "METRIKA_DATA_STALE",
+            },
+            {item["code"] for item in response.body["warnings"]},
+        )
+        self.assertEqual(
+            "INSUFFICIENT_DATA",
+            response.body["assessment"]["confidence_status"],
+        )
+
+    def test_provider_read_rejects_non_utc_report_provenance(self) -> None:
+        request = customer_evidence_request()
+        request.pop("external_evidence")
+        request["scope"]["campaign_id"] = "campaign-7"
+        request["period"]["timezone"] = "Europe/Moscow"
+        module = MetrikaModuleV1(
+            provider_reader=NonUtcAuthorizedMetrikaReader(),
+            clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
+        )
+
+        response = HttpJsonModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(422, response.status_code)
+        self.assertEqual("REJECTED", response.body["status"])
+        self.assertEqual(
+            "METRIKA_EVIDENCE_REJECTED",
+            response.body["errors"][0]["code"],
+        )
 
     def test_invalid_normalized_evidence_is_rejected_before_analysis(self) -> None:
         request = customer_evidence_request()
@@ -455,6 +518,89 @@ assert blocked == [], blocked
         )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_standalone_wheel_contains_no_direct_module_or_dashboard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            (temporary / "egg-info").mkdir()
+            build = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "packaging" / "metrika" / "setup.py"),
+                    "egg_info",
+                    "--egg-base",
+                    str(temporary / "egg-info"),
+                    "build",
+                    "--build-base",
+                    str(temporary / "build"),
+                    "bdist_wheel",
+                    "--dist-dir",
+                    str(temporary / "dist"),
+                    "--bdist-dir",
+                    str(temporary / "wheel"),
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, build.returncode, build.stderr)
+            wheels = tuple((temporary / "dist").glob("*.whl"))
+            self.assertEqual(1, len(wheels))
+            with zipfile.ZipFile(wheels[0]) as archive:
+                names = set(archive.namelist())
+            self.assertNotIn("mox_adv/modules/direct.py", names)
+            self.assertFalse(
+                any(name.startswith("mox_adv/ui/") for name in names),
+                names,
+            )
+
+            installed = temporary / "installed"
+            install = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--quiet",
+                    "--no-deps",
+                    "--target",
+                    str(installed),
+                    str(wheels[0]),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, install.returncode, install.stderr)
+            script = """
+import json
+from datetime import datetime, timezone
+from mox_adv.environment import ExecutionEnvironment
+from mox_adv.module_api.v1 import HttpJsonModuleAdapterV1
+from mox_adv.modules.metrika import MetrikaModuleV1
+request = json.loads(__import__("os").environ["METRIKA_REQUEST"])
+module = MetrikaModuleV1(
+    clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+)
+response = HttpJsonModuleAdapterV1(
+    module,
+    environment=ExecutionEnvironment.PRODUCTION,
+).handle(request)
+assert response.status_code == 200, response.body
+assert response.body["status"] == "PARTIAL", response.body
+"""
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                check=False,
+                capture_output=True,
+                env={
+                    "METRIKA_REQUEST": json.dumps(customer_evidence_request()),
+                    "PYTHONPATH": str(installed),
+                },
+                text=True,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
 
 
 if __name__ == "__main__":

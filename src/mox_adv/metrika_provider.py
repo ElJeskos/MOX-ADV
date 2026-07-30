@@ -271,6 +271,8 @@ class MetrikaObservationReaderV1:
             raise ValueError(field + " must be an ISO-8601 timestamp.") from error
         if parsed.tzinfo is None:
             raise ValueError(field + " must include a UTC offset.")
+        if parsed.utcoffset() != timedelta(0):
+            raise ValueError(field + " must use UTC.")
         return parsed.astimezone(timezone.utc)
 
     @staticmethod

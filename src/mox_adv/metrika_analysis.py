@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional, Tuple
+from typing import Callable, Literal, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from mox_adv.analytics import calculate_metrika_metrics
+from mox_adv.metrika_metrics import calculate_metrika_metrics
 from mox_adv.metrika_provider import (
     AuthorizedMetrikaReadProviderV1,
     MetrikaObservationReaderV1,
@@ -18,7 +18,9 @@ from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
     MetricValueV1,
     ModuleAssessmentV1,
+    ModuleDecisionFactsV1,
     ModuleDecisionRecordStoreV1,
+    ModuleDecisionV1,
     ModuleErrorV1,
     ModuleIdentityV1,
     ModuleRecommendationV1,
@@ -55,7 +57,7 @@ class StandaloneMetrikaAnalysisV1:
     def invoke(self, request: ModuleRequestV1) -> ModuleResultV1:
         error = self._validate_request(request)
         if error is not None:
-            return self._rejected(request, *error)
+            return self._rejected(request, error)
         try:
             now = self._normalized_now()
             self._validate_period_is_closed(request, now)
@@ -63,18 +65,24 @@ class StandaloneMetrikaAnalysisV1:
         except MetrikaReadAuthorizationError as authorization_error:
             return self._rejected(
                 request,
-                "METRIKA_SCOPE_REJECTED",
-                str(authorization_error),
-                "scope",
+                ModuleErrorV1(
+                    code="METRIKA_SCOPE_REJECTED",
+                    message=str(authorization_error),
+                    field="scope",
+                    retryable=False,
+                ),
             )
         except MetrikaProviderUnavailable:
             return self._failed_provider_read(request)
         except ValueError as error_value:
             return self._rejected(
                 request,
-                "METRIKA_EVIDENCE_REJECTED",
-                str(error_value),
-                "external_evidence",
+                ModuleErrorV1(
+                    code="METRIKA_EVIDENCE_REJECTED",
+                    message=str(error_value),
+                    field="external_evidence",
+                    retryable=False,
+                ),
             )
 
         calculated = calculate_metrika_metrics(
@@ -120,14 +128,16 @@ class StandaloneMetrikaAnalysisV1:
         receipt = self._decision_records.record_module_decision(
             METRIKA_IDENTITY,
             request,
-            outcome="PARTIAL",
-            reason_codes=tuple(item.code for item in warnings),
-            facts={
-                "metrics": [item.as_dict() for item in metrics],
-                "assessment": assessment.as_dict(),
-                "recommendations": [recommendation.as_dict()],
-                "provenance": [observation.provenance.as_dict()],
-            },
+            ModuleDecisionV1(
+                outcome="PARTIAL",
+                reason_codes=tuple(item.code for item in warnings),
+                facts=ModuleDecisionFactsV1(
+                    metrics=metrics,
+                    assessment=assessment,
+                    recommendations=(recommendation,),
+                    provenance=(observation.provenance,),
+                ),
+            ),
         )
         return ModuleResultV1(
             schema_version=MODULE_RESULT_SCHEMA_VERSION,
@@ -148,27 +158,39 @@ class StandaloneMetrikaAnalysisV1:
     def _validate_request(
         self,
         request: ModuleRequestV1,
-    ) -> Optional[Tuple[str, str, Optional[str]]]:
+    ) -> Optional[ModuleErrorV1]:
         if (
             request.operation.kind != "ANALYZE"
             or request.operation.operation_type != "ANALYZE_PERFORMANCE"
         ):
-            return (
-                "METRIKA_OPERATION_UNSUPPORTED",
-                "Standalone Metrika analysis supports ANALYZE_PERFORMANCE.",
-                "operation",
+            return ModuleErrorV1(
+                code="METRIKA_OPERATION_UNSUPPORTED",
+                message=(
+                    "Standalone Metrika analysis supports ANALYZE_PERFORMANCE."
+                ),
+                field="operation",
+                retryable=False,
             )
         if request.scope.counter_id is None or request.scope.goal_id is None:
-            return (
-                "METRIKA_SCOPE_REJECTED",
-                "Standalone Metrika analysis requires a counter and goal.",
-                "scope",
+            return ModuleErrorV1(
+                code="METRIKA_SCOPE_REJECTED",
+                message="Standalone Metrika analysis requires a counter and goal.",
+                field="scope",
+                retryable=False,
+            )
+        if request.period.timezone != "UTC":
+            return ModuleErrorV1(
+                code="METRIKA_EVIDENCE_REJECTED",
+                message="Standalone Metrika analysis requires a UTC period.",
+                field="period.timezone",
+                retryable=False,
             )
         if request.external_evidence is None and not self._provider_reader_available:
-            return (
-                "METRIKA_PROVIDER_READER_UNAVAILABLE",
-                "No authorized Metrika provider reader is configured.",
-                "connection_ref",
+            return ModuleErrorV1(
+                code="METRIKA_PROVIDER_READER_UNAVAILABLE",
+                message="No authorized Metrika provider reader is configured.",
+                field="connection_ref",
+                retryable=False,
             )
         return None
 
@@ -205,7 +227,7 @@ class StandaloneMetrikaAnalysisV1:
                     ),
                 )
             )
-        elif now - observed_at > timedelta(hours=6):
+        if now - observed_at > timedelta(hours=6):
             warnings.append(
                 ModuleWarningV1(
                     code="METRIKA_DATA_STALE",
@@ -245,43 +267,38 @@ class StandaloneMetrikaAnalysisV1:
     def _rejected(
         cls,
         request: ModuleRequestV1,
-        code: str,
-        message: str,
-        field: Optional[str],
+        error: ModuleErrorV1,
     ) -> ModuleResultV1:
-        return ModuleResultV1(
-            schema_version=MODULE_RESULT_SCHEMA_VERSION,
-            run_id=cls._bounded_run_id("rejected", request),
-            module=METRIKA_IDENTITY,
-            status="REJECTED",
-            metrics=(),
-            assessment=None,
-            recommendations=(),
-            proposal=None,
-            execution_result=None,
-            provenance=(),
-            warnings=(),
-            errors=(
-                ModuleErrorV1(
-                    code=code,
-                    message=message,
-                    field=field,
-                    retryable=False,
-                ),
-            ),
-            decision_record_ref=None,
-        )
+        return cls._terminal_result(request, "REJECTED", error)
 
     @classmethod
     def _failed_provider_read(
         cls,
         request: ModuleRequestV1,
     ) -> ModuleResultV1:
+        return cls._terminal_result(
+            request,
+            "FAILED",
+            ModuleErrorV1(
+                code="METRIKA_PROVIDER_READ_FAILED",
+                message=("The authorized Metrika read failed before analysis."),
+                field="connection_ref",
+                retryable=True,
+            ),
+        )
+
+    @classmethod
+    def _terminal_result(
+        cls,
+        request: ModuleRequestV1,
+        status: Literal["REJECTED", "FAILED"],
+        error: ModuleErrorV1,
+    ) -> ModuleResultV1:
         return ModuleResultV1(
             schema_version=MODULE_RESULT_SCHEMA_VERSION,
-            run_id=cls._bounded_run_id("failed", request),
+            run_id=cls._bounded_run_id(status.lower(), request),
             module=METRIKA_IDENTITY,
-            status="FAILED",
+            status=status,
             metrics=(),
             assessment=None,
             recommendations=(),
@@ -289,14 +306,7 @@ class StandaloneMetrikaAnalysisV1:
             execution_result=None,
             provenance=(),
             warnings=(),
-            errors=(
-                ModuleErrorV1(
-                    code="METRIKA_PROVIDER_READ_FAILED",
-                    message=("The authorized Metrika read failed before analysis."),
-                    field="connection_ref",
-                    retryable=True,
-                ),
-            ),
+            errors=(error,),
             decision_record_ref=None,
         )
 

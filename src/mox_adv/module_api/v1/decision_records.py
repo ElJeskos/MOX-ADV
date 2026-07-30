@@ -7,18 +7,37 @@ import hashlib
 import json
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Protocol, Sequence
+from typing import Any, Dict, Literal, Mapping, Protocol, Tuple
 
 from mox_adv.environment import (
     PRODUCTION_WRITE_FORBIDDEN,
     ExecutionEnvironment,
 )
 from mox_adv.module_api.v1.contracts import (
+    ContractValidationError,
+    MetricValueV1,
+    ModuleAssessmentV1,
     ModuleIdentityV1,
+    ModuleProvenanceV1,
+    ModuleRecommendationV1,
     ModuleRequestV1,
 )
 
 MODULE_DECISION_RECORD_SCHEMA_VERSION = "module-decision-record-v1"
+ModuleDecisionOutcomeV1 = Literal[
+    "SUCCEEDED",
+    "PARTIAL",
+    "BLOCKED",
+    "REJECTED",
+    "FAILED",
+]
+MODULE_DECISION_OUTCOMES = (
+    "SUCCEEDED",
+    "PARTIAL",
+    "BLOCKED",
+    "REJECTED",
+    "FAILED",
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +46,39 @@ class ModuleDecisionRecordReceiptV1:
 
     decision_id: str
     reference: str
+
+
+@dataclass(frozen=True)
+class ModuleDecisionFactsV1:
+    """Closed analysis facts stored behind an opaque Decision Record reference."""
+
+    metrics: Tuple[MetricValueV1, ...]
+    assessment: ModuleAssessmentV1
+    recommendations: Tuple[ModuleRecommendationV1, ...]
+    provenance: Tuple[ModuleProvenanceV1, ...]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "metrics": [item.as_dict() for item in self.metrics],
+            "assessment": self.assessment.as_dict(),
+            "recommendations": [item.as_dict() for item in self.recommendations],
+            "provenance": [item.as_dict() for item in self.provenance],
+        }
+
+
+@dataclass(frozen=True)
+class ModuleDecisionV1:
+    """Typed, closed payload for one non-execution module decision."""
+
+    outcome: ModuleDecisionOutcomeV1
+    reason_codes: Tuple[str, ...]
+    facts: ModuleDecisionFactsV1
+
+    def __post_init__(self) -> None:
+        if self.outcome not in MODULE_DECISION_OUTCOMES:
+            raise ContractValidationError("Decision outcome is unsupported.")
+        if any(not code for code in self.reason_codes):
+            raise ContractValidationError("Decision reason codes must be non-empty.")
 
 
 class ModuleDecisionRecordStoreV1(Protocol):
@@ -43,10 +95,7 @@ class ModuleDecisionRecordStoreV1(Protocol):
         self,
         module: ModuleIdentityV1,
         request: ModuleRequestV1,
-        *,
-        outcome: str,
-        reason_codes: Sequence[str],
-        facts: Mapping[str, Any],
+        decision: ModuleDecisionV1,
     ) -> ModuleDecisionRecordReceiptV1: ...
 
 
@@ -81,10 +130,7 @@ class InMemoryDecisionRecordStoreV1:
         self,
         module: ModuleIdentityV1,
         request: ModuleRequestV1,
-        *,
-        outcome: str,
-        reason_codes: Sequence[str],
-        facts: Mapping[str, Any],
+        decision: ModuleDecisionV1,
     ) -> ModuleDecisionRecordReceiptV1:
         record: Dict[str, Any] = {
             "schema_version": MODULE_DECISION_RECORD_SCHEMA_VERSION,
@@ -93,9 +139,9 @@ class InMemoryDecisionRecordStoreV1:
             "environment": request.environment,
             "operation_kind": request.operation.kind,
             "operation_type": request.operation.operation_type,
-            "outcome": outcome,
-            "reason_codes": list(reason_codes),
-            "facts": copy.deepcopy(dict(facts)),
+            "outcome": decision.outcome,
+            "reason_codes": list(decision.reason_codes),
+            "facts": decision.facts.as_dict(),
         }
         return self._store(record)
 
