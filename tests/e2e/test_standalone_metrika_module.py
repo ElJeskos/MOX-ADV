@@ -591,7 +591,12 @@ assert blocked == [], blocked
                 names = set(archive.namelist())
             self.assertIn("mox_adv/metrika_goal_lifecycle.py", names)
             self.assertIn("mox_adv/goal_service.py", names)
+            self.assertIn("mox_adv/metrika_production.py", names)
+            self.assertIn("mox_adv/yandex_credentials.py", names)
+            self.assertIn("mox_adv/yandex_transport.py", names)
+            self.assertIn("mox_adv/yandex_values.py", names)
             self.assertNotIn("mox_adv/modules/direct.py", names)
+            self.assertNotIn("mox_adv/direct_production.py", names)
             self.assertFalse(
                 any(name.startswith("mox_adv/ui/") for name in names),
                 names,
@@ -643,6 +648,109 @@ assert response.body["status"] == "PARTIAL", response.body
                 text=True,
             )
             self.assertEqual(0, completed.returncode, completed.stderr)
+
+            provider_script = """
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from mox_adv.metrika_production import (
+    METRIKA_REPORT_READ,
+    MetrikaProductionReadCompositionV1,
+)
+from mox_adv.module_api.v1 import ModuleRequestV1
+from mox_adv.yandex_transport import HttpResponse
+
+runtime = Path(__import__("os").environ["METRIKA_RUNTIME"])
+runtime.mkdir()
+configuration_path = runtime / "metrika.json"
+environment_path = runtime / "metrika.env"
+configuration_path.write_text(
+    json.dumps(
+        {
+            "connection_id": "customer-metrika-primary",
+            "counter_id": "counter-9",
+            "goal_id": "goal-3",
+            "campaign_id": "campaign-7",
+        }
+    ),
+    encoding="utf-8",
+)
+environment_path.write_text(
+    "YANDEX_METRIKA_OAUTH_TOKEN=wheel-token\\n",
+    encoding="utf-8",
+)
+
+
+class FakeMetrikaHttp:
+    def __init__(self):
+        self.systems = []
+
+    def perform(self, *, endpoint, url, headers, body):
+        self.systems.append(endpoint.system)
+        assert endpoint == METRIKA_REPORT_READ
+        assert url.startswith(endpoint.base_url + "?")
+        assert headers["Authorization"] == "OAuth wheel-token"
+        assert body is None
+        return HttpResponse(
+            status=200,
+            headers={},
+            body=json.dumps(
+                {
+                    "data": [
+                        {
+                            "dimensions": [{"name": f"2026-07-{day}"}],
+                            "metrics": [20, 1],
+                        }
+                        for day in range(23, 30)
+                    ],
+                    "meta": {
+                        "retrieved_at": "2026-07-30T11:55:00+00:00",
+                        "watermark": "2026-07-30T11:50:00+00:00",
+                    },
+                }
+            ).encode("utf-8"),
+        )
+
+
+http = FakeMetrikaHttp()
+composition = MetrikaProductionReadCompositionV1(
+    configuration_path=configuration_path,
+    environment_path=environment_path,
+    http_client=http,
+)
+request = json.loads(__import__("os").environ["METRIKA_REQUEST"])
+request.pop("external_evidence")
+request["scope"]["campaign_id"] = "campaign-7"
+result = composition.adapter(
+    clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+).invoke(ModuleRequestV1.from_dict(request))
+payload = result.as_dict()
+assert payload["status"] == "PARTIAL", payload
+assert payload["module"]["module_id"] == "YANDEX_METRIKA", payload
+metrics = {item["name"]: item["value"] for item in payload["metrics"]}
+assert metrics["visits"] == 140, metrics
+assert metrics["goal_visits"] == 7, metrics
+assert [item["source"] for item in payload["provenance"]] == [
+    "METRIKA_REPORT",
+], payload["provenance"]
+assert http.systems == ["METRIKA"], http.systems
+"""
+            provider_completed = subprocess.run(
+                [sys.executable, "-c", provider_script],
+                check=False,
+                capture_output=True,
+                env={
+                    "METRIKA_REQUEST": json.dumps(customer_evidence_request()),
+                    "METRIKA_RUNTIME": str(temporary / "metrika-runtime"),
+                    "PYTHONPATH": str(installed),
+                },
+                text=True,
+            )
+            self.assertEqual(
+                0,
+                provider_completed.returncode,
+                provider_completed.stderr,
+            )
 
 
 if __name__ == "__main__":

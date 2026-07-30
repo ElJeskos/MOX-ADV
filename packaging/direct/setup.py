@@ -1,7 +1,6 @@
 """Build the headless Direct edition from an explicit module allowlist."""
 
 from pathlib import Path
-from typing import List, Tuple
 
 from setuptools import setup
 from setuptools.command.build_py import build_py
@@ -33,6 +32,7 @@ PACKAGE_MODULES = {
         "direct_impact",
         "direct_metrics",
         "direct_management",
+        "direct_production",
         "direct_provider",
         "egress",
         "environment",
@@ -50,6 +50,9 @@ PACKAGE_MODULES = {
         "recommend_projection",
         "trust_boundary",
         "write_window",
+        "yandex_credentials",
+        "yandex_transport",
+        "yandex_values",
     },
     "mox_adv.module_api": {"__init__"},
     "mox_adv.module_api.v1": {
@@ -76,7 +79,7 @@ class DirectBuildPy(build_py):
         self,
         package: str,
         package_dir: str,
-    ) -> List[Tuple[str, str, str]]:
+    ) -> list[tuple[str, str, str]]:
         modules = super().find_package_modules(package, package_dir)
         allowed = PACKAGE_MODULES[package]
         return [module for module in modules if module[1] in allowed]

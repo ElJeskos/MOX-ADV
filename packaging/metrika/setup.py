@@ -1,7 +1,6 @@
 """Build the headless Metrika edition from an explicit module allowlist."""
 
 from pathlib import Path
-from typing import List, Tuple
 
 from setuptools import setup
 from setuptools.command.build_py import build_py
@@ -26,9 +25,13 @@ PACKAGE_MODULES = {
         "metrika_analysis",
         "metrika_goal_lifecycle",
         "metrika_metrics",
+        "metrika_production",
         "metrika_provider",
         "module_analysis",
         "recommend_contracts",
+        "yandex_credentials",
+        "yandex_transport",
+        "yandex_values",
     },
     "mox_adv.module_api": {"__init__"},
     "mox_adv.module_api.v1": {
@@ -55,7 +58,7 @@ class MetrikaBuildPy(build_py):
         self,
         package: str,
         package_dir: str,
-    ) -> List[Tuple[str, str, str]]:
+    ) -> list[tuple[str, str, str]]:
         modules = super().find_package_modules(package, package_dir)
         allowed = PACKAGE_MODULES[package]
         return [module for module in modules if module[1] in allowed]

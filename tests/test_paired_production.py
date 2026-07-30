@@ -6,13 +6,16 @@ import unittest
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
+from mox_adv.direct_production import (
+    DIRECT_CAMPAIGN_STATE_READ,
+    DIRECT_REPORTS_READ,
+)
+from mox_adv.metrika_production import METRIKA_REPORT_READ
 from mox_adv.observe import load_observe_policy
 from mox_adv.paired_production import PairedYandexProductionReaderV1
 from mox_adv.yandex_transport import (
-    DIRECT_CAMPAIGN_STATE_READ,
-    DIRECT_REPORTS_READ,
-    METRIKA_REPORT_READ,
     HttpResponse,
     YandexReadEndpoint,
 )
@@ -228,7 +231,7 @@ class PairedYandexProductionReaderTests(unittest.TestCase):
             )
             policy = load_observe_policy(POLICY)
 
-            snapshot = reader.collect_snapshot(
+            result = reader.collect_snapshot(
                 policy=policy,
                 observation_id="production-read-1",
                 generated_at=datetime(
@@ -240,6 +243,7 @@ class PairedYandexProductionReaderTests(unittest.TestCase):
                     tzinfo=timezone.utc,
                 ),
             )
+            snapshot = result.snapshot
 
             self.assertEqual(3, len(http_client.calls))
             self.assertEqual(
@@ -248,24 +252,30 @@ class PairedYandexProductionReaderTests(unittest.TestCase):
             )
             self.assertTrue(
                 all(
-                    call["headers"]["Authorization"]
+                    cast(Mapping[str, str], call["headers"])["Authorization"]
                     == "Bearer " + DIRECT_TOKEN
                     for call in http_client.calls[:2]
                 )
             )
             self.assertEqual(
                 "OAuth " + METRIKA_TOKEN,
-                http_client.calls[2]["headers"]["Authorization"],
+                cast(
+                    Mapping[str, str],
+                    http_client.calls[2]["headers"],
+                )["Authorization"],
             )
             self.assertNotIn(
                 "Client-Login",
-                http_client.calls[2]["headers"],
+                cast(
+                    Mapping[str, str],
+                    http_client.calls[2]["headers"],
+                ),
             )
             self.assertEqual("COMPARABLE", snapshot.comparability_status)
             self.assertEqual("READY", snapshot.confidence_status)
             self.assertEqual(
                 ["DIRECT_REPORTS", "DIRECT", "METRIKA"],
-                [record["system"] for record in reader.last_records],
+                [receipt.system for receipt in result.receipts],
             )
             serialized = json.dumps(snapshot.as_dict(), ensure_ascii=False)
             self.assertNotIn(DIRECT_TOKEN, serialized)

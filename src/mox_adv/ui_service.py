@@ -1121,6 +1121,7 @@ class UiRunService:
         run_directory.mkdir(parents=True, exist_ok=False)
         fixture_path = TEST_FIXTURE_PATH
         scenario_source = "DEFAULT"
+        read_requests: list[Mapping[str, str]] = []
         if not read_only and scenario is not None:
             fixture_path = _scenario_fixture(
                 scenario_value,
@@ -1144,7 +1145,10 @@ class UiRunService:
                         generated_at=now,
                         progress_callback=progress_callback,
                     )
-                snapshot = collected.as_dict()
+                snapshot = collected.snapshot.as_dict()
+                read_requests = [
+                    receipt.as_dict() for receipt in collected.receipts
+                ]
             except (OSError, RuntimeError, ValueError) as error:
                 raise UiRunRejected(
                     "ANALYTICS_FAILED",
@@ -1409,9 +1413,7 @@ class UiRunService:
             "safety": {
                 "external_write_sent": False,
                 "credential_loaded": read_only,
-                "read_requests": (
-                    list(self.production_reader.last_records) if read_only else []
-                ),
+                "read_requests": read_requests,
                 "adapter": "NONE" if read_only else "SEALED_FAKE",
                 "approval": (
                     "DISABLED"

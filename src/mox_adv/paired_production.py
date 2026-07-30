@@ -9,7 +9,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from mox_adv.contracts import BaselineAggregate, TrustedAnalyticsScope
+from mox_adv.contracts import (
+    BaselineAggregate,
+    IntegratedPerformanceSnapshot,
+    TrustedAnalyticsScope,
+)
 from mox_adv.direct_production import (
     DEFAULT_DIRECT_CONFIGURATION_PATH,
     DEFAULT_DIRECT_ENVIRONMENT_PATH,
@@ -25,15 +29,14 @@ from mox_adv.metrika_production import (
 )
 from mox_adv.paired_runtime import PairedConnectionRefsV1, PairedModuleRuntimeV1
 from mox_adv.yandex_transport import (
-    DIRECT_CAMPAIGN_STATE_READ,
-    DIRECT_REPORTS_READ,
-    METRIKA_REPORT_READ,
+    CompletedReadReceiptV1,
     HttpClient,
+    HttpReadSessionV1,
 )
-from mox_adv.yandex_transport import (
+from mox_adv.yandex_values import (
     nonnegative_count as _count,
 )
-from mox_adv.yandex_transport import (
+from mox_adv.yandex_values import (
     required_text as _text,
 )
 
@@ -41,6 +44,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PAIRED_CONFIGURATION_PATH = (
     ROOT / "config" / "paired-production-read.json"
 )
+
 
 @dataclass(frozen=True)
 class PairedProductionReadSettingsV1:
@@ -150,6 +154,24 @@ class LinkedProductionReadContextV1:
         )
 
 
+@dataclass(frozen=True)
+class PairedProductionReadResultV1:
+    snapshot: IntegratedPerformanceSnapshot
+    receipts: tuple[CompletedReadReceiptV1, ...]
+
+
+class PairedProductionReadFailure(RuntimeError):
+    """Preserve only the receipts completed by one failed invocation."""
+
+    def __init__(
+        self,
+        message: str,
+        receipts: tuple[CompletedReadReceiptV1, ...],
+    ) -> None:
+        super().__init__(message)
+        self.receipts = receipts
+
+
 class PairedYandexProductionReaderV1:
     """Compose the two production read modules for the existing Dashboard."""
 
@@ -177,7 +199,6 @@ class PairedYandexProductionReaderV1:
             environment_path=metrika_environment_path,
             http_client=metrika_http_client,
         )
-        self.last_records: tuple[Mapping[str, str], ...] = ()
 
     def readiness(self, policy: Mapping[str, Any]) -> dict[str, Any]:
         del policy
@@ -210,12 +231,20 @@ class PairedYandexProductionReaderV1:
         observation_id: str,
         generated_at: datetime,
         progress_callback: Callable[[dict[str, str]], None] | None = None,
-    ):
+    ) -> PairedProductionReadResultV1:
         context = self._context()
+        direct_session = HttpReadSessionV1(self._direct.http_client)
+        metrika_session = HttpReadSessionV1(self._metrika.http_client)
         self._progress(progress_callback, "direct", "RUNNING")
         runtime = PairedModuleRuntimeV1(
-            direct=self._direct.adapter(clock=lambda: generated_at),
-            metrika=self._metrika.adapter(clock=lambda: generated_at),
+            direct=self._direct.adapter(
+                clock=lambda: generated_at,
+                http_client=direct_session,
+            ),
+            metrika=self._metrika.adapter(
+                clock=lambda: generated_at,
+                http_client=metrika_session,
+            ),
             environment=ExecutionEnvironment.PRODUCTION,
         )
         period_end = (generated_at.date() - timedelta(days=1)).isoformat()
@@ -238,18 +267,18 @@ class PairedYandexProductionReaderV1:
                     status,
                 ),
             )
-        except Exception:
-            self.last_records = ()
-            raise
-        self.last_records = tuple(
-            endpoint.audit_record()
-            for endpoint in (
-                DIRECT_REPORTS_READ,
-                DIRECT_CAMPAIGN_STATE_READ,
-                METRIKA_REPORT_READ,
+        except Exception as error:
+            raise PairedProductionReadFailure(
+                str(error),
+                direct_session.receipts + metrika_session.receipts,
+            ) from error
+        return PairedProductionReadResultV1(
+            snapshot=snapshot,
+            receipts=(
+                direct_session.receipts
+                + metrika_session.receipts
             )
         )
-        return snapshot
 
     def _context(self) -> LinkedProductionReadContextV1:
         return LinkedProductionReadContextV1(

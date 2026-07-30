@@ -1,4 +1,4 @@
-"""Allowlisted Yandex read transport and isolated credential resolution."""
+"""Allowlisted Yandex read transport and invocation-local receipts."""
 
 from __future__ import annotations
 
@@ -8,8 +8,18 @@ import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Protocol, TextIO
+from typing import Protocol
+
+
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError
+        value[key] = item
+    return value
 
 
 @dataclass(frozen=True)
@@ -22,12 +32,24 @@ class YandexReadEndpoint:
     path: str
     operation: str
     query_allowed: bool = False
+    body_required: bool = False
+    json_method: str | None = None
 
     def __post_init__(self) -> None:
         if self.method not in {"GET", "POST"}:
             raise ValueError("Yandex read endpoint method is unsupported.")
         if not self.host or not self.path.startswith("/"):
             raise ValueError("Yandex read endpoint target is invalid.")
+        if self.method == "GET" and (
+            self.body_required or self.json_method is not None
+        ):
+            raise ValueError("A GET read endpoint cannot require a request body.")
+        if self.json_method is not None and (
+            not self.body_required or self.json_method != self.operation
+        ):
+            raise ValueError(
+                "A JSON method constraint must match the audited operation."
+            )
 
     @property
     def base_url(self) -> str:
@@ -45,6 +67,37 @@ class YandexReadEndpoint:
             and (self.query_allowed or not parsed.query)
         )
 
+    def allows_request(
+        self,
+        *,
+        method: str,
+        url: str,
+        body: bytes | None,
+    ) -> bool:
+        if not self.allows(method=method, url=url):
+            return False
+        if method == "GET":
+            return body is None
+        if self.body_required and body is None:
+            return False
+        if self.json_method is None:
+            return True
+        try:
+            payload = (
+                json.loads(
+                    body.decode("utf-8"),
+                    object_pairs_hook=_reject_duplicate_json_keys,
+                )
+                if body is not None
+                else None
+            )
+        except (UnicodeError, json.JSONDecodeError, ValueError):
+            return False
+        return (
+            isinstance(payload, dict)
+            and payload.get("method") == self.json_method
+        )
+
     def audit_record(self) -> Mapping[str, str]:
         return {
             "system": self.system,
@@ -55,35 +108,6 @@ class YandexReadEndpoint:
         }
 
 
-DIRECT_REPORTS_READ = YandexReadEndpoint(
-    system="DIRECT_REPORTS",
-    method="POST",
-    host="api.direct.yandex.com",
-    path="/json/v501/reports",
-    operation="get",
-)
-DIRECT_CAMPAIGN_STATE_READ = YandexReadEndpoint(
-    system="DIRECT",
-    method="POST",
-    host="api.direct.yandex.com",
-    path="/json/v501/campaigns",
-    operation="get",
-)
-METRIKA_REPORT_READ = YandexReadEndpoint(
-    system="METRIKA",
-    method="GET",
-    host="api-metrika.yandex.net",
-    path="/stat/v1/data",
-    operation="get",
-    query_allowed=True,
-)
-YANDEX_READ_ENDPOINTS: tuple[YandexReadEndpoint, ...] = (
-    DIRECT_REPORTS_READ,
-    DIRECT_CAMPAIGN_STATE_READ,
-    METRIKA_REPORT_READ,
-)
-
-
 @dataclass(frozen=True)
 class HttpResponse:
     status: int
@@ -91,43 +115,40 @@ class HttpResponse:
     body: bytes
 
 
-def json_response_object(
-    response: HttpResponse,
-    provider: str,
-) -> dict[str, Any]:
-    if response.status < 200 or response.status >= 300:
-        raise RuntimeError(f"{provider} read failed with HTTP {response.status}.")
-    try:
-        value = json.loads(response.body.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"{provider} returned invalid JSON.") from error
-    if not isinstance(value, dict):
-        raise TypeError(f"{provider} returned a non-object JSON response.")
-    return value
+@dataclass(frozen=True)
+class CompletedReadReceiptV1:
+    """Record one provider request only after the transport returns."""
 
+    system: str
+    http_method: str
+    host: str
+    path: str
+    operation: str
+    http_status: int
 
-def required_text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value or len(value) > 256:
-        raise ValueError(field + " must be a non-empty string.")
-    return value
+    @classmethod
+    def from_response(
+        cls,
+        endpoint: YandexReadEndpoint,
+        response: HttpResponse,
+    ) -> CompletedReadReceiptV1:
+        return cls(
+            system=endpoint.system,
+            http_method=endpoint.method,
+            host=endpoint.host,
+            path=endpoint.path,
+            operation=endpoint.operation,
+            http_status=response.status,
+        )
 
-
-def nonnegative_count(value: object, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(field + " must be a non-negative integer.")
-    return value
-
-
-def object_mapping(value: object, field: str) -> Mapping[str, Any]:
-    if not isinstance(value, dict):
-        raise TypeError(field + " must be an object.")
-    return value
-
-
-def nonempty_array(value: object, field: str) -> tuple[object, ...]:
-    if not isinstance(value, list) or not value or len(value) > 1_000:
-        raise ValueError(field + " must contain 1 to 1000 items.")
-    return tuple(value)
+    def as_dict(self) -> Mapping[str, str]:
+        return {
+            "system": self.system,
+            "http_method": self.http_method,
+            "host": self.host,
+            "path": self.path,
+            "operation": self.operation,
+        }
 
 
 class HttpClient(Protocol):
@@ -141,8 +162,16 @@ class HttpClient(Protocol):
     ) -> HttpResponse: ...
 
 
-class UrllibHttpClient:
-    """Send only one of the immutable, allowlisted read operations."""
+class HttpReadSessionV1:
+    """Bind immutable completed-request receipts to one read invocation."""
+
+    def __init__(self, http_client: HttpClient) -> None:
+        self._http_client = http_client
+        self._receipts: list[CompletedReadReceiptV1] = []
+
+    @property
+    def receipts(self) -> tuple[CompletedReadReceiptV1, ...]:
+        return tuple(self._receipts)
 
     def perform(
         self,
@@ -152,9 +181,48 @@ class UrllibHttpClient:
         headers: Mapping[str, str],
         body: bytes | None,
     ) -> HttpResponse:
-        if endpoint not in YANDEX_READ_ENDPOINTS or not endpoint.allows(
-            method=endpoint.method,
+        response = self._http_client.perform(
+            endpoint=endpoint,
             url=url,
+            headers=headers,
+            body=body,
+        )
+        self._receipts.append(
+            CompletedReadReceiptV1.from_response(endpoint, response)
+        )
+        return response
+
+
+class UrllibHttpClient:
+    """Send only one of the immutable, allowlisted read operations."""
+
+    def __init__(
+        self,
+        allowed_endpoints: tuple[YandexReadEndpoint, ...],
+    ) -> None:
+        if not allowed_endpoints or len(set(allowed_endpoints)) != len(
+            allowed_endpoints
+        ):
+            raise ValueError(
+                "A provider transport requires unique read endpoints."
+            )
+        self._allowed_endpoints = frozenset(allowed_endpoints)
+
+    def perform(
+        self,
+        *,
+        endpoint: YandexReadEndpoint,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes | None,
+    ) -> HttpResponse:
+        if (
+            endpoint not in self._allowed_endpoints
+            or not endpoint.allows_request(
+                method=endpoint.method,
+                url=url,
+                body=body,
+            )
         ):
             raise ValueError("The provider read URL is not allowlisted.")
         request = urllib.request.Request(
@@ -179,37 +247,3 @@ class UrllibHttpClient:
                 headers=dict(error.headers.items()),
                 body=error.read(),
             )
-
-
-class DotenvValue:
-    """Resolve exactly one named secret without exposing sibling credentials."""
-
-    def __init__(self, path: Path, name: str) -> None:
-        self._path = path
-        self._name = name
-
-    def configured(self) -> bool:
-        try:
-            return bool(self._read())
-        except (OSError, ValueError):
-            return False
-
-    def resolve(self) -> str:
-        value = self._read()
-        if not value:
-            raise RuntimeError(self._name + " is not configured.")
-        return value
-
-    def _read(self) -> str:
-        with self._path.open(encoding="utf-8") as stream:
-            return self._read_from(stream)
-
-    def _read_from(self, stream: TextIO) -> str:
-        for raw_line in stream:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, value = line.split("=", 1)
-            if name.strip() == self._name:
-                return value.strip()
-        return ""

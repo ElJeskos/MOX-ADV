@@ -22,8 +22,12 @@ from mox_adv.observe import (
     collect_paired_fixture_snapshot_via_modules,
     trusted_fixture_scope,
 )
-from mox_adv.paired_production import PairedYandexProductionReaderV1
+from mox_adv.paired_production import (
+    PairedProductionReadResultV1,
+    PairedYandexProductionReaderV1,
+)
 from mox_adv.ui_service import UiRunRejected, UiRunService
+from mox_adv.yandex_transport import CompletedReadReceiptV1
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "config" / "gate0-policy.json"
@@ -51,7 +55,6 @@ class StubProductionReader:
         self.scope = trusted_fixture_scope(policy, "ui-linked-budget-pressure")
         self.period_start = self.direct_report.period_start
         self.period_end = self.direct_report.period_end
-        self.last_records: tuple[Mapping[str, str], ...] = ()
 
     def readiness(self, policy: Mapping[str, Any]) -> dict[str, Any]:
         del policy
@@ -120,30 +123,35 @@ class StubProductionReader:
             connected=connected,
             trusted_scope=self.scope,
         )
-        self.last_records = (
-            {
-                "system": "DIRECT_REPORTS",
-                "http_method": "POST",
-                "host": "api.direct.yandex.com",
-                "path": "/json/v501/reports",
-                "operation": "get",
-            },
-            {
-                "system": "DIRECT",
-                "http_method": "POST",
-                "host": "api.direct.yandex.com",
-                "path": "/json/v501/campaigns",
-                "operation": "get",
-            },
-            {
-                "system": "METRIKA",
-                "http_method": "GET",
-                "host": "api-metrika.yandex.net",
-                "path": "/stat/v1/data",
-                "operation": "get",
-            },
+        return PairedProductionReadResultV1(
+            snapshot=snapshot,
+            receipts=(
+                CompletedReadReceiptV1(
+                    system="DIRECT_REPORTS",
+                    http_method="POST",
+                    host="api.direct.yandex.com",
+                    path="/json/v501/reports",
+                    operation="get",
+                    http_status=200,
+                ),
+                CompletedReadReceiptV1(
+                    system="DIRECT",
+                    http_method="POST",
+                    host="api.direct.yandex.com",
+                    path="/json/v501/campaigns",
+                    operation="get",
+                    http_status=200,
+                ),
+                CompletedReadReceiptV1(
+                    system="METRIKA",
+                    http_method="GET",
+                    host="api-metrika.yandex.net",
+                    path="/stat/v1/data",
+                    operation="get",
+                    http_status=200,
+                ),
+            ),
         )
-        return snapshot
 
 
 class UiRunServiceTests(unittest.TestCase):

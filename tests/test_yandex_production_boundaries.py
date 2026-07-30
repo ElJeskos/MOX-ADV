@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import mox_adv.paired_production
 from mox_adv.contracts import (
@@ -13,21 +16,26 @@ from mox_adv.contracts import (
     MetrikaReportReadQuery,
 )
 from mox_adv.direct_production import (
+    DIRECT_CAMPAIGN_STATE_READ,
+    DIRECT_REPORTS_READ,
     DirectProductionReadProviderV1,
     DirectProductionReadSettingsV1,
 )
 from mox_adv.metrika_production import (
+    METRIKA_REPORT_READ,
     MetrikaProductionReadProviderV1,
     MetrikaProductionReadSettingsV1,
 )
 from mox_adv.observe import load_observe_policy
-from mox_adv.paired_production import PairedYandexProductionReaderV1
+from mox_adv.paired_production import (
+    PairedProductionReadFailure,
+    PairedProductionReadResultV1,
+    PairedYandexProductionReaderV1,
+)
+from mox_adv.yandex_credentials import DotenvValue
 from mox_adv.yandex_transport import (
-    DIRECT_CAMPAIGN_STATE_READ,
-    DIRECT_REPORTS_READ,
-    METRIKA_REPORT_READ,
-    DotenvValue,
     HttpResponse,
+    UrllibHttpClient,
     YandexReadEndpoint,
 )
 
@@ -159,6 +167,75 @@ class YandexEndpointDescriptorTests(unittest.TestCase):
             )
         )
 
+    def test_campaign_descriptor_rejects_a_mutating_json_method_before_egress(
+        self,
+    ) -> None:
+        transport = UrllibHttpClient(
+            (
+                DIRECT_REPORTS_READ,
+                DIRECT_CAMPAIGN_STATE_READ,
+            )
+        )
+
+        with (
+            patch("urllib.request.urlopen") as urlopen,
+            self.assertRaisesRegex(ValueError, "not allowlisted"),
+        ):
+            transport.perform(
+                endpoint=DIRECT_CAMPAIGN_STATE_READ,
+                url=DIRECT_CAMPAIGN_STATE_READ.base_url,
+                headers={"Content-Type": "application/json"},
+                body=b'{"method":"update","params":{}}',
+            )
+
+        urlopen.assert_not_called()
+
+    def test_campaign_descriptor_rejects_ambiguous_json_before_egress(
+        self,
+    ) -> None:
+        transport = UrllibHttpClient(
+            (
+                DIRECT_REPORTS_READ,
+                DIRECT_CAMPAIGN_STATE_READ,
+            )
+        )
+
+        with (
+            patch("urllib.request.urlopen") as urlopen,
+            self.assertRaisesRegex(ValueError, "not allowlisted"),
+        ):
+            transport.perform(
+                endpoint=DIRECT_CAMPAIGN_STATE_READ,
+                url=DIRECT_CAMPAIGN_STATE_READ.base_url,
+                headers={"Content-Type": "application/json"},
+                body=b'{"method":"update","method":"get","params":{}}',
+            )
+
+        urlopen.assert_not_called()
+
+    def test_direct_transport_rejects_a_metrika_descriptor_before_egress(
+        self,
+    ) -> None:
+        transport = UrllibHttpClient(
+            (
+                DIRECT_REPORTS_READ,
+                DIRECT_CAMPAIGN_STATE_READ,
+            )
+        )
+
+        with (
+            patch("urllib.request.urlopen") as urlopen,
+            self.assertRaisesRegex(ValueError, "not allowlisted"),
+        ):
+            transport.perform(
+                endpoint=METRIKA_REPORT_READ,
+                url=METRIKA_REPORT_READ.base_url + "?ids=counter-1",
+                headers={},
+                body=None,
+            )
+
+        urlopen.assert_not_called()
+
 
 class IndependentProductionProviderTests(unittest.TestCase):
     def test_direct_read_needs_only_direct_configuration_and_credentials(
@@ -274,6 +351,37 @@ class IndependentProductionProviderTests(unittest.TestCase):
             )
 
 
+class ConcurrentOutcomeHttpClient(RecordingHttpClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self._direct_reports_barrier = threading.Barrier(2)
+        self._metrika_lock = threading.Lock()
+        self._metrika_calls = 0
+
+    def perform(
+        self,
+        *,
+        endpoint: YandexReadEndpoint,
+        url: str,
+        headers: Mapping[str, str],
+        body: bytes | None,
+    ) -> HttpResponse:
+        if endpoint == DIRECT_REPORTS_READ:
+            self._direct_reports_barrier.wait(timeout=5)
+        if endpoint == METRIKA_REPORT_READ:
+            with self._metrika_lock:
+                self._metrika_calls += 1
+                should_fail = self._metrika_calls == 1
+            if should_fail:
+                raise RuntimeError("Metrika read failed before response.")
+        return super().perform(
+            endpoint=endpoint,
+            url=url,
+            headers=headers,
+            body=body,
+        )
+
+
 class PairedProductionCompositionTests(unittest.TestCase):
     def test_split_provider_configs_build_one_explicitly_linked_snapshot(
         self,
@@ -347,7 +455,7 @@ class PairedProductionCompositionTests(unittest.TestCase):
                 / "gate0-policy.json"
             )
 
-            snapshot = reader.collect_snapshot(
+            result = reader.collect_snapshot(
                 policy=policy,
                 observation_id="paired-production-1",
                 generated_at=datetime(
@@ -360,6 +468,7 @@ class PairedProductionCompositionTests(unittest.TestCase):
                 ),
             )
 
+            snapshot = result.snapshot
             self.assertEqual(
                 [
                     DIRECT_REPORTS_READ,
@@ -392,10 +501,120 @@ class PairedProductionCompositionTests(unittest.TestCase):
                         METRIKA_REPORT_READ,
                     )
                 ),
-                reader.last_records,
+                tuple(receipt.as_dict() for receipt in result.receipts),
             )
             self.assertEqual("COMPARABLE", snapshot.comparability_status)
             self.assertEqual("READY", snapshot.confidence_status)
+
+    def test_concurrent_success_and_failure_keep_only_their_own_receipts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            direct_path = root / "direct.json"
+            direct_path.write_text(
+                json.dumps(
+                    {
+                        "connection_id": "direct-connection",
+                        "account_id": "account-1",
+                        "campaign_id": "campaign-1",
+                        "trusted_change_author": "sviridov",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metrika_path = root / "metrika.json"
+            metrika_path.write_text(
+                json.dumps(
+                    {
+                        "connection_id": "metrika-connection",
+                        "counter_id": "counter-1",
+                        "goal_id": "goal-1",
+                        "campaign_id": "campaign-1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            paired_path = root / "paired.json"
+            paired_path.write_text(
+                json.dumps(
+                    {
+                        "organization_id": "organization-1",
+                        "paired_connection_id": "paired-connection",
+                        "period_days": 1,
+                        "baseline": {
+                            "source_campaign": "baseline-1",
+                            "impressions": 8_000,
+                            "clicks": 180,
+                            "cost_micros": 4_000_000_000,
+                            "visits": 260,
+                            "goal_visits": 4,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            environment_path = root / ".env"
+            environment_path.write_text(
+                "YANDEX_DIRECT_OAUTH_TOKEN=direct-token\n"
+                "YANDEX_DIRECT_CLIENT_LOGIN=direct-login\n"
+                "YANDEX_METRIKA_OAUTH_TOKEN=metrika-token\n",
+                encoding="utf-8",
+            )
+            http = ConcurrentOutcomeHttpClient()
+            reader = PairedYandexProductionReaderV1(
+                paired_configuration_path=paired_path,
+                direct_configuration_path=direct_path,
+                metrika_configuration_path=metrika_path,
+                direct_environment_path=environment_path,
+                metrika_environment_path=environment_path,
+                direct_http_client=http,
+                metrika_http_client=http,
+            )
+            policy = load_observe_policy(
+                Path(__file__).resolve().parents[1]
+                / "config"
+                / "gate0-policy.json"
+            )
+
+            def collect(index: int) -> object:
+                try:
+                    return reader.collect_snapshot(
+                        policy=policy,
+                        observation_id=f"parallel-{index}",
+                        generated_at=datetime(
+                            2026,
+                            7,
+                            30,
+                            12,
+                            index,
+                            tzinfo=timezone.utc,
+                        ),
+                    )
+                except PairedProductionReadFailure as error:
+                    return error
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                outcomes = list(executor.map(collect, (1, 2)))
+
+            success = next(
+                outcome
+                for outcome in outcomes
+                if isinstance(outcome, PairedProductionReadResultV1)
+            )
+            failure = next(
+                outcome
+                for outcome in outcomes
+                if isinstance(outcome, PairedProductionReadFailure)
+            )
+            self.assertEqual(
+                ["DIRECT_REPORTS", "DIRECT", "METRIKA"],
+                [receipt.system for receipt in success.receipts],
+            )
+            self.assertEqual(
+                ["DIRECT_REPORTS", "DIRECT"],
+                [receipt.system for receipt in failure.receipts],
+            )
 
     def test_paired_root_contains_no_provider_credential_names(self) -> None:
         source = Path(mox_adv.paired_production.__file__).read_text(

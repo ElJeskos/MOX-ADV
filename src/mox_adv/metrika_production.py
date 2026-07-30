@@ -19,24 +19,24 @@ from mox_adv.environment import ExecutionEnvironment
 from mox_adv.metrika_provider import MetrikaReadAuthorizationError
 from mox_adv.module_api.v1 import InProcessModuleAdapterV1
 from mox_adv.modules.metrika import MetrikaModuleV1
+from mox_adv.yandex_credentials import DotenvValue
 from mox_adv.yandex_transport import (
-    METRIKA_REPORT_READ,
-    DotenvValue,
     HttpClient,
     HttpResponse,
     UrllibHttpClient,
-    json_response_object,
+    YandexReadEndpoint,
 )
-from mox_adv.yandex_transport import (
+from mox_adv.yandex_values import json_response_object
+from mox_adv.yandex_values import (
     nonempty_array as _array,
 )
-from mox_adv.yandex_transport import (
+from mox_adv.yandex_values import (
     nonnegative_count as _count,
 )
-from mox_adv.yandex_transport import (
+from mox_adv.yandex_values import (
     object_mapping as _object,
 )
-from mox_adv.yandex_transport import (
+from mox_adv.yandex_values import (
     required_text as _text,
 )
 
@@ -45,6 +45,15 @@ DEFAULT_METRIKA_CONFIGURATION_PATH = (
     ROOT / "config" / "metrika-production-read.json"
 )
 DEFAULT_METRIKA_ENVIRONMENT_PATH = ROOT / ".env.metrika-read"
+METRIKA_REPORT_READ = YandexReadEndpoint(
+    system="METRIKA",
+    method="GET",
+    host="api-metrika.yandex.net",
+    path="/stat/v1/data",
+    operation="get",
+    query_allowed=True,
+)
+METRIKA_READ_ENDPOINTS = (METRIKA_REPORT_READ,)
 
 
 @dataclass(frozen=True)
@@ -202,7 +211,9 @@ class MetrikaProductionReadCompositionV1:
     ) -> None:
         self.configuration_path = configuration_path
         self.environment_path = environment_path
-        self.http_client = http_client or UrllibHttpClient()
+        self.http_client = http_client or UrllibHttpClient(
+            METRIKA_READ_ENDPOINTS
+        )
 
     def settings(self) -> MetrikaProductionReadSettingsV1:
         return MetrikaProductionReadSettingsV1.from_path(self.configuration_path)
@@ -229,13 +240,18 @@ class MetrikaProductionReadCompositionV1:
         self,
         *,
         clock: Callable[[], datetime],
+        http_client: HttpClient | None = None,
     ) -> InProcessModuleAdapterV1:
         module = MetrikaModuleV1(
             clock=clock,
             provider_reader=MetrikaProductionReadProviderV1(
                 settings=self.settings(),
                 token=self._token(),
-                http_client=self.http_client,
+                http_client=(
+                    self.http_client
+                    if http_client is None
+                    else http_client
+                ),
             ),
         )
         return InProcessModuleAdapterV1(

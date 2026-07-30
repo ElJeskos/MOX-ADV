@@ -299,10 +299,12 @@ class ModuleRequestContractTests(unittest.TestCase):
         result = ModuleResultV1.from_dict(successful_result_payload())
         assert request.external_evidence is not None
         assert result.assessment is not None
+        external_evidence = request.external_evidence
+        assessment = result.assessment
         invalid_constructors = {
             "environment": lambda: replace(request, environment="STAGING"),
             "evidence_source": lambda: replace(
-                request.external_evidence,
+                external_evidence,
                 source="UNTRUSTED",
             ),
             "module_id": lambda: ModuleIdentityV1(
@@ -310,7 +312,7 @@ class ModuleRequestContractTests(unittest.TestCase):
                 module_version="1.0.0",
             ),
             "assessment": lambda: replace(
-                result.assessment,
+                assessment,
                 data_quality_status="UNKNOWN",
             ),
             "proposal": lambda: ModuleProposalV1(
@@ -334,12 +336,11 @@ class ModuleRequestContractTests(unittest.TestCase):
             ),
         }
         for field, construct in invalid_constructors.items():
-            with self.subTest(field=field):
-                with self.assertRaisesRegex(
-                    ContractValidationError,
-                    "must be one of",
-                ):
-                    construct()
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ContractValidationError,
+                "must be one of",
+            ):
+                construct()
 
     def test_result_limits_hypotheses_and_requires_metric_evidence(self) -> None:
         result = ModuleResultV1.from_dict(successful_result_payload())
@@ -430,8 +431,8 @@ class ModuleAdapterContractTests(unittest.TestCase):
     def test_direct_and_metrika_modules_need_no_cross_provider_configuration(
         self,
     ) -> None:
-        direct = DirectModuleV1(RecordingModule("YANDEX_DIRECT").invoke)
-        metrika = MetrikaModuleV1(RecordingModule("YANDEX_METRIKA").invoke)
+        direct = DirectModuleV1()
+        metrika = MetrikaModuleV1()
 
         direct_result = InProcessModuleAdapterV1(
             direct,
@@ -444,6 +445,16 @@ class ModuleAdapterContractTests(unittest.TestCase):
 
         self.assertEqual("YANDEX_DIRECT", direct_result.module.module_id)
         self.assertEqual("YANDEX_METRIKA", metrika_result.module.module_id)
+
+    def test_provider_modules_reject_arbitrary_implementation_injection(
+        self,
+    ) -> None:
+        implementation = RecordingModule("YANDEX_DIRECT").invoke
+
+        with self.assertRaises(TypeError):
+            DirectModuleV1(implementation)  # type: ignore[misc,arg-type]
+        with self.assertRaises(TypeError):
+            MetrikaModuleV1(implementation)  # type: ignore[misc,arg-type]
 
     def test_each_provider_composition_root_imports_without_the_other(self) -> None:
         for provider, absent_provider in (

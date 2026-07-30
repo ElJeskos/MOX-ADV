@@ -20,25 +20,24 @@ from mox_adv.direct_provider import DirectReadAuthorizationError
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.module_api.v1 import InProcessModuleAdapterV1
 from mox_adv.modules.direct import DirectModuleV1
+from mox_adv.yandex_credentials import DotenvValue
 from mox_adv.yandex_transport import (
-    DIRECT_CAMPAIGN_STATE_READ,
-    DIRECT_REPORTS_READ,
-    DotenvValue,
     HttpClient,
     HttpResponse,
     UrllibHttpClient,
-    json_response_object,
+    YandexReadEndpoint,
 )
-from mox_adv.yandex_transport import (
+from mox_adv.yandex_values import json_response_object
+from mox_adv.yandex_values import (
     nonempty_array as _array,
 )
-from mox_adv.yandex_transport import (
+from mox_adv.yandex_values import (
     nonnegative_count as _count,
 )
-from mox_adv.yandex_transport import (
+from mox_adv.yandex_values import (
     object_mapping as _object,
 )
-from mox_adv.yandex_transport import (
+from mox_adv.yandex_values import (
     required_text as _text,
 )
 
@@ -47,6 +46,27 @@ DEFAULT_DIRECT_CONFIGURATION_PATH = (
     ROOT / "config" / "direct-production-read.json"
 )
 DEFAULT_DIRECT_ENVIRONMENT_PATH = ROOT / ".env.direct-read"
+DIRECT_REPORTS_READ = YandexReadEndpoint(
+    system="DIRECT_REPORTS",
+    method="POST",
+    host="api.direct.yandex.com",
+    path="/json/v501/reports",
+    operation="get",
+    body_required=True,
+)
+DIRECT_CAMPAIGN_STATE_READ = YandexReadEndpoint(
+    system="DIRECT",
+    method="POST",
+    host="api.direct.yandex.com",
+    path="/json/v501/campaigns",
+    operation="get",
+    body_required=True,
+    json_method="get",
+)
+DIRECT_READ_ENDPOINTS = (
+    DIRECT_REPORTS_READ,
+    DIRECT_CAMPAIGN_STATE_READ,
+)
 
 
 @dataclass(frozen=True)
@@ -345,7 +365,9 @@ class DirectProductionReadCompositionV1:
     ) -> None:
         self.configuration_path = configuration_path
         self.environment_path = environment_path
-        self.http_client = http_client or UrllibHttpClient()
+        self.http_client = http_client or UrllibHttpClient(
+            DIRECT_READ_ENDPOINTS
+        )
 
     def settings(self) -> DirectProductionReadSettingsV1:
         return DirectProductionReadSettingsV1.from_path(self.configuration_path)
@@ -377,6 +399,7 @@ class DirectProductionReadCompositionV1:
         self,
         *,
         clock: Callable[[], datetime],
+        http_client: HttpClient | None = None,
     ) -> InProcessModuleAdapterV1:
         module = DirectModuleV1(
             clock=clock,
@@ -384,7 +407,11 @@ class DirectProductionReadCompositionV1:
                 settings=self.settings(),
                 token=self._token(),
                 client_login=self._client_login(),
-                http_client=self.http_client,
+                http_client=(
+                    self.http_client
+                    if http_client is None
+                    else http_client
+                ),
             ),
             environment=ExecutionEnvironment.PRODUCTION,
         )

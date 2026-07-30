@@ -2380,6 +2380,10 @@ assert blocked == [], blocked
             self.assertEqual(1, len(wheels))
             with zipfile.ZipFile(wheels[0]) as archive:
                 names = set(archive.namelist())
+            self.assertIn("mox_adv/direct_production.py", names)
+            self.assertIn("mox_adv/yandex_credentials.py", names)
+            self.assertIn("mox_adv/yandex_transport.py", names)
+            self.assertIn("mox_adv/yandex_values.py", names)
             self.assertNotIn("mox_adv/modules/metrika.py", names)
             self.assertFalse(
                 any(name.startswith("mox_adv/metrika") for name in names),
@@ -2439,6 +2443,144 @@ assert DirectActionRuntimeV1.__name__ == "DirectActionRuntimeV1"
                 text=True,
             )
             self.assertEqual(0, completed.returncode, completed.stderr)
+
+            provider_script = """
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from mox_adv.direct_production import (
+    DIRECT_CAMPAIGN_STATE_READ,
+    DIRECT_REPORTS_READ,
+    DirectProductionReadCompositionV1,
+)
+from mox_adv.module_api.v1 import ModuleRequestV1
+from mox_adv.yandex_transport import HttpResponse
+
+runtime = Path(__import__("os").environ["DIRECT_RUNTIME"])
+runtime.mkdir()
+configuration_path = runtime / "direct.json"
+environment_path = runtime / "direct.env"
+configuration_path.write_text(
+    json.dumps(
+        {
+            "connection_id": "customer-direct-primary",
+            "account_id": "account-8",
+            "campaign_id": "campaign-7",
+            "trusted_change_author": "customer-42",
+        }
+    ),
+    encoding="utf-8",
+)
+environment_path.write_text(
+    "YANDEX_DIRECT_OAUTH_TOKEN=wheel-token\\n"
+    "YANDEX_DIRECT_CLIENT_LOGIN=wheel-login\\n",
+    encoding="utf-8",
+)
+
+
+class FakeDirectHttp:
+    def __init__(self):
+        self.systems = []
+
+    def perform(self, *, endpoint, url, headers, body):
+        self.systems.append(endpoint.system)
+        assert url == endpoint.base_url
+        assert headers["Authorization"] == "Bearer wheel-token"
+        assert headers["Client-Login"] == "wheel-login"
+        assert body is not None
+        if endpoint == DIRECT_REPORTS_READ:
+            report_rows = "\\n".join(
+                f"2026-07-{day}\\tcampaign-7\\t1000\\t20\\t500000000"
+                for day in range(23, 30)
+            )
+            return HttpResponse(
+                status=200,
+                headers={
+                    "X-MOX-Retrieved-At": "2026-07-30T11:55:00+00:00",
+                    "X-MOX-Watermark": "2026-07-30T11:50:00+00:00",
+                },
+                body=(
+                    "Date\\tCampaignId\\tImpressions\\tClicks\\tCost\\n"
+                    + report_rows
+                ).encode("utf-8"),
+            )
+        assert endpoint == DIRECT_CAMPAIGN_STATE_READ
+        return HttpResponse(
+            status=200,
+            headers={},
+            body=json.dumps(
+                {
+                    "data": [
+                        {
+                            "campaign": "campaign-7",
+                            "campaign_state": "ON",
+                            "group_state": "ON",
+                            "ad_state": "ON",
+                            "strategy": "HIGHEST_POSITION",
+                            "current_weekly_budget_micros": 10000000000,
+                            "budget_period_start": (
+                                "2026-07-23T12:00:00+00:00"
+                            ),
+                            "budget_period_end": (
+                                "2026-07-30T12:00:00+00:00"
+                            ),
+                            "current_search_bid_micros": 100000000,
+                            "ad_variant": "A",
+                            "object_config_version": "campaign-config-v1",
+                            "last_change_author": "customer-42",
+                            "last_change_occurred_at": (
+                                "2026-07-22T12:00:00+00:00"
+                            ),
+                        }
+                    ],
+                    "meta": {
+                        "retrieved_at": "2026-07-30T11:54:00+00:00",
+                        "watermark": "2026-07-30T11:49:00+00:00",
+                    },
+                }
+            ).encode("utf-8"),
+        )
+
+
+http = FakeDirectHttp()
+composition = DirectProductionReadCompositionV1(
+    configuration_path=configuration_path,
+    environment_path=environment_path,
+    http_client=http,
+)
+request = json.loads(__import__("os").environ["DIRECT_REQUEST"])
+request.pop("external_evidence")
+result = composition.adapter(
+    clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+).invoke(ModuleRequestV1.from_dict(request))
+payload = result.as_dict()
+assert payload["status"] == "PARTIAL", payload
+assert payload["module"]["module_id"] == "YANDEX_DIRECT", payload
+metrics = {item["name"]: item["value"] for item in payload["metrics"]}
+assert metrics["impressions"] == 7000, metrics
+assert metrics["clicks"] == 140, metrics
+assert [item["source"] for item in payload["provenance"]] == [
+    "DIRECT_REPORTS",
+    "DIRECT_CAMPAIGN_STATE",
+], payload["provenance"]
+assert http.systems == ["DIRECT_REPORTS", "DIRECT"], http.systems
+"""
+            provider_completed = subprocess.run(
+                [sys.executable, "-c", provider_script],
+                check=False,
+                capture_output=True,
+                env={
+                    "DIRECT_REQUEST": json.dumps(customer_evidence_request()),
+                    "DIRECT_RUNTIME": str(temporary / "direct-runtime"),
+                    "PYTHONPATH": str(installed),
+                },
+                text=True,
+            )
+            self.assertEqual(
+                0,
+                provider_completed.returncode,
+                provider_completed.stderr,
+            )
 
 
 if __name__ == "__main__":

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable
 
 from mox_adv.direct_analysis import (
     DIRECT_IDENTITY,
@@ -33,30 +34,19 @@ if TYPE_CHECKING:
 
 
 class DirectModuleV1(BoundProviderModuleV1):
-    """Run standalone Direct or preserve the legacy injected composition."""
+    """Compose the trusted Direct analysis and TEST-only action services."""
 
     def __init__(
         self,
-        implementation: Optional[Callable[[ModuleRequestV1], ModuleResultV1]] = None,
         *,
         clock: Callable[[], datetime] = utc_now,
-        decision_records: Optional[ModuleDecisionRecordStoreV1] = None,
-        provider_reader: Optional[AuthorizedDirectReadProviderV1] = None,
-        action_runtime: Optional["DirectActionRuntimeV1"] = None,
-        campaign_creation_runtime: Optional["DirectCampaignCreationRuntimeV1"] = None,
-        impact_policy: Optional[Mapping[str, Any]] = None,
+        decision_records: ModuleDecisionRecordStoreV1 | None = None,
+        provider_reader: AuthorizedDirectReadProviderV1 | None = None,
+        action_runtime: DirectActionRuntimeV1 | None = None,
+        campaign_creation_runtime: DirectCampaignCreationRuntimeV1 | None = None,
+        impact_policy: Mapping[str, Any] | None = None,
         environment: ExecutionEnvironment = ExecutionEnvironment.PRODUCTION,
     ) -> None:
-        if implementation is not None and (
-            provider_reader is not None
-            or action_runtime is not None
-            or campaign_creation_runtime is not None
-            or impact_policy is not None
-        ):
-            raise ContractValidationError(
-                "Direct cannot combine a legacy implementation "
-                "with a standalone provider composition."
-            )
         self.decision_records = (
             InMemoryDecisionRecordStoreV1()
             if decision_records is None
@@ -70,55 +60,51 @@ class DirectModuleV1(BoundProviderModuleV1):
             raise ContractValidationError(
                 "Direct campaign creation runtime and module environments must match."
             )
-        if implementation is None:
-            analysis = StandaloneDirectAnalysisV1(
-                clock=clock,
-                decision_records=self.decision_records,
-                provider_reader=provider_reader,
+        analysis = StandaloneDirectAnalysisV1(
+            clock=clock,
+            decision_records=self.decision_records,
+            provider_reader=provider_reader,
+        )
+        action = (
+            None
+            if action_runtime is None
+            else self._action_service(
+                clock,
+                provider_reader,
+                action_runtime,
             )
-            action = (
-                None
-                if action_runtime is None
-                else self._action_service(
-                    clock,
-                    provider_reader,
-                    action_runtime,
-                )
+        )
+        campaign_creation = (
+            None
+            if campaign_creation_runtime is None
+            else self._campaign_creation_service(
+                clock,
+                campaign_creation_runtime,
             )
-            campaign_creation = (
-                None
-                if campaign_creation_runtime is None
-                else self._campaign_creation_service(
-                    clock,
-                    campaign_creation_runtime,
-                )
-            )
-            impact_evaluation = (
-                None
-                if impact_policy is None
-                else self._impact_service(impact_policy)
-            )
+        )
+        impact_evaluation = (
+            None
+            if impact_policy is None
+            else self._impact_service(impact_policy)
+        )
 
-            def invoke(request: ModuleRequestV1) -> ModuleResultV1:
-                if (
-                    impact_evaluation is not None
-                    and request.operation.operation_type == "EVALUATE_IMPACT"
-                ):
-                    return impact_evaluation(request)
-                if (
-                    campaign_creation is not None
-                    and request.operation.operation_type == "CREATE_CAMPAIGN"
-                ):
-                    return campaign_creation(request)
-                if action is not None and request.operation.operation_type in {
-                    "PLAN_OPTIMIZATION",
-                    "APPLY_OPTIMIZATION",
-                }:
-                    return action(request)
-                return analysis.invoke(request)
-
-            implementation = invoke
-        delegate = implementation
+        def invoke(request: ModuleRequestV1) -> ModuleResultV1:
+            if (
+                impact_evaluation is not None
+                and request.operation.operation_type == "EVALUATE_IMPACT"
+            ):
+                return impact_evaluation(request)
+            if (
+                campaign_creation is not None
+                and request.operation.operation_type == "CREATE_CAMPAIGN"
+            ):
+                return campaign_creation(request)
+            if action is not None and request.operation.operation_type in {
+                "PLAN_OPTIMIZATION",
+                "APPLY_OPTIMIZATION",
+            }:
+                return action(request)
+            return analysis.invoke(request)
 
         def trusted_invoke(request: ModuleRequestV1) -> ModuleResultV1:
             if (
@@ -128,7 +114,7 @@ class DirectModuleV1(BoundProviderModuleV1):
                 blocked = self._block_campaign_creation(request)
                 if blocked is not None:
                     return blocked
-            return delegate(request)
+            return invoke(request)
 
         super().__init__(
             identity=DIRECT_IDENTITY,
@@ -138,8 +124,8 @@ class DirectModuleV1(BoundProviderModuleV1):
     def _action_service(
         self,
         clock: Callable[[], datetime],
-        provider_reader: Optional[AuthorizedDirectReadProviderV1],
-        action_runtime: "DirectActionRuntimeV1",
+        provider_reader: AuthorizedDirectReadProviderV1 | None,
+        action_runtime: DirectActionRuntimeV1,
     ) -> Callable[[ModuleRequestV1], ModuleResultV1]:
         from mox_adv.direct_action import StandaloneDirectActionV1
 
@@ -164,7 +150,7 @@ class DirectModuleV1(BoundProviderModuleV1):
     def _block_campaign_creation(
         self,
         request: ModuleRequestV1,
-    ) -> Optional[ModuleResultV1]:
+    ) -> ModuleResultV1 | None:
         if (
             self._environment is ExecutionEnvironment.TEST
             and request.environment == ExecutionEnvironment.TEST.value
@@ -185,7 +171,7 @@ class DirectModuleV1(BoundProviderModuleV1):
     def _campaign_creation_service(
         self,
         clock: Callable[[], datetime],
-        runtime: "DirectCampaignCreationRuntimeV1",
+        runtime: DirectCampaignCreationRuntimeV1,
     ) -> Callable[[ModuleRequestV1], ModuleResultV1]:
         from mox_adv.direct_campaign_creation import (
             StandaloneDirectCampaignCreationV1,
