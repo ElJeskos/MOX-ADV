@@ -67,6 +67,15 @@ The bootstrap and OBSERVE fixture connectors read local closed-schema JSON objec
 The policy and executor both fail closed if an operation would gain external write egress.
 No test contacts Yandex or another external service.
 
+## Versioned module contract
+
+Standalone Direct and Metrika integrations share `ModuleRequestV1` and `ModuleResultV1` from `mox_adv.module_api.v1`.
+The in-process and HTTP/JSON adapters invoke the same `ModuleV1` interface, so the paired runtime can adopt the contract without an HTTP hop.
+Requests reference stored connections and accept only closed high-level operations and normalized scalar evidence.
+They have no fields for OAuth tokens, arbitrary endpoints, provider HTTP methods, headers, or raw Yandex payloads.
+The published HTTP contract is [`openapi/module-api-v1.openapi.json`](openapi/module-api-v1.openapi.json).
+The existing paired runtime and Dashboard continue to use the legacy composition until their dedicated migration slice.
+
 ## Tests
 
 Run the complete standard-library test suite.

@@ -1,0 +1,784 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MOX-ADV module API",
+    "version": "1.0.0",
+    "description": "Provider-neutral HTTP/JSON adapter for standalone Direct and Metrika modules."
+  },
+  "paths": {
+    "/v1/runs": {
+      "post": {
+        "operationId": "invokeModuleV1",
+        "summary": "Invoke the configured standalone module",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModuleRequestV1"
+              },
+              "example": {
+                "schema_version": "module-request-v1",
+                "connection_ref": {
+                  "connection_id": "customer-metrika-primary"
+                },
+                "environment": "PRODUCTION",
+                "scope": {
+                  "organization_id": "customer-42",
+                  "campaign_id": "campaign-7",
+                  "counter_id": "counter-9",
+                  "goal_id": "goal-3"
+                },
+                "period": {
+                  "start_date": "2026-07-01",
+                  "end_date": "2026-07-29",
+                  "timezone": "Europe/Moscow"
+                },
+                "objective": {
+                  "code": "REDUCE_CPA",
+                  "description": "Reduce CPA without losing qualified conversions."
+                },
+                "external_evidence": {
+                  "schema_version": "normalized-metrics-evidence-v1",
+                  "evidence_id": "customer-evidence-17",
+                  "source": "CUSTOMER_ECOSYSTEM",
+                  "observed_at": "2026-07-30T09:00:00+00:00",
+                  "watermark": "2026-07-30T08:55:00+00:00",
+                  "metrics": [
+                    {
+                      "name": "goal_visits",
+                      "value": 21,
+                      "unit": "COUNT"
+                    },
+                    {
+                      "name": "cost_rub",
+                      "value": "4200.00",
+                      "unit": "RUB"
+                    }
+                  ]
+                },
+                "operation": {
+                  "kind": "ANALYZE",
+                  "operation_type": "ANALYZE_PERFORMANCE"
+                },
+                "idempotency_key": "customer-run-2026-07-30-001"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The module completed or returned a partial analysis.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModuleResultV1"
+                },
+                "example": {
+                  "schema_version": "module-result-v1",
+                  "run_id": "module-run-1",
+                  "module": {
+                    "module_id": "YANDEX_METRIKA",
+                    "module_version": "1.0.0"
+                  },
+                  "status": "SUCCEEDED",
+                  "metrics": [
+                    {
+                      "name": "goal_visits",
+                      "value": 21,
+                      "unit": "COUNT"
+                    }
+                  ],
+                  "assessment": {
+                    "summary": "The supplied evidence is sufficient for analysis.",
+                    "data_quality_status": "READY",
+                    "confidence_status": "READY"
+                  },
+                  "recommendations": [
+                    {
+                      "code": "KEEP_GOAL",
+                      "summary": "Keep the current goal.",
+                      "rationale": "The goal is collecting qualified conversions.",
+                      "executable": false
+                    }
+                  ],
+                  "proposal": null,
+                  "execution_result": null,
+                  "provenance": [
+                    {
+                      "source_type": "CUSTOMER_EVIDENCE",
+                      "source": "CUSTOMER_ECOSYSTEM",
+                      "retrieved_at": "2026-07-30T09:00:01+00:00",
+                      "watermark": "2026-07-30T08:55:00+00:00",
+                      "evidence_id": "customer-evidence-17"
+                    }
+                  ],
+                  "warnings": [],
+                  "errors": [],
+                  "decision_record_ref": "decision-records/module-run-1.json"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ContractError"
+          },
+          "422": {
+            "$ref": "#/components/responses/ModuleRejection"
+          },
+          "500": {
+            "$ref": "#/components/responses/ModuleFailure"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "ContractError": {
+        "description": "The request does not satisfy ModuleRequestV1.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ModuleResultV1"
+            }
+          }
+        }
+      },
+      "ModuleRejection": {
+        "description": "The request is valid but blocked or rejected by the module.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ModuleResultV1"
+            }
+          }
+        }
+      },
+      "ModuleFailure": {
+        "description": "The module failed with a typed result.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ModuleResultV1"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "StoredConnectionRefV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "connection_id"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Reference to a connection held by trusted module configuration. It is not a credential."
+          }
+        }
+      },
+      "ModuleScopeV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "organization_id"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "account_id"
+            ]
+          },
+          {
+            "required": [
+              "campaign_id"
+            ]
+          },
+          {
+            "required": [
+              "counter_id"
+            ]
+          },
+          {
+            "required": [
+              "goal_id"
+            ]
+          }
+        ],
+        "properties": {
+          "organization_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "account_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "campaign_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "counter_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "goal_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "ClosedPeriodV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "start_date",
+          "end_date",
+          "timezone"
+        ],
+        "properties": {
+          "start_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "end_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA timezone name."
+          }
+        }
+      },
+      "ModuleObjectiveV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "description"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      },
+      "MetricValueV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "value",
+          "unit"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "value": {
+            "type": [
+              "string",
+              "number",
+              "null"
+            ]
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          }
+        }
+      },
+      "ExternalEvidenceV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "evidence_id",
+          "source",
+          "observed_at",
+          "watermark",
+          "metrics"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "normalized-metrics-evidence-v1"
+          },
+          "evidence_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "source": {
+            "const": "CUSTOMER_ECOSYSTEM"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "watermark": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "metrics": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/MetricValueV1"
+            }
+          }
+        }
+      },
+      "ModuleOperationV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "operation_type"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "ANALYZE",
+              "PLAN",
+              "EXECUTE"
+            ]
+          },
+          "operation_type": {
+            "type": "string",
+            "enum": [
+              "ANALYZE_PERFORMANCE",
+              "EVALUATE_IMPACT",
+              "PLAN_OPTIMIZATION",
+              "CREATE_CAMPAIGN",
+              "MANAGE_GOAL_CANDIDATE",
+              "APPLY_OPTIMIZATION"
+            ],
+            "description": "High-level typed operation name, never a provider HTTP operation."
+          }
+        }
+      },
+      "ModuleRequestV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "connection_ref",
+          "environment",
+          "scope",
+          "period",
+          "objective",
+          "operation",
+          "idempotency_key"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "module-request-v1"
+          },
+          "connection_ref": {
+            "$ref": "#/components/schemas/StoredConnectionRefV1"
+          },
+          "environment": {
+            "type": "string",
+            "enum": [
+              "PRODUCTION",
+              "TEST"
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ModuleScopeV1"
+          },
+          "period": {
+            "$ref": "#/components/schemas/ClosedPeriodV1"
+          },
+          "objective": {
+            "$ref": "#/components/schemas/ModuleObjectiveV1"
+          },
+          "external_evidence": {
+            "$ref": "#/components/schemas/ExternalEvidenceV1"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/ModuleOperationV1"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "ModuleIdentityV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "module_id",
+          "module_version"
+        ],
+        "properties": {
+          "module_id": {
+            "type": "string",
+            "enum": [
+              "YANDEX_DIRECT",
+              "YANDEX_METRIKA"
+            ]
+          },
+          "module_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          }
+        }
+      },
+      "ModuleAssessmentV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "data_quality_status",
+          "confidence_status"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "data_quality_status": {
+            "type": "string",
+            "enum": [
+              "READY",
+              "PARTIAL",
+              "INCOMPATIBLE"
+            ]
+          },
+          "confidence_status": {
+            "type": "string",
+            "enum": [
+              "READY",
+              "INSUFFICIENT_DATA",
+              "STALE_DATA"
+            ]
+          }
+        }
+      },
+      "ModuleRecommendationV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "summary",
+          "rationale",
+          "executable"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "executable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ModuleProposalV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "proposal_id",
+          "operation_type",
+          "status"
+        ],
+        "properties": {
+          "proposal_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "operation_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PROPOSED",
+              "DRY_RUN"
+            ]
+          }
+        }
+      },
+      "ModuleExecutionResultV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "execution_id",
+          "operation_type",
+          "status",
+          "applied"
+        ],
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "operation_type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "APPLIED",
+              "NO_CHANGE",
+              "BLOCKED",
+              "ALREADY_PROCESSED",
+              "UNKNOWN_RESULT",
+              "FAILED"
+            ]
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "provider_reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "ModuleProvenanceV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_type",
+          "source",
+          "retrieved_at",
+          "watermark"
+        ],
+        "properties": {
+          "source_type": {
+            "type": "string",
+            "enum": [
+              "PROVIDER",
+              "CUSTOMER_EVIDENCE"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "retrieved_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "watermark": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "evidence_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "ModuleWarningV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        }
+      },
+      "ModuleErrorV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message",
+          "field",
+          "retryable"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "field": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 256
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ModuleResultV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "run_id",
+          "module",
+          "status",
+          "metrics",
+          "assessment",
+          "recommendations",
+          "proposal",
+          "execution_result",
+          "provenance",
+          "warnings",
+          "errors",
+          "decision_record_ref"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "module-result-v1"
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "module": {
+            "$ref": "#/components/schemas/ModuleIdentityV1"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "SUCCEEDED",
+              "PARTIAL",
+              "BLOCKED",
+              "REJECTED",
+              "FAILED"
+            ]
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricValueV1"
+            }
+          },
+          "assessment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModuleAssessmentV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recommendations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModuleRecommendationV1"
+            }
+          },
+          "proposal": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModuleProposalV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_result": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModuleExecutionResultV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provenance": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModuleProvenanceV1"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModuleWarningV1"
+            }
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModuleErrorV1"
+            }
+          },
+          "decision_record_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          }
+        }
+      }
+    }
+  }
+}
