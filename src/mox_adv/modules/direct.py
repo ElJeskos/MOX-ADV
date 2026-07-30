@@ -17,6 +17,7 @@ from mox_adv.direct_provider import (
     DirectReportReaderV1,
     DirectStateReaderV1,
 )
+from mox_adv.environment import ExecutionEnvironment, parse_execution_environment
 from mox_adv.module_api.v1 import (
     ContractValidationError,
     InMemoryDecisionRecordStoreV1,
@@ -43,6 +44,7 @@ class DirectModuleV1(BoundProviderModuleV1):
         provider_reader: Optional[AuthorizedDirectReadProviderV1] = None,
         action_runtime: Optional["DirectActionRuntimeV1"] = None,
         campaign_creation_runtime: Optional["DirectCampaignCreationRuntimeV1"] = None,
+        environment: ExecutionEnvironment = ExecutionEnvironment.PRODUCTION,
     ) -> None:
         if implementation is not None and (
             provider_reader is not None
@@ -58,6 +60,14 @@ class DirectModuleV1(BoundProviderModuleV1):
             if decision_records is None
             else decision_records
         )
+        self._environment = parse_execution_environment(environment)
+        if (
+            campaign_creation_runtime is not None
+            and campaign_creation_runtime.environment is not self._environment
+        ):
+            raise ContractValidationError(
+                "Direct campaign creation runtime and module environments must match."
+            )
         if implementation is None:
             analysis = StandaloneDirectAnalysisV1(
                 clock=clock,
@@ -96,9 +106,21 @@ class DirectModuleV1(BoundProviderModuleV1):
                 return analysis.invoke(request)
 
             implementation = invoke
+        delegate = implementation
+
+        def trusted_invoke(request: ModuleRequestV1) -> ModuleResultV1:
+            if (
+                request.operation.kind == "EXECUTE"
+                and request.operation.operation_type == "CREATE_CAMPAIGN"
+            ):
+                blocked = self._block_campaign_creation(request)
+                if blocked is not None:
+                    return blocked
+            return delegate(request)
+
         super().__init__(
             identity=DIRECT_IDENTITY,
-            implementation=implementation,
+            implementation=trusted_invoke,
         )
 
     def _action_service(
@@ -115,6 +137,27 @@ class DirectModuleV1(BoundProviderModuleV1):
             provider_reader=provider_reader,
             runtime=action_runtime,
         ).invoke
+
+    def _block_campaign_creation(
+        self,
+        request: ModuleRequestV1,
+    ) -> Optional[ModuleResultV1]:
+        if (
+            self._environment is ExecutionEnvironment.TEST
+            and request.environment == ExecutionEnvironment.TEST.value
+        ):
+            return None
+        receipt = self.decision_records.record_production_write_block(
+            DIRECT_IDENTITY,
+            request,
+            self._environment,
+        )
+        return ModuleResultV1.blocked_production_write(
+            module=DIRECT_IDENTITY,
+            request=request,
+            decision_id=receipt.decision_id,
+            decision_record_ref=receipt.reference,
+        )
 
     def _campaign_creation_service(
         self,

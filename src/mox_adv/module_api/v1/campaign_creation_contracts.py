@@ -7,6 +7,11 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional, Tuple
 
+from mox_adv.campaign_vocabulary import (
+    CAMPAIGN_CREATION_RESULT_STATUS_VALUES,
+    CAMPAIGN_SAGA_PUBLIC_STATUS_VALUES,
+    CAMPAIGN_SAGA_STEP_VALUES,
+)
 from mox_adv.module_api.v1.contract_validation import (
     ContractValidationError,
     array_value,
@@ -21,32 +26,9 @@ from mox_adv.module_api.v1.contract_validation import (
 from mox_adv.recommend_contracts import CampaignDraftV1, SchemaValidationError
 
 CAMPAIGN_CREATION_COMMAND_SCHEMA_VERSION = "campaign-creation-command-v1"
-CAMPAIGN_CREATION_STATUSES = (
-    "APPLIED",
-    "NO_CHANGE",
-    "UNKNOWN_RESULT",
-    "PARTIALLY_APPLIED",
-    "COMPENSATION_REQUIRED",
-    "FAILED",
-)
-CAMPAIGN_SAGA_STATUSES = (
-    "APPLIED",
-    "ALREADY_PROCESSED",
-    "UNKNOWN_RESULT",
-    "PARTIALLY_APPLIED",
-    "COMPENSATION_REQUIRED",
-    "FAILED",
-)
-CAMPAIGN_SAGA_STEPS = (
-    "CAMPAIGN_ADD",
-    "AD_GROUP_ADD",
-    "ADS_ADD",
-    "KEYWORD_ADD",
-    "MODERATION_SUBMIT",
-    "MODERATION_READBACK",
-    "CAMPAIGN_LAUNCH",
-    "FULL_READBACK",
-)
+CAMPAIGN_CREATION_STATUSES = CAMPAIGN_CREATION_RESULT_STATUS_VALUES
+CAMPAIGN_SAGA_STATUSES = CAMPAIGN_SAGA_PUBLIC_STATUS_VALUES
+CAMPAIGN_SAGA_STEPS = CAMPAIGN_SAGA_STEP_VALUES
 
 
 @dataclass(frozen=True)
@@ -159,15 +141,10 @@ class CampaignCreatedObjectV1:
                 ("Campaigns", "AdGroups", "Ads", "Keywords"),
             ),
             object_id=identifier(value["object_id"], f"{field}.object_id"),
-            actual_type=one_of(
+            actual_type=text(
                 value["actual_type"],
                 f"{field}.actual_type",
-                (
-                    "UNIFIED_CAMPAIGN",
-                    "UNIFIED_AD_GROUP",
-                    "TEXT_AD",
-                    "KEYWORD",
-                ),
+                maximum=128,
             ),
             compensated=boolean(
                 value["compensated"],

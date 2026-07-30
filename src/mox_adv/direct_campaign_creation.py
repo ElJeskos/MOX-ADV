@@ -43,15 +43,13 @@ from mox_adv.module_api.v1 import (
 
 
 @dataclass(frozen=True)
-class DirectCampaignCreationRuntimeV1:
-    """Bind campaign creation to one stored connection and sealed TEST adapter."""
+class SealedDirectCampaignCreationTestAdapterV1:
+    """Translate only inside the sealed adapter to the unchanged legacy saga."""
 
-    connection_id: str
-    account_id: str
     policy: Mapping[str, Any]
     store: CampaignSagaStore
     safety_bindings: CampaignDraftSafetyBindings
-    test_adapter: FakeDirectManagementAdapter
+    provider_adapter: FakeDirectManagementAdapter
     environment: ExecutionEnvironment
 
     def __post_init__(self) -> None:
@@ -59,29 +57,22 @@ class DirectCampaignCreationRuntimeV1:
         object.__setattr__(self, "environment", trusted_environment)
         if trusted_environment is not ExecutionEnvironment.TEST:
             raise ValueError(
-                "Campaign creation is available only through the TEST runtime."
+                "Campaign creation is available only through the TEST adapter."
             )
-        if type(self.test_adapter) is not FakeDirectManagementAdapter:
+        if type(self.provider_adapter) is not FakeDirectManagementAdapter:
             raise ValueError(
                 "Campaign creation accepts only the sealed socket-free "
-                "Direct TEST adapter."
-            )
-        if not self.connection_id or not self.account_id:
-            raise ValueError(
-                "Campaign creation requires a stored connection and account."
+                "Direct provider TEST adapter."
             )
 
     def execute(
         self,
-        connection_id: str,
         account_id: str,
         command: CreateCampaignCommandV1,
         now: datetime,
     ) -> CampaignCreationOutcomeV1:
-        if connection_id != self.connection_id or account_id != self.account_id:
-            raise DirectCampaignCreationAuthorizationError(
-                "The stored TEST connection does not authorize this account."
-            )
+        # The legacy credential name exists only within this explicit TEST
+        # adapter so the unchanged saga can validate its historical binding.
         legacy_request = CampaignCreationRequest(
             run_id=command.run_id,
             execution_key=command.execution_key,
@@ -97,7 +88,7 @@ class DirectCampaignCreationRuntimeV1:
             store=self.store,
             connector=DirectManagementConnectorV1(
                 self.policy,
-                self.test_adapter,
+                self.provider_adapter,
                 self.store,
                 environment=ExecutionEnvironment.TEST,
             ),
@@ -137,6 +128,48 @@ class DirectCampaignCreationRuntimeV1:
             ),
             detail=result.detail,
         )
+
+
+@dataclass(frozen=True)
+class DirectCampaignCreationRuntimeV1:
+    """Bind a stored DIRECT_TEST_WRITE connection to the sealed adapter."""
+
+    connection_id: str
+    account_id: str
+    credential_profile: str
+    test_adapter: SealedDirectCampaignCreationTestAdapterV1
+    environment: ExecutionEnvironment
+
+    def __post_init__(self) -> None:
+        trusted_environment = parse_execution_environment(self.environment)
+        object.__setattr__(self, "environment", trusted_environment)
+        if trusted_environment is not ExecutionEnvironment.TEST:
+            raise ValueError(
+                "Campaign creation is available only through the TEST runtime."
+            )
+        if type(self.test_adapter) is not SealedDirectCampaignCreationTestAdapterV1:
+            raise ValueError(
+                "Campaign creation requires the sealed Direct TEST adapter."
+            )
+        if self.credential_profile != "DIRECT_TEST_WRITE":
+            raise ValueError("Standalone campaign creation requires DIRECT_TEST_WRITE.")
+        if not self.connection_id or not self.account_id:
+            raise ValueError(
+                "Campaign creation requires a stored connection and account."
+            )
+
+    def execute(
+        self,
+        connection_id: str,
+        account_id: str,
+        command: CreateCampaignCommandV1,
+        now: datetime,
+    ) -> CampaignCreationOutcomeV1:
+        if connection_id != self.connection_id or account_id != self.account_id:
+            raise DirectCampaignCreationAuthorizationError(
+                "The stored TEST connection does not authorize this account."
+            )
+        return self.test_adapter.execute(account_id, command, now)
 
 
 class DirectCampaignCreationAuthorizationError(ValueError):
@@ -332,5 +365,6 @@ class StandaloneDirectCampaignCreationV1:
 __all__ = [
     "DirectCampaignCreationAuthorizationError",
     "DirectCampaignCreationRuntimeV1",
+    "SealedDirectCampaignCreationTestAdapterV1",
     "StandaloneDirectCampaignCreationV1",
 ]

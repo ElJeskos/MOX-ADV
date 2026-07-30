@@ -580,6 +580,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         )
         from mox_adv.direct_campaign_creation import (
             DirectCampaignCreationRuntimeV1,
+            SealedDirectCampaignCreationTestAdapterV1,
         )
         from mox_adv.direct_management import FakeDirectManagementAdapter
         from mox_adv.recommend_contracts import CampaignDraftV1
@@ -624,9 +625,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 expires_at=now + timedelta(minutes=15),
             )
         )
-        runtime = DirectCampaignCreationRuntimeV1(
-            connection_id="stored-test-direct",
-            account_id="sim-direct-account",
+        sealed_adapter = SealedDirectCampaignCreationTestAdapterV1(
             policy=policy,
             store=store,
             safety_bindings=CampaignDraftSafetyBindings(
@@ -637,12 +636,20 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                     "prepared-media-2",
                 ),
             ),
-            test_adapter=adapter,
+            provider_adapter=adapter,
+            environment=ExecutionEnvironment.TEST,
+        )
+        runtime = DirectCampaignCreationRuntimeV1(
+            connection_id="stored-test-direct",
+            account_id="sim-direct-account",
+            credential_profile="DIRECT_TEST_WRITE",
+            test_adapter=sealed_adapter,
             environment=ExecutionEnvironment.TEST,
         )
         module = DirectModuleV1(
             clock=lambda: now,
             campaign_creation_runtime=runtime,
+            environment=ExecutionEnvironment.TEST,
         )
         return (
             HttpJsonModuleAdapterV1(
@@ -745,6 +752,24 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             )
             self.assertEqual([], adapter.calls)
 
+    def test_direct_module_boundary_blocks_production_before_test_adapter(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _http, adapter, module = self._campaign_creation_http(temporary)
+            request = ModuleRequestV1.from_dict(
+                campaign_creation_module_request(environment="PRODUCTION")
+            )
+
+            result = module.invoke(request)
+
+            self.assertEqual("BLOCKED", result.status)
+            self.assertEqual(
+                "PRODUCTION_WRITE_FORBIDDEN",
+                result.errors[0].code,
+            )
+            self.assertEqual([], adapter.calls)
+
     def test_campaign_creation_preserves_uncertain_and_compensation_evidence(
         self,
     ) -> None:
@@ -765,6 +790,15 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                     "fail_compensation_on": ("AdGroups", "delete"),
                 },
                 "COMPENSATION_REQUIRED",
+                True,
+            ),
+            (
+                {
+                    "actual_type_overrides": {
+                        "Campaigns": "PROVIDER_UNEXPECTED_CAMPAIGN_TYPE"
+                    }
+                },
+                "PARTIALLY_APPLIED",
                 True,
             ),
         )
@@ -797,6 +831,11 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                     1,
                     adapter.operation_count("Campaigns", "add"),
                 )
+                if "actual_type_overrides" in adapter_options:
+                    self.assertEqual(
+                        "PROVIDER_UNEXPECTED_CAMPAIGN_TYPE",
+                        outcome["created_objects"][0]["actual_type"],
+                    )
 
     def test_campaign_creation_contract_is_closed_and_draft_is_immutable(
         self,
@@ -854,6 +893,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         )
         from mox_adv.direct_campaign_creation import (
             DirectCampaignCreationRuntimeV1,
+            SealedDirectCampaignCreationTestAdapterV1,
         )
         from mox_adv.direct_management import FakeDirectManagementAdapter
 
@@ -882,14 +922,34 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                     self.subTest(environment=environment),
                     self.assertRaises(ValueError),
                 ):
-                    DirectCampaignCreationRuntimeV1(
-                        connection_id="stored-test-direct",
-                        account_id="sim-direct-account",
+                    SealedDirectCampaignCreationTestAdapterV1(
                         policy=policy,
                         store=store,
                         safety_bindings=bindings,
-                        test_adapter=adapter,
+                        provider_adapter=adapter,
                         environment=environment,
+                    )
+            sealed_adapter = SealedDirectCampaignCreationTestAdapterV1(
+                policy=policy,
+                store=store,
+                safety_bindings=bindings,
+                provider_adapter=FakeDirectManagementAdapter(),
+                environment=ExecutionEnvironment.TEST,
+            )
+            for credential_profile in (
+                "DIRECT_PILOT_WRITE",
+                "DIRECT_PROD_READ",
+            ):
+                with (
+                    self.subTest(credential_profile=credential_profile),
+                    self.assertRaises(ValueError),
+                ):
+                    DirectCampaignCreationRuntimeV1(
+                        connection_id="stored-test-direct",
+                        account_id="sim-direct-account",
+                        credential_profile=credential_profile,
+                        test_adapter=sealed_adapter,
+                        environment=ExecutionEnvironment.TEST,
                     )
 
     def test_customer_typed_action_is_blocked_before_direct_reads_in_production(

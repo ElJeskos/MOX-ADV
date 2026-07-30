@@ -571,6 +571,9 @@ class OpenAPIContractTests(unittest.TestCase):
         )
         self.assertIn("PARTIALLY_APPLIED", execution_statuses)
         self.assertIn("COMPENSATION_REQUIRED", execution_statuses)
+        actual_type = schemas["CampaignCreatedObjectV1"]["properties"]["actual_type"]
+        self.assertNotIn("enum", actual_type)
+        self.assertEqual(128, actual_type["maxLength"])
 
     def test_openapi_publishes_the_closed_direct_action_contract(self) -> None:
         document = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))

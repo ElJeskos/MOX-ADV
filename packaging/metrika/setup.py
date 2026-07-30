@@ -11,6 +11,7 @@ SOURCE_ROOT = REPOSITORY_ROOT / "src"
 PACKAGE_MODULES = {
     "mox_adv": {
         "__init__",
+        "campaign_vocabulary",
         "commands",
         "contracts",
         "control_state",

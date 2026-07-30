@@ -15,6 +15,7 @@ PACKAGE_MODULES = {
         "audit",
         "canonical",
         "campaign_lifecycle",
+        "campaign_vocabulary",
         "commands",
         "control_state",
         "contracts",

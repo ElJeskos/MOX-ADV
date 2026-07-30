@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
+from mox_adv import campaign_vocabulary
 from mox_adv.control_state import (
     CampaignApprovalRepository,
     ControlRejected,
@@ -33,25 +34,25 @@ class LifecycleRejected(RuntimeError):
 
 
 class CampaignSagaState(str, Enum):
-    NOT_STARTED = "NOT_STARTED"
-    IN_FLIGHT = "IN_FLIGHT"
-    APPLIED = "APPLIED"
-    ALREADY_PROCESSED = "ALREADY_PROCESSED"
-    UNKNOWN_RESULT = "UNKNOWN_RESULT"
-    FAILED = "FAILED"
-    PARTIALLY_APPLIED = "PARTIALLY_APPLIED"
-    COMPENSATION_REQUIRED = "COMPENSATION_REQUIRED"
+    NOT_STARTED = campaign_vocabulary.CAMPAIGN_SAGA_NOT_STARTED
+    IN_FLIGHT = campaign_vocabulary.CAMPAIGN_SAGA_IN_FLIGHT
+    APPLIED = campaign_vocabulary.CAMPAIGN_SAGA_APPLIED
+    ALREADY_PROCESSED = campaign_vocabulary.CAMPAIGN_SAGA_ALREADY_PROCESSED
+    UNKNOWN_RESULT = campaign_vocabulary.CAMPAIGN_SAGA_UNKNOWN_RESULT
+    FAILED = campaign_vocabulary.CAMPAIGN_SAGA_FAILED
+    PARTIALLY_APPLIED = campaign_vocabulary.CAMPAIGN_SAGA_PARTIALLY_APPLIED
+    COMPENSATION_REQUIRED = campaign_vocabulary.CAMPAIGN_SAGA_COMPENSATION_REQUIRED
 
 
 class CampaignSagaStep(str, Enum):
-    CAMPAIGN_ADD = "CAMPAIGN_ADD"
-    AD_GROUP_ADD = "AD_GROUP_ADD"
-    ADS_ADD = "ADS_ADD"
-    KEYWORD_ADD = "KEYWORD_ADD"
-    MODERATION_SUBMIT = "MODERATION_SUBMIT"
-    MODERATION_READBACK = "MODERATION_READBACK"
-    CAMPAIGN_LAUNCH = "CAMPAIGN_LAUNCH"
-    FULL_READBACK = "FULL_READBACK"
+    CAMPAIGN_ADD = campaign_vocabulary.CAMPAIGN_STEP_CAMPAIGN_ADD
+    AD_GROUP_ADD = campaign_vocabulary.CAMPAIGN_STEP_AD_GROUP_ADD
+    ADS_ADD = campaign_vocabulary.CAMPAIGN_STEP_ADS_ADD
+    KEYWORD_ADD = campaign_vocabulary.CAMPAIGN_STEP_KEYWORD_ADD
+    MODERATION_SUBMIT = campaign_vocabulary.CAMPAIGN_STEP_MODERATION_SUBMIT
+    MODERATION_READBACK = campaign_vocabulary.CAMPAIGN_STEP_MODERATION_READBACK
+    CAMPAIGN_LAUNCH = campaign_vocabulary.CAMPAIGN_STEP_CAMPAIGN_LAUNCH
+    FULL_READBACK = campaign_vocabulary.CAMPAIGN_STEP_FULL_READBACK
 
 
 class CreationReservationStatus(str, Enum):
@@ -60,15 +61,8 @@ class CreationReservationStatus(str, Enum):
     USED = "USED"
 
 
-SAGA_STEPS = (
-    CampaignSagaStep.CAMPAIGN_ADD,
-    CampaignSagaStep.AD_GROUP_ADD,
-    CampaignSagaStep.ADS_ADD,
-    CampaignSagaStep.KEYWORD_ADD,
-    CampaignSagaStep.MODERATION_SUBMIT,
-    CampaignSagaStep.MODERATION_READBACK,
-    CampaignSagaStep.CAMPAIGN_LAUNCH,
-    CampaignSagaStep.FULL_READBACK,
+SAGA_STEPS = tuple(
+    CampaignSagaStep(value) for value in campaign_vocabulary.CAMPAIGN_SAGA_STEP_VALUES
 )
 
 TERMINAL_STATES = {
@@ -260,10 +254,7 @@ def validate_campaign_draft(
     prepared_media = set(safety_bindings.prepared_media_references)
     for ad in ads:
         ad_landing = _validated_https_landing(str(ad["landing_page"]))
-        if (
-            ad_landing.hostname != landing.hostname
-            or ad_landing.path != landing.path
-        ):
+        if ad_landing.hostname != landing.hostname or ad_landing.path != landing.path:
             raise LifecycleRejected("LANDING_PAGE_OUTSIDE_DRAFT_SCOPE")
         copy_text = (str(ad["title"]) + " " + str(ad["text"])).casefold()
         if any(phrase in copy_text for phrase in prohibited):
@@ -403,8 +394,7 @@ class CampaignSagaStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             completed_count = connection.execute(
-                "SELECT COUNT(*) FROM campaign_saga_steps "
-                "WHERE execution_key = ?",
+                "SELECT COUNT(*) FROM campaign_saga_steps WHERE execution_key = ?",
                 (execution_key,),
             ).fetchone()[0]
             if completed_count != ordinal:
@@ -470,14 +460,20 @@ class CampaignSagaStore:
                 _utc_text(reservation.expires_at),
             )
             if existing is not None:
-                if tuple(existing[name] for name in (
-                    "status",
-                    "scope_binding",
-                    "object_type",
-                    "proposal_id",
-                    "credential_profile",
-                    "expires_at",
-                )) != values:
+                if (
+                    tuple(
+                        existing[name]
+                        for name in (
+                            "status",
+                            "scope_binding",
+                            "object_type",
+                            "proposal_id",
+                            "credential_profile",
+                            "expires_at",
+                        )
+                    )
+                    != values
+                ):
                     raise LifecycleRejected("IMMUTABLE_RESERVATION_CONFLICT")
                 return
             connection.execute(
@@ -607,8 +603,7 @@ class CampaignSagaStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior_count = connection.execute(
-                "SELECT COUNT(*) FROM campaign_saga_steps "
-                "WHERE execution_key = ?",
+                "SELECT COUNT(*) FROM campaign_saga_steps WHERE execution_key = ?",
                 (request.execution_key,),
             ).fetchone()[0]
             if prior_count != ordinal:
@@ -750,15 +745,10 @@ class CampaignSagaStore:
         *,
         include_compensated: bool = False,
     ) -> Tuple[CreatedDirectObject, ...]:
-        query = (
-            "SELECT service, object_id, actual_type FROM campaign_created_objects "
-            "WHERE run_id = ?"
+        rows = self._created_object_rows(
+            run_id,
+            include_compensated=include_compensated,
         )
-        if not include_compensated:
-            query += " AND compensated_at IS NULL"
-        query += " ORDER BY rowid"
-        with self._connect() as connection:
-            rows = connection.execute(query, (run_id,)).fetchall()
         return tuple(
             CreatedDirectObject(
                 service=DirectService(row["service"]),
@@ -772,12 +762,10 @@ class CampaignSagaStore:
         self,
         run_id: str,
     ) -> Tuple[CampaignCreatedObjectEvidence, ...]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT service, object_id, actual_type, compensated_at "
-                "FROM campaign_created_objects WHERE run_id = ? ORDER BY rowid",
-                (run_id,),
-            ).fetchall()
+        rows = self._created_object_rows(
+            run_id,
+            include_compensated=True,
+        )
         return tuple(
             CampaignCreatedObjectEvidence(
                 service=DirectService(row["service"]),
@@ -787,6 +775,22 @@ class CampaignSagaStore:
             )
             for row in rows
         )
+
+    def _created_object_rows(
+        self,
+        run_id: str,
+        *,
+        include_compensated: bool,
+    ) -> Sequence[sqlite3.Row]:
+        query = (
+            "SELECT service, object_id, actual_type, compensated_at "
+            "FROM campaign_created_objects WHERE run_id = ?"
+        )
+        if not include_compensated:
+            query += " AND compensated_at IS NULL"
+        query += " ORDER BY rowid"
+        with self._connect() as connection:
+            return connection.execute(query, (run_id,)).fetchall()
 
     def step_response(
         self,

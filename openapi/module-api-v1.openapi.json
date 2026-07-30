@@ -1460,12 +1460,8 @@
           },
           "actual_type": {
             "type": "string",
-            "enum": [
-              "UNIFIED_CAMPAIGN",
-              "UNIFIED_AD_GROUP",
-              "TEXT_AD",
-              "KEYWORD"
-            ]
+            "minLength": 1,
+            "maxLength": 128
           },
           "compensated": {
             "type": "boolean"
