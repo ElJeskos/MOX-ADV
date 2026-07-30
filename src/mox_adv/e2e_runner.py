@@ -82,12 +82,16 @@ from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_contracts import CampaignDraftV1
 from mox_adv.recommend_projection import build_sanitized_projection
 from mox_adv.recommend_service import RecommendationService
+from mox_adv.runtime_resources import runtime_resource
 from mox_adv.ui_service import _projection_source
 
-ROOT = Path(__file__).resolve().parents[2]
-POLICY_PATH = ROOT / "config" / "gate0-policy.json"
-OBSERVE_FIXTURE = ROOT / "fixtures" / "linked-observe.json"
-IMPACT_FIXTURE = ROOT / "fixtures" / "impact" / "IMPACT_CPA_IMPROVED_KEEP.json"
+POLICY_PATH = runtime_resource("config", "gate0-policy.json")
+OBSERVE_FIXTURE = runtime_resource("fixtures", "linked-observe.json")
+IMPACT_FIXTURE = runtime_resource(
+    "fixtures",
+    "impact",
+    "IMPACT_CPA_IMPROVED_KEEP.json",
+)
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 CAMPAIGN_NOW = datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc)
 GOAL_NOW = CAMPAIGN_NOW

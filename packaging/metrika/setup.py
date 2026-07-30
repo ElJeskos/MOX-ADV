@@ -1,53 +1,34 @@
 """Build the headless Metrika edition from an explicit module allowlist."""
 
 from pathlib import Path
+import sys
 
 from setuptools import setup
 from setuptools.command.build_py import build_py
+
+PACKAGING_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PACKAGING_ROOT))
+
+from release import exact_core_requirement, release_version  # noqa: E402
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = REPOSITORY_ROOT / "src"
 PACKAGE_MODULES = {
     "mox_adv": {
-        "__init__",
-        "campaign_vocabulary",
-        "commands",
-        "contracts",
-        "control_state",
-        "environment",
         "goal_adapters",
         "goal_contracts",
         "goal_evidence",
         "goal_service",
         "goal_store",
-        "interrupt_state",
-        "impact",
         "metrika_analysis",
+        "metrika_cli",
         "metrika_goal_lifecycle",
         "metrika_metrics",
         "metrika_production",
         "metrika_provider",
-        "module_analysis",
-        "recommend_contracts",
-        "yandex_credentials",
-        "yandex_transport",
-        "yandex_values",
     },
-    "mox_adv.module_api": {"__init__"},
-    "mox_adv.module_api.v1": {
-        "__init__",
-        "adapters",
-        "campaign_creation_contracts",
-        "contract_validation",
-        "contracts",
-        "decision_records",
-        "direct_action_contracts",
-        "goal_lifecycle_contracts",
-        "impact_contracts",
-        "provider_observations",
-        "replay_store",
-    },
-    "mox_adv.modules": {"__init__", "_bound", "metrika"},
+    "mox_adv.modules": {"metrika"},
 }
 
 
@@ -66,9 +47,13 @@ class MetrikaBuildPy(build_py):
 
 setup(
     name="mox-adv-metrika",
-    version="0.1.0",
+    version=release_version(),
     description="Headless standalone Yandex Metrika integration module",
     python_requires=">=3.9",
+    install_requires=[exact_core_requirement()],
+    entry_points={
+        "console_scripts": ["mox-adv-metrika=mox_adv.metrika_cli:main"],
+    },
     packages=list(PACKAGE_MODULES),
     package_dir={"": str(SOURCE_ROOT)},
     cmdclass={"build_py": MetrikaBuildPy},

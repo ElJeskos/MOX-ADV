@@ -592,9 +592,13 @@ assert blocked == [], blocked
             self.assertIn("mox_adv/metrika_goal_lifecycle.py", names)
             self.assertIn("mox_adv/goal_service.py", names)
             self.assertIn("mox_adv/metrika_production.py", names)
-            self.assertIn("mox_adv/yandex_credentials.py", names)
-            self.assertIn("mox_adv/yandex_transport.py", names)
-            self.assertIn("mox_adv/yandex_values.py", names)
+            self.assertIn(
+                "mox_adv_metrika-1.0.0.dist-info/entry_points.txt",
+                names,
+            )
+            self.assertNotIn("mox_adv/yandex_credentials.py", names)
+            self.assertNotIn("mox_adv/yandex_transport.py", names)
+            self.assertNotIn("mox_adv/yandex_values.py", names)
             self.assertNotIn("mox_adv/modules/direct.py", names)
             self.assertNotIn("mox_adv/direct_production.py", names)
             self.assertFalse(
@@ -602,6 +606,31 @@ assert blocked == [], blocked
                 names,
             )
 
+            (temporary / "core-egg-info").mkdir()
+            core_build = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "packaging" / "core" / "setup.py"),
+                    "egg_info",
+                    "--egg-base",
+                    str(temporary / "core-egg-info"),
+                    "build",
+                    "--build-base",
+                    str(temporary / "core-build"),
+                    "bdist_wheel",
+                    "--dist-dir",
+                    str(temporary / "core-dist"),
+                    "--bdist-dir",
+                    str(temporary / "core-wheel"),
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, core_build.returncode, core_build.stderr)
+            core_wheels = tuple((temporary / "core-dist").glob("*.whl"))
+            self.assertEqual(1, len(core_wheels))
             installed = temporary / "installed"
             install = subprocess.run(
                 [
@@ -613,6 +642,7 @@ assert blocked == [], blocked
                     "--no-deps",
                     "--target",
                     str(installed),
+                    str(core_wheels[0]),
                     str(wheels[0]),
                 ],
                 check=False,

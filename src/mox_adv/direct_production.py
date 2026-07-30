@@ -19,6 +19,7 @@ from mox_adv.contracts import (
 from mox_adv.direct_provider import DirectReadAuthorizationError
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.module_api.v1 import InProcessModuleAdapterV1
+from mox_adv.module_api.v1 import ModuleDecisionRecordStoreV1
 from mox_adv.modules.direct import DirectModuleV1
 from mox_adv.yandex_credentials import DotenvValue
 from mox_adv.yandex_transport import (
@@ -401,8 +402,24 @@ class DirectProductionReadCompositionV1:
         clock: Callable[[], datetime],
         http_client: HttpClient | None = None,
     ) -> InProcessModuleAdapterV1:
-        module = DirectModuleV1(
+        module = self.module(clock=clock, http_client=http_client)
+        return InProcessModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        )
+
+    def module(
+        self,
+        *,
+        clock: Callable[[], datetime],
+        http_client: HttpClient | None = None,
+        decision_records: ModuleDecisionRecordStoreV1 | None = None,
+    ) -> DirectModuleV1:
+        """Build the released provider module for HTTP or paired composition."""
+
+        return DirectModuleV1(
             clock=clock,
+            decision_records=decision_records,
             provider_reader=DirectProductionReadProviderV1(
                 settings=self.settings(),
                 token=self._token(),
@@ -413,10 +430,6 @@ class DirectProductionReadCompositionV1:
                     else http_client
                 ),
             ),
-            environment=ExecutionEnvironment.PRODUCTION,
-        )
-        return InProcessModuleAdapterV1(
-            module,
             environment=ExecutionEnvironment.PRODUCTION,
         )
 

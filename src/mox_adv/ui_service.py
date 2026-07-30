@@ -40,6 +40,7 @@ from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_contracts import OptimizationProposalV1, ProviderMetadata
 from mox_adv.recommend_projection import SanitizedProjection, build_sanitized_projection
 from mox_adv.recommend_service import RecommendationService
+from mox_adv.runtime_resources import runtime_resource
 from mox_adv.ui_automation import (
     AutomationConfigurationError,
     AutomationStore,
@@ -51,9 +52,12 @@ from mox_adv.ui_automation import (
 )
 from mox_adv.ui_evidence import write_dashboard_evidence_bundle
 
-ROOT = Path(__file__).resolve().parents[2]
-POLICY_PATH = ROOT / "config" / "gate0-policy.json"
-TEST_FIXTURE_PATH = ROOT / "fixtures" / "ui" / "linked-budget-pressure.json"
+POLICY_PATH = runtime_resource("config", "gate0-policy.json")
+TEST_FIXTURE_PATH = runtime_resource(
+    "fixtures",
+    "ui",
+    "linked-budget-pressure.json",
+)
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 

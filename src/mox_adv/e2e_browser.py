@@ -8,20 +8,17 @@ import threading
 from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlencode
-
-from playwright.sync_api import (
-    BrowserContext,
-    Route,
-    WebSocketRoute,
-    sync_playwright,
-)
 
 from mox_adv.e2e_evidence import ReadOnlyEgressRecorder
 from mox_adv.goal_evidence import GoalEventEvidence
+from mox_adv.runtime_resources import runtime_resource
 
-ROOT = Path(__file__).resolve().parents[2]
-PAGE = ROOT / "fixtures" / "goal-test-page.html"
+if TYPE_CHECKING:
+    from playwright.sync_api import BrowserContext, Route, WebSocketRoute
+
+PAGE = runtime_resource("fixtures", "goal-test-page.html")
 READ_ONLY_CHROMIUM_ARGS = (
     "--disable-background-networking",
     "--disable-component-update",
@@ -62,6 +59,8 @@ def exercise_goal_event(
     egress: ReadOnlyEgressRecorder,
 ) -> GoalEventEvidence:
     """Trigger and locally intercept exactly one counter-bound event."""
+
+    from playwright.sync_api import sync_playwright
 
     with _serve_test_page(counter_id) as page_url, sync_playwright() as playwright:
         browser = playwright.chromium.launch(

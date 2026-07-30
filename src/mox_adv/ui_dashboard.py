@@ -20,6 +20,7 @@ from mox_adv.control_state import (
 from mox_adv.e2e_runner import run_readonly_e2e
 from mox_adv.mandate_signing import HMACMandateSigner
 from mox_adv.mandate_store import DurableMandateAuthority
+from mox_adv.runtime_resources import runtime_resource
 from mox_adv.trust_boundary import required_capability_contract
 from mox_adv.ui_control_plane import DashboardControlPlane
 from mox_adv.ui_evidence import (
@@ -28,9 +29,8 @@ from mox_adv.ui_evidence import (
 )
 from mox_adv.ui_workflows import DashboardWorkflowFacade
 
-ROOT = Path(__file__).resolve().parents[2]
-POLICY_PATH = ROOT / "config" / "gate0-policy.json"
-IMPACT_FIXTURES = ROOT / "fixtures" / "impact"
+POLICY_PATH = runtime_resource("config", "gate0-policy.json")
+IMPACT_FIXTURES = runtime_resource("fixtures", "impact")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _DOWNLOADABLE_ARTIFACTS = frozenset(
     {

@@ -17,7 +17,10 @@ from mox_adv.contracts import (
 )
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.metrika_provider import MetrikaReadAuthorizationError
-from mox_adv.module_api.v1 import InProcessModuleAdapterV1
+from mox_adv.module_api.v1 import (
+    InProcessModuleAdapterV1,
+    ModuleDecisionRecordStoreV1,
+)
 from mox_adv.modules.metrika import MetrikaModuleV1
 from mox_adv.yandex_credentials import DotenvValue
 from mox_adv.yandex_transport import (
@@ -242,8 +245,24 @@ class MetrikaProductionReadCompositionV1:
         clock: Callable[[], datetime],
         http_client: HttpClient | None = None,
     ) -> InProcessModuleAdapterV1:
-        module = MetrikaModuleV1(
+        module = self.module(clock=clock, http_client=http_client)
+        return InProcessModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        )
+
+    def module(
+        self,
+        *,
+        clock: Callable[[], datetime],
+        http_client: HttpClient | None = None,
+        decision_records: ModuleDecisionRecordStoreV1 | None = None,
+    ) -> MetrikaModuleV1:
+        """Build the released provider module for HTTP or paired composition."""
+
+        return MetrikaModuleV1(
             clock=clock,
+            decision_records=decision_records,
             provider_reader=MetrikaProductionReadProviderV1(
                 settings=self.settings(),
                 token=self._token(),
@@ -253,10 +272,6 @@ class MetrikaProductionReadCompositionV1:
                     else http_client
                 ),
             ),
-        )
-        return InProcessModuleAdapterV1(
-            module,
-            environment=ExecutionEnvironment.PRODUCTION,
         )
 
     def _token(self) -> DotenvValue:
