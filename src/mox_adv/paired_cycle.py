@@ -5,12 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from mox_adv.approval_execution import ExecutionFacts
 from mox_adv.contracts import (
     DirectCampaignStateBlock,
     DirectCampaignStateReadQuery,
@@ -36,6 +35,7 @@ from mox_adv.module_api.v1 import (
 )
 from mox_adv.modules.direct import DirectModuleV1
 from mox_adv.monitoring import MonitoringStore
+from mox_adv.normalization import IntegratedSnapshotNormalizerV1
 from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_projection import SanitizedProjection
 
@@ -216,7 +216,6 @@ def execute_paired_direct_test_action(
     state: DurableControlState,
     proposal_store: ImmutableProposalStore,
     now: datetime,
-    execution_facts: ExecutionFacts | None = None,
     test_adapter: FakeWriteAdapter | None = None,
     persist_artifacts: bool = True,
     mandate_authority: DurableMandateAuthority | None = None,
@@ -226,6 +225,12 @@ def execute_paired_direct_test_action(
 
     if prepared.snapshot_id != snapshot["snapshot_id"]:
         raise ValueError("The prepared change is not bound to the paired snapshot.")
+    _validate_paired_projection(snapshot, projection)
+    _validate_prepared_snapshot_binding(
+        policy=policy,
+        snapshot=snapshot,
+        prepared=prepared,
+    )
     freshness = projection["freshness"]
     provider = PairedSnapshotDirectProviderV1(
         snapshot=snapshot,
@@ -253,7 +258,6 @@ def execute_paired_direct_test_action(
             snapshot_id=str(snapshot["snapshot_id"]),
             expected_fingerprint=prepared.expected_fingerprint,
             expected_state=provider.expected_state(),
-            execution_facts=execution_facts,
         ),
         mandate_authority=mandate_authority,
     )
@@ -276,7 +280,10 @@ def execute_paired_direct_test_action(
         decision_records=decision_records,
     ).invoke(request)
     if result.decision_record_ref is None:
-        raise RuntimeError("Direct execution did not persist a Decision Record.")
+        reason = result.errors[0].code if result.errors else result.status
+        raise RuntimeError(
+            "Direct execution did not persist a Decision Record: " + reason
+        )
     record = decision_records.read(result.decision_record_ref)
     if persist_artifacts:
         _write_immutable_json(
@@ -403,6 +410,117 @@ def evaluate_paired_direct_impact(
     )
 
 
+def _validate_paired_projection(
+    snapshot: Mapping[str, Any],
+    projection: SanitizedProjection,
+) -> None:
+    if not IntegratedSnapshotNormalizerV1.verify_fingerprint(snapshot):
+        raise ValueError("The paired snapshot fingerprint is invalid.")
+    metrics = snapshot["metrics"]
+    campaign = snapshot["campaign"]
+    provenance = snapshot["provenance"]
+    generated_at = _utc(str(snapshot["generated_at"]))
+    direct_retrieved = _utc(str(provenance["direct_report"]["retrieved_at"]))
+    metrika_retrieved = _utc(str(provenance["metrika_report"]["retrieved_at"]))
+    direct_watermark = _utc(str(provenance["direct_report"]["watermark"]))
+    metrika_watermark = _utc(str(provenance["metrika_report"]["watermark"]))
+    expected = {
+        "period_start": str(snapshot["period_start"]),
+        "period_end": str(snapshot["period_end"]),
+        "timezone": str(snapshot["timezone"]),
+        "attribution": dict(snapshot["attribution"]),
+        "campaign_state": str(campaign["state"]),
+        "campaign_strategy": str(campaign["strategy"]),
+        "current_budget": int(campaign["current_weekly_budget_micros"]),
+        "current_bid": int(campaign["current_search_bid_micros"]),
+        "current_ad_variant": str(campaign["current_ad_variant"]),
+        "impressions": int(metrics["impressions"]),
+        "clicks": int(metrics["clicks"]),
+        "cost_micros": int(metrics["cost_micros"]),
+        "visits": int(metrics["visits"]),
+        "goal_visits": int(metrics["goal_visits"]),
+        "ctr": str(metrics["ctr_percent"]),
+        "cpc": str(metrics["cpc_rub"]),
+        "conversion_rate": str(metrics["conversion_rate_percent"]),
+        "cpa": str(metrics["cpa_rub"]),
+        "budget_utilization": str(metrics["budget_utilization_percent"]),
+        "freshness": {
+            "direct_minutes": _whole_minutes(generated_at - direct_retrieved),
+            "metrika_minutes": _whole_minutes(generated_at - metrika_retrieved),
+            "watermark_skew_minutes": _whole_minutes(
+                abs(direct_watermark - metrika_watermark)
+            ),
+        },
+        "comparability": {
+            "status": str(snapshot["comparability_status"]),
+            "confidence": str(snapshot["confidence_status"]),
+            "financial_recommendations_allowed": bool(
+                snapshot["financial_recommendations_allowed"]
+            ),
+        },
+        "business_goal": dict(snapshot["business_goal"]),
+    }
+    for field, expected_value in expected.items():
+        if projection[field] != expected_value:
+            raise ValueError(
+                "The paired projection "
+                + field
+                + " does not match the trusted snapshot."
+            )
+    records = snapshot["records"]
+    for field in ("impressions", "clicks", "cost_micros", "visits", "goal_visits"):
+        total = sum(int(item[field]) for item in records)
+        if total != int(metrics[field]):
+            raise ValueError(
+                "The paired snapshot "
+                + field
+                + " total does not match its normalized metrics."
+            )
+
+
+def _validate_prepared_snapshot_binding(
+    *,
+    policy: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    prepared: PreparedChange,
+) -> None:
+    scope = snapshot["scope"]
+    expected_scope = (
+        str(scope["organization"]),
+        str(scope["connection"]),
+        str(scope["account"]),
+        str(scope["campaign"]),
+        str(policy["bindings"]["simulation"]["single_writer"]),
+    )
+    actual_scope = (
+        prepared.scope.organization,
+        prepared.scope.connection,
+        prepared.scope.account,
+        prepared.scope.campaign,
+        prepared.scope.writer,
+    )
+    if actual_scope != expected_scope:
+        raise ValueError("The prepared change is outside the paired trusted scope.")
+    provenance = snapshot["provenance"]
+    if (
+        prepared.policy_version != str(snapshot["policy_version"])
+        or prepared.policy_version != str(policy["policy_id"])
+        or prepared.snapshot_generated_at != str(snapshot["generated_at"])
+        or prepared.direct_watermark != str(provenance["direct_report"]["watermark"])
+        or prepared.metrika_watermark != str(provenance["metrika_report"]["watermark"])
+    ):
+        raise ValueError(
+            "The prepared change evidence does not match the paired snapshot."
+        )
+
+
+def _whole_minutes(value: timedelta) -> int:
+    seconds = value.total_seconds()
+    if seconds < 0:
+        raise ValueError("Paired snapshot freshness cannot be negative.")
+    return int(seconds // 60)
+
+
 def _paired_execution_request(
     *,
     snapshot: Mapping[str, Any],
@@ -448,7 +566,7 @@ def _paired_execution_request(
     }
     if mandate_id is not None:
         command["mandate_id"] = mandate_id
-    return ModuleRequestV1.from_dict(
+    request = ModuleRequestV1.from_dict(
         {
             "schema_version": "module-request-v1",
             "connection_ref": {"connection_id": str(scope["connection"])},
@@ -472,7 +590,7 @@ def _paired_execution_request(
             "external_evidence": {
                 "schema_version": "normalized-metrics-evidence-v1",
                 "evidence_id": str(snapshot["snapshot_id"]),
-                "source": "PAIRED_MODULE_RESULT",
+                "source": "CUSTOMER_ECOSYSTEM",
                 "observed_at": provider.external_observed_at.isoformat(),
                 "watermark": provider.external_watermark.isoformat(),
                 "metrics": [
@@ -487,6 +605,14 @@ def _paired_execution_request(
             "direct_action_command": command,
             "idempotency_key": prepared.execution_key(),
         }
+    )
+    assert request.external_evidence is not None
+    return replace(
+        request,
+        external_evidence=replace(
+            request.external_evidence,
+            source="PAIRED_MODULE_RESULT",
+        ),
     )
 
 

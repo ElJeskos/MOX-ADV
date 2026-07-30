@@ -6,7 +6,7 @@ import hashlib
 import json
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Protocol
 
@@ -67,7 +67,7 @@ class InProcessModuleAdapterV1:
         )
 
     def invoke(self, request: ModuleRequestV1) -> ModuleResultV1:
-        canonical_request = ModuleRequestV1.from_dict(request.as_dict())
+        canonical_request = _canonical_in_process_request(request)
         blocked = _block_production_execution(
             self._module,
             canonical_request,
@@ -289,6 +289,25 @@ def analysis_request_fingerprint_v1(request: ModuleRequestV1) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _canonical_in_process_request(request: ModuleRequestV1) -> ModuleRequestV1:
+    evidence = request.external_evidence
+    if evidence is None or evidence.source != "PAIRED_MODULE_RESULT":
+        return ModuleRequestV1.from_dict(request.as_dict())
+    payload = request.as_dict()
+    payload_evidence = payload["external_evidence"]
+    assert isinstance(payload_evidence, dict)
+    payload_evidence["source"] = "CUSTOMER_ECOSYSTEM"
+    canonical = ModuleRequestV1.from_dict(payload)
+    assert canonical.external_evidence is not None
+    return replace(
+        canonical,
+        external_evidence=replace(
+            canonical.external_evidence,
+            source="PAIRED_MODULE_RESULT",
+        ),
+    )
+
+
 def _response_is_replayable(response: HttpJsonResponseV1) -> bool:
     if response.status_code < 500:
         return True
@@ -310,12 +329,9 @@ def _block_production_execution(
     trusted_environment: ExecutionEnvironment,
     decision_records: ModuleDecisionRecordStoreV1,
 ) -> Optional[ModuleResultV1]:
-    if (
-        request.operation.kind != "EXECUTE"
-        or (
-            trusted_environment is ExecutionEnvironment.TEST
-            and request.environment == ExecutionEnvironment.TEST.value
-        )
+    if request.operation.kind != "EXECUTE" or (
+        trusted_environment is ExecutionEnvironment.TEST
+        and request.environment == ExecutionEnvironment.TEST.value
     ):
         return None
     receipt = decision_records.record_production_write_block(

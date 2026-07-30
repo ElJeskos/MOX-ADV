@@ -26,6 +26,24 @@ class ReadOnlyRunnerTests(unittest.TestCase):
             direct_decision_record = json.loads(
                 (path / "direct-decision-record.json").read_text(encoding="utf-8")
             )
+            mandate_module_result = json.loads(
+                (path / "mandate-direct-module-result.json").read_text(encoding="utf-8")
+            )
+            mandate_decision_record = json.loads(
+                (path / "mandate-direct-decision-record.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            kill_switch_module_result = json.loads(
+                (path / "kill-switch-direct-module-result.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            kill_switch_decision_record = json.loads(
+                (path / "kill-switch-direct-decision-record.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             impact_module_result = json.loads(
                 (path / "impact-module-result.json").read_text(encoding="utf-8")
             )
@@ -66,6 +84,34 @@ class ReadOnlyRunnerTests(unittest.TestCase):
             direct_decision_record["operation_type"],
         )
         self.assertEqual("SUCCEEDED", direct_decision_record["outcome"])
+        self.assertEqual("SUCCEEDED", mandate_module_result["status"])
+        self.assertEqual(
+            "APPLIED",
+            mandate_module_result["execution_result"]["status"],
+        )
+        self.assertEqual("SUCCEEDED", mandate_decision_record["outcome"])
+        self.assertEqual(
+            mandate_module_result["decision_record_ref"],
+            "decision-records/" + mandate_decision_record["decision_id"] + ".json",
+        )
+        self.assertEqual("BLOCKED", kill_switch_module_result["status"])
+        self.assertEqual(
+            "KILL_SWITCH_ACTIVE",
+            kill_switch_module_result["errors"][0]["code"],
+        )
+        self.assertEqual(
+            "BLOCKED",
+            kill_switch_module_result["execution_result"]["status"],
+        )
+        self.assertEqual("BLOCKED", kill_switch_decision_record["outcome"])
+        self.assertEqual(
+            ["KILL_SWITCH_ACTIVE"],
+            kill_switch_decision_record["reason_codes"],
+        )
+        self.assertEqual(
+            kill_switch_module_result["decision_record_ref"],
+            "decision-records/" + kill_switch_decision_record["decision_id"] + ".json",
+        )
         self.assertEqual("SUCCEEDED", impact_module_result["status"])
         self.assertEqual(
             "OBSERVED_POST_CHANGE",

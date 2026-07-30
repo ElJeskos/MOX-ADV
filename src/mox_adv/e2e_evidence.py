@@ -67,8 +67,10 @@ CAPABILITY_EVIDENCE_PATHS = {
     ),
     "BOUNDED_AUTONOMY": (
         "change_diff.json",
-        "direct-module-result.json",
-        "direct-decision-record.json",
+        "mandate-direct-module-result.json",
+        "mandate-direct-decision-record.json",
+        "kill-switch-direct-module-result.json",
+        "kill-switch-direct-decision-record.json",
         "events.jsonl",
     ),
     "MONITORING_AND_ALERTING": (
@@ -115,6 +117,10 @@ REQUIRED_SUPPLEMENTAL_ARTIFACTS = frozenset(
         "lifecycle-evidence.json",
         "direct-module-result.json",
         "direct-decision-record.json",
+        "mandate-direct-module-result.json",
+        "mandate-direct-decision-record.json",
+        "kill-switch-direct-module-result.json",
+        "kill-switch-direct-decision-record.json",
         "impact-module-result.json",
         "impact-decision-record.json",
     }

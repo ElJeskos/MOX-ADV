@@ -1104,6 +1104,7 @@ class DurableControlState:
         *,
         cooldown_hours: int,
         observation_window_hours: Optional[int] = None,
+        allow_active_kill_switch: bool = False,
     ) -> OperationalExecutionFacts:
         """Read current ledger limits and prove kill-switch storage is available."""
 
@@ -1126,7 +1127,13 @@ class DurableControlState:
                 "INVALID_INPUT",
                 "observation window hours must be a positive integer.",
             )
-        self.any_kill_switch_active(scope)
+        try:
+            self.any_kill_switch_active(scope)
+        except ControlRejected as error:
+            if not (
+                allow_active_kill_switch and error.reason_code == "KILL_SWITCH_ACTIVE"
+            ):
+                raise
         try:
             with self._connect() as connection:
                 rows = connection.execute(
@@ -1161,10 +1168,7 @@ class DurableControlState:
                     action_count += 1
                 if updated_at >= cooldown_start:
                     cooldown_active = True
-                if (
-                    observation_start is not None
-                    and updated_at >= observation_start
-                ):
+                if observation_start is not None and updated_at >= observation_start:
                     observation_window_active = True
                 if updated_at < day_start:
                     continue

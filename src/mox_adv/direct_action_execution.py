@@ -146,11 +146,6 @@ class DirectActionExecutionV1:
             prepared,
             current_fingerprint,
         )
-        if (
-            self._runtime.paired_context is not None
-            and self._runtime.paired_context.execution_facts is not None
-        ):
-            facts = self._runtime.paired_context.execution_facts
         if existing is not None:
             outcome = (
                 approval_executor.reconcile(prepared.execution_key())
@@ -284,13 +279,24 @@ class DirectActionExecutionV1:
             observation_window_hours=int(
                 self._runtime.policy["timing"]["observation_window_hours"]
             ),
+            allow_active_kill_switch=True,
         )
+        comparability_status = "COMPARABLE"
+        confidence_status = "READY"
+        financial_recommendations_allowed = True
+        if self._runtime.paired_context is not None:
+            comparability = self._runtime.paired_context.projection["comparability"]
+            comparability_status = str(comparability["status"])
+            confidence_status = str(comparability["confidence"])
+            financial_recommendations_allowed = bool(
+                comparability["financial_recommendations_allowed"]
+            )
         return ExecutionFacts(
             mode="APPROVAL_REQUIRED",
             automation_enabled=True,
-            comparability_status="COMPARABLE",
-            confidence_status="READY",
-            financial_recommendations_allowed=True,
+            comparability_status=comparability_status,
+            confidence_status=confidence_status,
+            financial_recommendations_allowed=financial_recommendations_allowed,
             direct_age_minutes=age_minutes(now, current.observed_at),
             metrika_age_minutes=age_minutes(now, evidence.observed_at),
             watermark_skew_minutes=watermark_skew_minutes(

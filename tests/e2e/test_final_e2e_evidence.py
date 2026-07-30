@@ -71,6 +71,22 @@ def sample_artifacts() -> dict[str, dict[str, Any]]:
             "schema_version": "module-decision-record-v1",
             "operation_type": "APPLY_OPTIMIZATION",
         },
+        "mandate-direct-module-result.json": {
+            "schema_version": "module-result-v1",
+            "status": "SUCCEEDED",
+        },
+        "mandate-direct-decision-record.json": {
+            "schema_version": "module-decision-record-v1",
+            "operation_type": "APPLY_OPTIMIZATION",
+        },
+        "kill-switch-direct-module-result.json": {
+            "schema_version": "module-result-v1",
+            "status": "BLOCKED",
+        },
+        "kill-switch-direct-decision-record.json": {
+            "schema_version": "module-decision-record-v1",
+            "operation_type": "APPLY_OPTIMIZATION",
+        },
         "impact-module-result.json": {
             "schema_version": "module-result-v1",
             "status": "SUCCEEDED",

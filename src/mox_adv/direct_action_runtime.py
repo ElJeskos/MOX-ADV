@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from mox_adv.approval_execution import ExecutionFacts
 from mox_adv.control_state import DurableControlState
 from mox_adv.direct_provider import DirectStateValuesV1
 from mox_adv.environment import ExecutionEnvironment, parse_execution_environment
@@ -24,7 +23,6 @@ class PairedDirectActionContextV1:
     snapshot_id: str
     expected_fingerprint: str
     expected_state: DirectStateValuesV1
-    execution_facts: Optional[ExecutionFacts] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.projection, SanitizedProjection):
@@ -51,11 +49,6 @@ class PairedDirectActionContextV1:
             raise ValueError(
                 "Paired Direct execution requires the trusted Direct state."
             )
-        if self.execution_facts is not None and not isinstance(
-            self.execution_facts,
-            ExecutionFacts,
-        ):
-            raise TypeError("Paired Direct policy facts must use the trusted contract.")
 
 
 @dataclass(frozen=True)

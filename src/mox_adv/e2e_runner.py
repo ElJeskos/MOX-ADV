@@ -7,21 +7,14 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from mox_adv.approval_execution import (
-    ApprovalExecutionService,
-    ExecutionFacts,
-    ExecutionRequest,
-)
 from mox_adv.autonomy import (
-    BoundedAutonomyRequest,
-    BoundedAutonomyService,
     DurableMandateAuthority,
     HMACMandateSigner,
-    MandateRecord,
 )
 from mox_adv.campaign_lifecycle import (
     CampaignApproval,
@@ -74,6 +67,7 @@ from mox_adv.goal_lifecycle import (
 from mox_adv.impact import load_impact_fixture
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.monitoring import MonitoringRead, MonitoringScheduler, MonitoringStore
+from mox_adv.normalization import IntegratedSnapshotNormalizerV1
 from mox_adv.observe import (
     load_linked_fixture,
     load_observe_policy,
@@ -89,11 +83,11 @@ from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_contracts import CampaignDraftV1
 from mox_adv.recommend_projection import build_sanitized_projection
 from mox_adv.recommend_service import RecommendationService
+from mox_adv.ui_service import _projection_source
 
 ROOT = Path(__file__).resolve().parents[2]
 POLICY_PATH = ROOT / "config" / "gate0-policy.json"
 OBSERVE_FIXTURE = ROOT / "fixtures" / "linked-observe.json"
-LLM_FIXTURE = ROOT / "fixtures" / "llm" / "LLM_EFFECTIVE_BUDGET_PRESSURE.json"
 IMPACT_FIXTURE = ROOT / "fixtures" / "impact" / "IMPACT_CPA_IMPROVED_KEEP.json"
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 CAMPAIGN_NOW = datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc)
@@ -104,7 +98,7 @@ def load_policy() -> dict[str, Any]:
     return json.loads(POLICY_PATH.read_text(encoding="utf-8"))
 
 
-def _scope(campaign: str = "campaign-1") -> TrustedScope:
+def _scope(campaign: str = "sim-campaign") -> TrustedScope:
     return TrustedScope(
         organization="sim-organization",
         connection="sim-connection",
@@ -137,46 +131,18 @@ def _approval_prepared(proposal_id: str) -> PreparedChange:
     )
 
 
-def _approval_request(prepared: PreparedChange) -> ExecutionRequest:
-    return ExecutionRequest(
-        proposal_id=prepared.proposal_id,
-        execution_key=prepared.execution_key(),
-        scope=prepared.scope,
-        facts=ExecutionFacts(
-            mode="APPROVAL_REQUIRED",
-            automation_enabled=True,
-            comparability_status="COMPARABLE",
-            confidence_status="READY",
-            financial_recommendations_allowed=True,
-            direct_age_minutes=5,
-            metrika_age_minutes=5,
-            watermark_skew_minutes=1,
-            clicks=100,
-            conversions=12,
-            impressions=10_000,
-            spend_rub=1_900,
-            cpa_rub="791.67",
-            budget_utilization_percent="95",
-            ctr_percent="1",
-            campaign_state="ON",
-            campaign_strategy="HIGHEST_POSITION",
-            current_fingerprint=prepared.expected_fingerprint,
-            cooldown_active=False,
-            observation_window_active=False,
-            actions_in_last_24h=0,
-            cumulative_daily_change_percent=0,
-            monetary_exposure_rub=200,
-            kill_switch_available=True,
-        ),
-    )
-
-
-def _approval_module_snapshot(
+def _paired_module_snapshot(
     observe_result: Mapping[str, Any],
-    prepared: PreparedChange,
-    facts: ExecutionFacts,
+    *,
+    current_weekly_budget_micros: int,
+    current_search_bid_micros: int,
+    impressions: int,
+    clicks: int,
+    cost_micros: int,
+    visits: int,
+    goal_visits: int,
 ) -> Mapping[str, Any]:
-    """Adapt the legacy approval fixture to one typed paired module snapshot."""
+    """Build one self-consistent fingerprinted paired TEST snapshot."""
 
     observed = observe_result["snapshot"]
     records = observed["records"]
@@ -187,40 +153,87 @@ def _approval_module_snapshot(
             quotient + (1 if index < remainder else 0) for index in range(len(records))
         ]
 
-    impressions = split(facts.impressions)
-    clicks = split(facts.clicks)
-    costs = split(facts.spend_rub * 1_000_000)
+    impression_rows = split(impressions)
+    click_rows = split(clicks)
+    cost_rows = split(cost_micros)
+    visit_rows = split(visits)
+    goal_rows = split(goal_visits)
     paired_records = [
         {
             **dict(record),
-            "impressions": impressions[index],
-            "clicks": clicks[index],
-            "cost_micros": costs[index],
+            "impressions": impression_rows[index],
+            "clicks": click_rows[index],
+            "cost_micros": cost_rows[index],
+            "visits": visit_rows[index],
+            "goal_visits": goal_rows[index],
         }
         for index, record in enumerate(records)
     ]
     campaign = {
         **dict(observed["campaign"]),
-        "current_weekly_budget_micros": prepared.current_value,
+        "current_weekly_budget_micros": current_weekly_budget_micros,
+        "current_search_bid_micros": current_search_bid_micros,
     }
     metrics = {
         **dict(observed["metrics"]),
-        "impressions": facts.impressions,
-        "clicks": facts.clicks,
-        "cost_micros": facts.spend_rub * 1_000_000,
-        "goal_visits": facts.conversions,
-        "ctr_percent": facts.ctr_percent,
-        "cpa_rub": facts.cpa_rub,
-        "budget_utilization_percent": facts.budget_utilization_percent,
+        "impressions": impressions,
+        "clicks": clicks,
+        "cost_micros": cost_micros,
+        "visits": visits,
+        "goal_visits": goal_visits,
+        "ctr_percent": _ratio_text(clicks * 100, impressions),
+        "cpc_rub": _ratio_text(cost_micros, clicks * 1_000_000),
+        "conversion_rate_percent": _ratio_text(goal_visits * 100, visits),
+        "cpa_rub": _ratio_text(cost_micros, goal_visits * 1_000_000),
+        "budget_utilization_percent": _ratio_text(
+            cost_micros * 100,
+            current_weekly_budget_micros,
+        ),
+        "pacing_percent": _ratio_text(
+            cost_micros * 100,
+            current_weekly_budget_micros,
+        ),
     }
-    return {
+    direct_retrieved = NOW - timedelta(minutes=5)
+    metrika_retrieved = NOW - timedelta(minutes=5)
+    metrika_watermark = metrika_retrieved - timedelta(minutes=1)
+    direct_watermark = metrika_watermark + timedelta(minutes=1)
+    provenance = {
+        "direct_report": {
+            **dict(observed["provenance"]["direct_report"]),
+            "retrieved_at": direct_retrieved.isoformat(),
+            "watermark": direct_watermark.isoformat(),
+        },
+        "direct_state": {
+            **dict(observed["provenance"]["direct_state"]),
+            "retrieved_at": direct_retrieved.isoformat(),
+            "watermark": direct_watermark.isoformat(),
+        },
+        "metrika_report": {
+            **dict(observed["provenance"]["metrika_report"]),
+            "retrieved_at": metrika_retrieved.isoformat(),
+            "watermark": metrika_watermark.isoformat(),
+        },
+    }
+    snapshot = {
         **dict(observed),
-        "snapshot_id": prepared.snapshot_id,
         "generated_at": NOW.isoformat(),
         "campaign": campaign,
         "metrics": metrics,
         "records": paired_records,
+        "provenance": provenance,
+        "comparability_status": "COMPARABLE",
+        "confidence_status": "READY",
+        "financial_recommendations_allowed": True,
     }
+    snapshot["snapshot_id"] = IntegratedSnapshotNormalizerV1.fingerprint(snapshot)
+    return snapshot
+
+
+def _ratio_text(numerator: int, denominator: int) -> str:
+    if denominator == 0:
+        return "NOT_APPLICABLE"
+    return format((Decimal(numerator) / Decimal(denominator)).normalize(), "f")
 
 
 def _autonomy_prepared(proposal_id: str) -> PreparedChange:
@@ -253,7 +266,7 @@ def _mandate_payload(policy: Mapping[str, Any]) -> Mapping[str, Any]:
         "account": "sim-direct-account",
         "environment": "SIMULATION",
         "credential_profile": "DIRECT_PILOT_WRITE",
-        "targets": ["campaign-1"],
+        "targets": ["sim-campaign"],
         "allowed_action_classes": [
             "DECREASE_SEARCH_BID",
             "SUSPEND_CAMPAIGN",
@@ -279,34 +292,6 @@ def _mandate_payload(policy: Mapping[str, Any]) -> Mapping[str, Any]:
         "issued_at": NOW.isoformat(),
         "expiry": (NOW + timedelta(hours=24)).isoformat(),
     }
-
-
-def _autonomy_request(
-    prepared: PreparedChange,
-    mandate: MandateRecord,
-) -> BoundedAutonomyRequest:
-    return BoundedAutonomyRequest(
-        mandate_id=mandate.mandate_id,
-        proposal_id=prepared.proposal_id,
-        execution_key=prepared.execution_key(),
-        scope=prepared.scope,
-        mode="BOUNDED_AUTONOMY",
-        automation_enabled=True,
-        comparability_status="COMPARABLE",
-        confidence_status="READY",
-        financial_recommendations_allowed=True,
-        direct_age_minutes=5,
-        metrika_age_minutes=5,
-        watermark_skew_minutes=1,
-        clicks=50,
-        conversions=3,
-        spend_rub=1_900,
-        cpa_rub="1200",
-        budget_utilization_percent="80",
-        campaign_state="ON",
-        campaign_strategy="HIGHEST_POSITION",
-        current_fingerprint=prepared.expected_fingerprint,
-    )
 
 
 def _campaign_payload() -> Mapping[str, Any]:
@@ -494,11 +479,21 @@ def _analytics_optimization_workflow(
     if observe_result["external_write_sent"] is not False:
         raise AssertionError("OBSERVE reported external write egress.")
 
-    provider = DeterministicFakeModelProvider()
+    paired_snapshot = _paired_module_snapshot(
+        observe_result,
+        current_weekly_budget_micros=2_000_000_000,
+        current_search_bid_micros=100_000_000,
+        impressions=10_000,
+        clicks=100,
+        cost_micros=1_900_000_000,
+        visits=100,
+        goal_visits=12,
+    )
     projection = build_sanitized_projection(
-        json.loads(LLM_FIXTURE.read_text(encoding="utf-8")),
+        _projection_source(paired_snapshot),
         policy,
     )
+    provider = DeterministicFakeModelProvider()
     proposal_store = ImmutableProposalStore(working / "proposals")
     recommendation = RecommendationService(
         provider,
@@ -506,7 +501,7 @@ def _analytics_optimization_workflow(
     ).recommend(
         projection=projection,
         run_id="recommend",
-        snapshot_id=str(observe_result["snapshot_id"]),
+        snapshot_id=str(paired_snapshot["snapshot_id"]),
         expected_fingerprint="sha256:" + "2" * 64,
         created_at="2026-07-30T12:00:00+00:00",
         expires_at="2026-07-30T12:30:00+00:00",
@@ -521,6 +516,13 @@ def _analytics_optimization_workflow(
         proposal_hash=recommendation.canonical_hash,
         expected_diff=dict(recommendation.proposal.expected_diff),
         snapshot_id=recommendation.proposal.snapshot_id,
+        snapshot_generated_at=str(paired_snapshot["generated_at"]),
+        direct_watermark=str(
+            paired_snapshot["provenance"]["direct_report"]["watermark"]
+        ),
+        metrika_watermark=str(
+            paired_snapshot["provenance"]["metrika_report"]["watermark"]
+        ),
         expected_fingerprint=recommendation.proposal.expected_fingerprint,
     )
     approval_state.register_prepared_change(prepared)
@@ -534,12 +536,6 @@ def _analytics_optimization_workflow(
     approval_adapter = FakeWriteAdapter(
         initial_state={prepared.target_key(): prepared.current_value}
     )
-    approval_request = _approval_request(prepared)
-    paired_snapshot = _approval_module_snapshot(
-        observe_result,
-        prepared,
-        approval_request.facts,
-    )
     direct_run_directory = working / "paired-direct"
     direct_run_directory.mkdir(parents=True, exist_ok=True)
     first_module = execute_paired_direct_test_action(
@@ -551,7 +547,6 @@ def _analytics_optimization_workflow(
         state=approval_state,
         proposal_store=proposal_store,
         now=tests_now(),
-        execution_facts=approval_request.facts,
         test_adapter=approval_adapter,
     )
     repeated_module = execute_paired_direct_test_action(
@@ -563,7 +558,6 @@ def _analytics_optimization_workflow(
         state=approval_state,
         proposal_store=proposal_store,
         now=tests_now(),
-        execution_facts=approval_request.facts,
         test_adapter=approval_adapter,
         persist_artifacts=False,
     )
@@ -582,16 +576,46 @@ def _analytics_optimization_workflow(
     if used_approval.used_at is None:
         raise AssertionError("The exact approval was not consumed.")
 
-    blocked_prepared = _approval_prepared("proposal-e2e-kill-switch")
-    approval_state.register_prepared_change(blocked_prepared)
-    approval_state.grant_approval(
+    blocked_recommendation = RecommendationService(
+        provider,
+        proposal_store,
+    ).recommend(
+        projection=projection,
+        run_id="recommend-kill-switch",
+        snapshot_id=str(paired_snapshot["snapshot_id"]),
+        expected_fingerprint="sha256:" + "5" * 64,
+        created_at="2026-07-30T12:00:00+00:00",
+        expires_at="2026-07-30T12:30:00+00:00",
+    )
+    if (
+        blocked_recommendation.status != "READY"
+        or blocked_recommendation.proposal is None
+    ):
+        raise AssertionError("Kill-switch RECOMMEND did not produce a proposal.")
+    blocked_prepared = replace(
+        _approval_prepared(blocked_recommendation.proposal.proposal_id),
+        proposal_hash=blocked_recommendation.canonical_hash,
+        expected_diff=dict(blocked_recommendation.proposal.expected_diff),
+        snapshot_id=blocked_recommendation.proposal.snapshot_id,
+        snapshot_generated_at=str(paired_snapshot["generated_at"]),
+        direct_watermark=str(
+            paired_snapshot["provenance"]["direct_report"]["watermark"]
+        ),
+        metrika_watermark=str(
+            paired_snapshot["provenance"]["metrika_report"]["watermark"]
+        ),
+        expected_fingerprint=(blocked_recommendation.proposal.expected_fingerprint),
+    )
+    kill_switch_state = DurableControlState(working / "kill-switch.sqlite3")
+    kill_switch_state.register_prepared_change(blocked_prepared)
+    kill_switch_state.grant_approval(
         blocked_prepared.proposal_id,
         tests_now() + timedelta(minutes=15),
         "Approve only if the kill switch remains inactive.",
         principal,
         tests_now(),
     )
-    approval_state.engage_kill_switch(
+    kill_switch_state.engage_kill_switch(
         "global",
         "E2E verifies the next unsent command is blocked.",
         principal,
@@ -602,14 +626,25 @@ def _analytics_optimization_workflow(
             blocked_prepared.target_key(): blocked_prepared.current_value,
         }
     )
-    blocked = ApprovalExecutionService(
-        policy,
-        approval_state,
-        blocked_adapter,
-        clock=tests_now,
-        environment=ExecutionEnvironment.TEST,
-    ).execute(_approval_request(blocked_prepared))
-    if blocked.status != "BLOCKED" or blocked_adapter.write_calls != 0:
+    blocked_module = execute_paired_direct_test_action(
+        run_directory=working / "paired-kill-switch",
+        policy=policy,
+        snapshot=paired_snapshot,
+        projection=projection,
+        prepared=blocked_prepared,
+        state=kill_switch_state,
+        proposal_store=proposal_store,
+        now=tests_now(),
+        test_adapter=blocked_adapter,
+    )
+    blocked_execution = blocked_module.result.execution_result
+    if (
+        blocked_module.result.status != "BLOCKED"
+        or blocked_execution is None
+        or blocked_execution.status != "BLOCKED"
+        or blocked_module.result.errors[0].code != "KILL_SWITCH_ACTIVE"
+        or blocked_adapter.write_calls != 0
+    ):
         raise AssertionError("Kill switch did not block before fake dispatch.")
 
     autonomy_state = DurableControlState(working / "autonomy.sqlite3")
@@ -621,22 +656,78 @@ def _analytics_optimization_workflow(
     )
     issued = authority.issue(_mandate_payload(policy), principal, tests_now())
     mandate = authority.activate(issued.mandate_id, principal, tests_now())
-    autonomy_prepared = _autonomy_prepared("proposal-e2e-autonomy")
+    autonomy_snapshot = _paired_module_snapshot(
+        observe_result,
+        current_weekly_budget_micros=10_000_000_000,
+        current_search_bid_micros=100_000_000,
+        impressions=5_000,
+        clicks=50,
+        cost_micros=3_600_000_000,
+        visits=100,
+        goal_visits=3,
+    )
+    autonomy_projection = build_sanitized_projection(
+        _projection_source(autonomy_snapshot),
+        policy,
+    )
+    autonomy_recommendation = RecommendationService(
+        provider,
+        proposal_store,
+    ).recommend(
+        projection=autonomy_projection,
+        run_id="recommend-autonomy",
+        snapshot_id=str(autonomy_snapshot["snapshot_id"]),
+        expected_fingerprint="sha256:" + "4" * 64,
+        created_at="2026-07-30T12:00:00+00:00",
+        expires_at="2026-07-30T12:30:00+00:00",
+    )
+    if (
+        autonomy_recommendation.status != "READY"
+        or autonomy_recommendation.proposal is None
+        or autonomy_recommendation.proposal.expected_diff["operation"]
+        != "DECREASE_SEARCH_BID"
+    ):
+        raise AssertionError("Mandate RECOMMEND did not produce the expected proposal.")
+    autonomy_prepared = replace(
+        _autonomy_prepared(autonomy_recommendation.proposal.proposal_id),
+        proposal_hash=autonomy_recommendation.canonical_hash,
+        expected_diff=dict(autonomy_recommendation.proposal.expected_diff),
+        snapshot_id=autonomy_recommendation.proposal.snapshot_id,
+        snapshot_generated_at=str(autonomy_snapshot["generated_at"]),
+        direct_watermark=str(
+            autonomy_snapshot["provenance"]["direct_report"]["watermark"]
+        ),
+        metrika_watermark=str(
+            autonomy_snapshot["provenance"]["metrika_report"]["watermark"]
+        ),
+        expected_fingerprint=(autonomy_recommendation.proposal.expected_fingerprint),
+    )
     autonomy_state.register_prepared_change(autonomy_prepared)
     autonomy_adapter = FakeWriteAdapter(
         initial_state={
             autonomy_prepared.target_key(): autonomy_prepared.current_value,
         }
     )
-    autonomy_result = BoundedAutonomyService(
-        policy,
-        autonomy_state,
-        authority,
-        autonomy_adapter,
-        clock=tests_now,
-        environment=ExecutionEnvironment.TEST,
-    ).execute(_autonomy_request(autonomy_prepared, mandate))
-    if autonomy_result.status != "APPLIED" or autonomy_adapter.write_calls != 1:
+    autonomy_module = execute_paired_direct_test_action(
+        run_directory=working / "paired-autonomy",
+        policy=policy,
+        snapshot=autonomy_snapshot,
+        projection=autonomy_projection,
+        prepared=autonomy_prepared,
+        state=autonomy_state,
+        proposal_store=proposal_store,
+        now=tests_now(),
+        test_adapter=autonomy_adapter,
+        mandate_authority=authority,
+        mandate_id=mandate.mandate_id,
+    )
+    autonomy_execution = autonomy_module.result.execution_result
+    if (
+        autonomy_module.result.status != "SUCCEEDED"
+        or autonomy_execution is None
+        or autonomy_execution.status != "APPLIED"
+        or autonomy_adapter.write_calls != 1
+    ):
         raise AssertionError("Bounded autonomy fake readback failed.")
 
     snapshot = _build_snapshot()
@@ -675,8 +766,8 @@ def _analytics_optimization_workflow(
             "operation": dict(autonomy_prepared.expected_diff),
             "before": autonomy_prepared.current_value,
             "after": autonomy_prepared.target_value,
-            "readback": autonomy_result.observed_value,
-            "status": autonomy_result.status,
+            "readback": autonomy_module.observed_value,
+            "status": autonomy_execution.status,
         },
     }
     observe_evidence = {
@@ -700,6 +791,10 @@ def _analytics_optimization_workflow(
         "monitoring-evidence.json": monitoring_evidence,
         "direct-module-result.json": first_module.result.as_dict(),
         "direct-decision-record.json": dict(first_module.decision_record),
+        "mandate-direct-module-result.json": autonomy_module.result.as_dict(),
+        "mandate-direct-decision-record.json": dict(autonomy_module.decision_record),
+        "kill-switch-direct-module-result.json": (blocked_module.result.as_dict()),
+        "kill-switch-direct-decision-record.json": dict(blocked_module.decision_record),
         "impact-module-result.json": impact_module.result.as_dict(),
         "impact-decision-record.json": dict(impact_module.decision_record),
     }
@@ -725,9 +820,9 @@ def _analytics_optimization_workflow(
         "proposal_id": recommendation.proposal.proposal_id,
         "policy_decision": {
             "approval_required": first_execution.status,
-            "bounded_autonomy": autonomy_result.status,
-            "kill_switch": blocked.status,
-            "kill_switch_reason": blocked.reason_code,
+            "bounded_autonomy": autonomy_execution.status,
+            "kill_switch": blocked_execution.status,
+            "kill_switch_reason": blocked_module.result.errors[0].code,
         },
         "execution": {
             "technical_command": "DIRECT_TEST_MODULE_AND_SEALED_FAKE_ADAPTERS_ONLY",
@@ -741,12 +836,12 @@ def _analytics_optimization_workflow(
             },
             "readback": {
                 "approval_required": first_module.observed_value,
-                "bounded_autonomy": autonomy_result.observed_value,
+                "bounded_autonomy": autonomy_module.observed_value,
             },
             "final_object_state": {
                 "approval_required": first_execution.status,
-                "bounded_autonomy": autonomy_result.status,
-                "kill_switch": blocked.status,
+                "bounded_autonomy": autonomy_execution.status,
+                "kill_switch": blocked_execution.status,
             },
         },
     }

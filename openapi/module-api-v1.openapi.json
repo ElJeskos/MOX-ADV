@@ -346,10 +346,7 @@
           },
           "source": {
             "type": "string",
-            "enum": [
-              "CUSTOMER_ECOSYSTEM",
-              "PAIRED_MODULE_RESULT"
-            ]
+            "const": "CUSTOMER_ECOSYSTEM"
           },
           "observed_at": {
             "type": "string",

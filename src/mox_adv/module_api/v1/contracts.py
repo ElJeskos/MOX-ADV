@@ -332,6 +332,15 @@ class ExternalEvidenceV1:
         )
         if not metrics:
             raise ContractValidationError("external_evidence.metrics must not be empty")
+        source = _text(
+            value["source"],
+            "external_evidence.source",
+            maximum=64,
+        )
+        if source != "CUSTOMER_ECOSYSTEM":
+            raise ContractValidationError(
+                "external_evidence.source is reserved for internal paired execution"
+            )
         return cls(
             schema_version=schema_version,
             evidence_id=_text(
@@ -339,11 +348,7 @@ class ExternalEvidenceV1:
                 "external_evidence.evidence_id",
                 maximum=128,
             ),
-            source=_text(
-                value["source"],
-                "external_evidence.source",
-                maximum=64,
-            ),
+            source=source,
             observed_at=_timestamp(
                 value["observed_at"],
                 "external_evidence.observed_at",
@@ -538,8 +543,7 @@ class ModuleRequestV1:
                 ImpactEvaluationCommandV1,
             ):
                 raise ContractValidationError(
-                    "impact_evaluation_command must be an "
-                    "ImpactEvaluationCommandV1"
+                    "impact_evaluation_command must be an ImpactEvaluationCommandV1"
                 )
             if self.external_evidence is not None:
                 raise ContractValidationError(
@@ -915,9 +919,7 @@ class ModuleProposalV1:
             _text(self.snapshot_id, "proposal.snapshot_id", maximum=128)
             _text(self.reason_code, "proposal.reason_code", maximum=128)
             if not isinstance(self.deduplicated, bool):
-                raise ContractValidationError(
-                    "proposal.deduplicated must be boolean"
-                )
+                raise ContractValidationError("proposal.deduplicated must be boolean")
             if (
                 isinstance(self.cooldown_hours, bool)
                 or not isinstance(self.cooldown_hours, int)
@@ -938,10 +940,7 @@ class ModuleProposalV1:
             raise ContractValidationError(
                 "proposal must contain at most three hypotheses"
             )
-        if any(
-            not isinstance(item, ModuleHypothesisV1)
-            for item in self.hypotheses
-        ):
+        if any(not isinstance(item, ModuleHypothesisV1) for item in self.hypotheses):
             raise ContractValidationError(
                 "proposal.hypotheses must contain ModuleHypothesisV1 values"
             )
