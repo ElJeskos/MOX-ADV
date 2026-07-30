@@ -39,6 +39,13 @@ ModuleStatus = Literal[
     "REJECTED",
     "FAILED",
 ]
+MODULE_STATUSES = (
+    "SUCCEEDED",
+    "PARTIAL",
+    "BLOCKED",
+    "REJECTED",
+    "FAILED",
+)
 
 
 class ContractValidationError(ValueError):
@@ -950,7 +957,7 @@ class ModuleResultV1:
         status = _one_of(
             self.status,
             "result.status",
-            ("SUCCEEDED", "PARTIAL", "BLOCKED", "REJECTED", "FAILED"),
+            MODULE_STATUSES,
         )
         if self.proposal is not None and self.execution_result is not None:
             raise ContractValidationError(

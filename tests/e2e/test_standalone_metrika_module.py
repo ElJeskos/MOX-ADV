@@ -8,7 +8,7 @@ import unittest
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from mox_adv.contracts import (
     MetrikaReportBlock,
@@ -130,6 +130,25 @@ class NonUtcAuthorizedMetrikaReader(RecordingAuthorizedMetrikaReader):
             period_start=report.period_start,
             period_end=report.period_end,
             timezone="Europe/Moscow",
+            attribution=report.attribution,
+            rows=report.rows,
+        )
+
+
+class MalformedAuthorizedMetrikaReader(RecordingAuthorizedMetrikaReader):
+    def read_metrika_report(
+        self,
+        connection_id: str,
+        query: MetrikaReportReadQuery,
+    ) -> MetrikaReportBlock:
+        report = super().read_metrika_report(connection_id, query)
+        return MetrikaReportBlock(
+            source=report.source,
+            retrieved_at=cast(str, 123),
+            watermark=report.watermark,
+            period_start=report.period_start,
+            period_end=report.period_end,
+            timezone=report.timezone,
             attribution=report.attribution,
             rows=report.rows,
         )
@@ -379,6 +398,27 @@ class StandaloneMetrikaCustomerE2ETests(unittest.TestCase):
         request["period"]["timezone"] = "Europe/Moscow"
         module = MetrikaModuleV1(
             provider_reader=NonUtcAuthorizedMetrikaReader(),
+            clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
+        )
+
+        response = HttpJsonModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(422, response.status_code)
+        self.assertEqual("REJECTED", response.body["status"])
+        self.assertEqual(
+            "METRIKA_EVIDENCE_REJECTED",
+            response.body["errors"][0]["code"],
+        )
+
+    def test_malformed_typed_provider_evidence_returns_a_typed_error(self) -> None:
+        request = customer_evidence_request()
+        request.pop("external_evidence")
+        request["scope"]["campaign_id"] = "campaign-7"
+        module = MetrikaModuleV1(
+            provider_reader=MalformedAuthorizedMetrikaReader(),
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
         )
 

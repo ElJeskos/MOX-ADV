@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Optional, Protocol, Tuple
 
-from mox_adv.contracts import MetrikaReportBlock, MetrikaReportReadQuery
+from mox_adv.contracts import (
+    MetrikaReportBlock,
+    MetrikaReportReadQuery,
+    MetrikaReportRow,
+)
 from mox_adv.module_api.v1 import (
     MetricValueV1,
     ModuleProvenanceV1,
@@ -191,6 +195,10 @@ class MetrikaObservationReaderV1:
     ) -> Tuple[int, int]:
         if not isinstance(report, MetrikaReportBlock):
             raise ValueError("The provider response does not match MetrikaReportBlock.")
+        if not isinstance(report.rows, tuple) or any(
+            not isinstance(row, MetrikaReportRow) for row in report.rows
+        ):
+            raise ValueError("The provider response rows are malformed.")
         if report.source != "METRIKA_REPORT":
             raise ValueError("The provider response source is unsupported.")
         if (
@@ -265,6 +273,8 @@ class MetrikaObservationReaderV1:
 
     @staticmethod
     def _timestamp(value: str, field: str) -> datetime:
+        if not isinstance(value, str):
+            raise ValueError(field + " must be an ISO-8601 timestamp.")
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as error:
@@ -277,6 +287,8 @@ class MetrikaObservationReaderV1:
 
     @staticmethod
     def _date(value: str, field: str) -> date:
+        if not isinstance(value, str):
+            raise ValueError(field + " must be an ISO date.")
         try:
             return date.fromisoformat(value)
         except ValueError as error:

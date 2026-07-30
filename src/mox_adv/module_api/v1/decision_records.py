@@ -7,7 +7,7 @@ import hashlib
 import json
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Literal, Mapping, Protocol, Tuple
+from typing import Any, Dict, Mapping, Protocol, Tuple
 
 from mox_adv.environment import (
     PRODUCTION_WRITE_FORBIDDEN,
@@ -15,29 +15,17 @@ from mox_adv.environment import (
 )
 from mox_adv.module_api.v1.contracts import (
     ContractValidationError,
+    MODULE_STATUSES,
     MetricValueV1,
     ModuleAssessmentV1,
     ModuleIdentityV1,
     ModuleProvenanceV1,
     ModuleRecommendationV1,
     ModuleRequestV1,
+    ModuleStatus,
 )
 
 MODULE_DECISION_RECORD_SCHEMA_VERSION = "module-decision-record-v1"
-ModuleDecisionOutcomeV1 = Literal[
-    "SUCCEEDED",
-    "PARTIAL",
-    "BLOCKED",
-    "REJECTED",
-    "FAILED",
-]
-MODULE_DECISION_OUTCOMES = (
-    "SUCCEEDED",
-    "PARTIAL",
-    "BLOCKED",
-    "REJECTED",
-    "FAILED",
-)
 
 
 @dataclass(frozen=True)
@@ -70,12 +58,12 @@ class ModuleDecisionFactsV1:
 class ModuleDecisionV1:
     """Typed, closed payload for one non-execution module decision."""
 
-    outcome: ModuleDecisionOutcomeV1
+    outcome: ModuleStatus
     reason_codes: Tuple[str, ...]
     facts: ModuleDecisionFactsV1
 
     def __post_init__(self) -> None:
-        if self.outcome not in MODULE_DECISION_OUTCOMES:
+        if self.outcome not in MODULE_STATUSES:
             raise ContractValidationError("Decision outcome is unsupported.")
         if any(not code for code in self.reason_codes):
             raise ContractValidationError("Decision reason codes must be non-empty.")
