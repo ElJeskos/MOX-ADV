@@ -4,7 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union, cast
+from typing import (
+    Any,
+    Dict,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+    get_args,
+)
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mox_adv.environment import PRODUCTION_WRITE_FORBIDDEN
@@ -39,13 +50,7 @@ ModuleStatus = Literal[
     "REJECTED",
     "FAILED",
 ]
-MODULE_STATUSES = (
-    "SUCCEEDED",
-    "PARTIAL",
-    "BLOCKED",
-    "REJECTED",
-    "FAILED",
-)
+MODULE_STATUSES = cast(Tuple[ModuleStatus, ...], get_args(ModuleStatus))
 
 
 class ContractValidationError(ValueError):
