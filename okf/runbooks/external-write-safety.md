@@ -1,21 +1,28 @@
 ---
 type: Runbook
 title: External Write Safety
-description: Provides the pre-write, write-boundary, readback, and reconciliation safety path.
+description: Rejects production writes and provides the approved test-contour write, readback, and reconciliation path.
 tags: [runbook, safety, external-write]
-timestamp: "2026-07-29T14:22:56Z"
+timestamp: "2026-07-30T12:00:00Z"
 ---
 
 # External Write Safety
 
-Use this routing checklist before any external Yandex or production-site write.
+Use this routing checklist before any changing Yandex or site operation.
 It summarizes the required path but does not itself grant authority.
+
+## Environment decision
+
+1. Resolve the environment from trusted server-side composition.
+2. If the environment is production, return a blocked result before resolving a write credential and before network egress.
+3. Never allow Approval, Mandate, operating mode, retry, restart, customer evidence, or adapter selection to override the production rejection.
+4. Continue only when the environment is explicitly test and every target is an approved test resource.
 
 ## Before the transaction
 
 1. Confirm that Gate 0 evidence is complete and current.
 2. Resolve the exact command, target, scope, credential profile, and endpoint from trusted server-side configuration.
-3. Verify the method is live-approved in `api-matrix.yaml`; a local contract case is not production authorization.
+3. Verify that the method is approved for the selected test adapter; a local contract case is not external authorization.
 4. Load the immutable Proposal, canonical plan, policy version, expected fingerprint, and applicable Approval or Mandate.
 5. Obtain a fresh snapshot or the explicitly permitted fresh current-state read for an already-started saga.
 6. Run deterministic schema, evidence, scope, freshness, comparability, limit, quota, cooldown, and concurrency checks.
@@ -42,6 +49,8 @@ Use the exact normative preconditions and reason codes in the cited requirements
 
 # Citations
 
-[1] [`requirements.md`](../../requirements.md), `FR-CAM-003`, `FR-CAM-005` through `FR-CAM-007`, `FR-CTL-002` through `FR-CTL-006`, `FR-AUD-003`, and `NFR-005`.
+[1] [`requirements-modularization-v1.md`](../../requirements-modularization-v1.md), environment and credential matrix.
 
-[2] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)
+[2] [`requirements.md`](../../requirements.md), `FR-CAM-003`, `FR-CAM-005` through `FR-CAM-007`, `FR-CTL-002` through `FR-CTL-006`, `FR-AUD-003`, and `NFR-005` for inherited test-write behavior.
+
+[3] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)

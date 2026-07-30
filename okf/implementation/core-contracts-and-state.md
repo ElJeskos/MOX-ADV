@@ -1,9 +1,9 @@
 ---
 type: Implementation Contract
 title: Core Contracts and State
-description: Summarizes the versioned schemas, immutable records, authority state machines, and execution ledger.
+description: Summarizes the module request-result seam, inherited records, authority state machines, and execution ledger.
 tags: [implementation, contracts, state]
-timestamp: "2026-07-29T14:10:28Z"
+timestamp: "2026-07-30T12:00:00Z"
 ---
 
 # Core Contracts and State
@@ -11,6 +11,11 @@ timestamp: "2026-07-29T14:10:28Z"
 Every model-visible and persisted contract is versioned and closed to unknown fields.
 Machine-readable JSON Schemas in `schemas/` must match the normative model definitions in `requirements.md`; the requirements win until an approved new version changes them.
 Identifiers, timestamps, money, limits, and evidence references are validated outside the LLM.
+
+The modular amendment adds one provider-neutral boundary.
+`ModuleRequestV1` carries connection references, environment, scope, period, objective, operation, idempotency, and optional validated evidence.
+`ModuleResultV1` carries run and module identity, status, normalized metrics, assessment, recommendations, provenance, warnings, typed errors, a Decision Record reference, and optional proposal or execution output.
+HTTP/JSON and in-process adapters invoke the same interface.
 
 The central immutable records are:
 
@@ -32,9 +37,12 @@ Write authority and recovery are durable state machines:
 
 Every model-visible tool returns exactly one typed result, including denials, timeouts, and internal errors.
 Side-effecting tool requests must become persisted Proposals before the executor can consider them.
+The executor must also establish that the environment is test before write credentials or HTTP can be considered.
 
 # Citations
 
-[1] [`requirements.md`](../../requirements.md), sections 7, 8, 10, 12, 13, and 16.
+[1] [`requirements-modularization-v1.md`](../../requirements-modularization-v1.md), integration contract matrix.
 
-[2] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)
+[2] [`requirements.md`](../../requirements.md), sections 7, 8, 10, 12, 13, and 16 for inherited records and state.
+
+[3] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)

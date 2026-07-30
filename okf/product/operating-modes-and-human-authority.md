@@ -3,7 +3,7 @@ type: Operating Model
 title: Operating Modes and Human Authority
 description: Explains the four operating modes and the human authority model for approvals, mandates, and incidents.
 tags: [product, authority, governance]
-timestamp: "2026-07-29T14:10:28Z"
+timestamp: "2026-07-30T12:00:00Z"
 ---
 
 # Operating Modes and Human Authority
@@ -14,6 +14,11 @@ The system has four persisted and audited operating modes:
 - `RECOMMEND` may create a Proposal but cannot apply an Approval or Mandate.
 - `APPROVAL_REQUIRED` permits a write only for the exact approved Proposal and canonical plan.
 - `BOUNDED_AUTONOMY` permits the scheduler to execute only the action classes and scope explicitly granted by an active Mandate.
+
+These mode semantics are inherited unchanged, but environment authority has priority over every mode.
+In production, all four modes are read, analysis, recommendation, and Decision Record modes without write authority.
+`APPROVAL_REQUIRED` and `BOUNDED_AUTONOMY` may exercise their existing write semantics only in an explicitly selected approved test contour.
+Neither an Approval nor a Mandate can turn a production request into a write-capable request.
 
 The developer holds three separate authenticated technical roles:
 
@@ -33,4 +38,6 @@ The kill switch has priority over both and fails closed when its state is unavai
 
 [1] [`requirements.md`](../../requirements.md), sections 4, 8.5, 8.6, 12, and 15.
 
-[2] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)
+[2] [`requirements-modularization-v1.md`](../../requirements-modularization-v1.md), environment and credential matrix.
+
+[3] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)

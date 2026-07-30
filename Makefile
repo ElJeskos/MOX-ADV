@@ -1,6 +1,9 @@
 PYTHON ?= python3
 
-.PHONY: check-okf verify
+.PHONY: check-modular-scope check-okf verify
+
+check-modular-scope:
+	$(PYTHON) scripts/validate_modular_scope.py
 
 check-okf:
 	$(PYTHON) scripts/check_okf.py okf \
@@ -10,4 +13,4 @@ check-okf:
 		--require project/normative-specification.md \
 		--require references/initial-source-map.md
 
-verify: check-okf
+verify: check-modular-scope check-okf

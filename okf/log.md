@@ -1,5 +1,12 @@
 # OKF Log
 
+## 2026-07-30
+
+- **Decision**: Defined headless standalone Metrika, headless standalone Direct, and the paired product with its existing Dashboard.
+- **Decision**: Standardized HTTP/JSON customer integration and in-process paired integration on one request-result seam.
+- **Safety**: Made production read-only and confined every changing scenario to approved test composition.
+- **Update**: Reclassified gates, capabilities, evidence, credentials, acceptance, and write-safety guidance under the modular amendment.
+
 ## 2026-07-29
 
 - **Decision**: Merged Gate 0A and Gate 0B into one Gate 0 readiness boundary after Yandex Direct access became available.
