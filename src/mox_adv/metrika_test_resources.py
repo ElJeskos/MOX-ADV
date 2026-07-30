@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -40,6 +39,21 @@ from mox_adv.module_api.v1 import (
 )
 from mox_adv.module_cli import StandaloneRuntimeSettingsV1
 from mox_adv.modules.metrika import MetrikaModuleV1
+from mox_adv.test_resource_validation import (
+    json_object_v1 as _json_object,
+)
+from mox_adv.test_resource_validation import (
+    principal_v1 as _principal,
+)
+from mox_adv.test_resource_validation import (
+    relative_path_v1 as _relative_path,
+)
+from mox_adv.test_resource_validation import (
+    required_text_v1 as _text,
+)
+from mox_adv.test_resource_validation import (
+    utc_timestamp_v1 as _timestamp,
+)
 
 
 @dataclass(frozen=True)
@@ -347,36 +361,6 @@ def _goal_authorization(value: Any) -> Mapping[str, Any]:
     return dict(value)
 
 
-def _json_object(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError("TEST resource JSON is unavailable.") from error
-    if not isinstance(value, dict):
-        raise TypeError("TEST resource JSON must contain one object.")
-    return value
-
-
-def _relative_path(owner: Path, value: Any, field: str) -> Path:
-    path = Path(_text(value, field))
-    return path if path.is_absolute() else owner.parent / path
-
-
-def _principal(value: Any, field: str) -> AuthenticatedPrincipal:
-    if not isinstance(value, dict) or set(value) != {
-        "identity",
-        "authentication",
-    }:
-        raise ValueError(field + " must contain identity and authentication.")
-    return AuthenticatedPrincipal(
-        identity=_text(value["identity"], field + ".identity"),
-        authentication=_text(
-            value["authentication"],
-            field + ".authentication",
-        ),
-    )
-
-
 def _required_profile(value: Any) -> str:
     profile = _text(value, "site_publish_credential_profile")
     if profile != "TEST_SITE_PUBLISH":
@@ -384,22 +368,6 @@ def _required_profile(value: Any) -> str:
             "site_publish_credential_profile must be TEST_SITE_PUBLISH."
         )
     return profile
-
-
-def _text(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(field + " must be non-empty text.")
-    return value
-
-
-def _timestamp(value: Any, field: str) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(_text(value, field).replace("Z", "+00:00"))
-    except ValueError as error:
-        raise ValueError(field + " must be ISO-8601.") from error
-    if parsed.tzinfo is None:
-        raise ValueError(field + " must be timezone-aware.")
-    return parsed.astimezone(timezone.utc)
 
 
 __all__ = [

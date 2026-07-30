@@ -24,6 +24,8 @@ jobs:
             python: "3.12"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -36,12 +38,14 @@ jobs:
           python -m playwright install chromium
       - name: Validate scope and knowledge bundle
         run: make verify
-      - name: Exercise clean release artifacts
+      - name: Enforce Module API v1 compatibility
+        run: |
+          baseline_file="${RUNNER_TEMP}/module-api-v1-baseline.json"
+          git show 0d8ea21:openapi/module-api-v1.openapi.json > "$baseline_file"
+          python scripts/check_module_openapi_compatibility.py \
+            "$baseline_file" \
+            openapi/module-api-v1.openapi.json
+      - name: Run complete legacy, contract, and release regression
         env:
           PYTHONPATH: src:.
-        run: |
-          python -m unittest \
-            tests.e2e.test_release_distributions \
-            tests.e2e.test_release_lifecycle \
-            tests.e2e.test_release_production_safety \
-            tests.e2e.test_release_test_compositions
+        run: python -m unittest discover -s tests -p 'test_*.py'

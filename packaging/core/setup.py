@@ -28,6 +28,7 @@ PACKAGE_MODULES = {
         "module_cli",
         "module_host",
         "recommend_contracts",
+        "test_resource_validation",
         "yandex_credentials",
         "yandex_transport",
         "yandex_values",

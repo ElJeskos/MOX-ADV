@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -45,6 +44,24 @@ from mox_adv.modules.direct import DirectModuleV1
 from mox_adv.monitoring import MonitoringStore
 from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_contracts import CampaignDraftV1
+from mox_adv.test_resource_validation import (
+    json_object_v1 as _json_object,
+)
+from mox_adv.test_resource_validation import (
+    mapping_v1 as _mapping,
+)
+from mox_adv.test_resource_validation import (
+    relative_path_v1 as _relative_path,
+)
+from mox_adv.test_resource_validation import (
+    required_text_v1 as _text,
+)
+from mox_adv.test_resource_validation import (
+    text_array_v1 as _texts,
+)
+from mox_adv.test_resource_validation import (
+    utc_timestamp_v1 as _timestamp,
+)
 
 
 @dataclass(frozen=True)
@@ -419,16 +436,6 @@ def _campaign_authorization(value: Any) -> Mapping[str, Any]:
     return dict(value)
 
 
-def _json_object(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError("TEST resource JSON is unavailable.") from error
-    if not isinstance(value, dict):
-        raise TypeError("TEST resource JSON must contain one object.")
-    return value
-
-
 def _validate_direct_policy(policy: Mapping[str, Any]) -> None:
     _text(policy.get("policy_id"), "policy.policy_id")
     approver = _mapping(
@@ -463,39 +470,6 @@ def _validate_direct_policy(policy: Mapping[str, Any]) -> None:
             raise ValueError(f"policy.{parent}.{child} is required.")
     if not isinstance(policy.get("api_matrix"), list):
         raise TypeError("policy.api_matrix must be an array.")
-
-
-def _mapping(value: Any, field: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise TypeError(field + " must be an object.")
-    return value
-
-
-def _relative_path(owner: Path, value: Any, field: str) -> Path:
-    path = Path(_text(value, field))
-    return path if path.is_absolute() else owner.parent / path
-
-
-def _text(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(field + " must be non-empty text.")
-    return value
-
-
-def _texts(value: Any, field: str) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise TypeError(field + " must be an array.")
-    return tuple(_text(item, field) for item in value)
-
-
-def _timestamp(value: Any, field: str) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(_text(value, field).replace("Z", "+00:00"))
-    except ValueError as error:
-        raise ValueError(field + " must be ISO-8601.") from error
-    if parsed.tzinfo is None:
-        raise ValueError(field + " must be timezone-aware.")
-    return parsed.astimezone(timezone.utc)
 
 
 def _dates(start: str, end: str) -> tuple[date, ...]:

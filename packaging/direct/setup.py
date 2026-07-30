@@ -3,16 +3,12 @@
 import sys
 from pathlib import Path
 
-from setuptools import setup
-from setuptools.command.build_py import build_py
-
 PACKAGING_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGING_ROOT))
 
-from release import exact_core_requirement, release_version
+from provider_definition import setup_provider_edition
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-SOURCE_ROOT = REPOSITORY_ROOT / "src"
 PACKAGE_MODULES = {
     "mox_adv": {
         "approval_execution",
@@ -52,30 +48,10 @@ PACKAGE_MODULES = {
     "mox_adv.modules": {"direct"},
 }
 
-
-class DirectBuildPy(build_py):
-    """Copy only modules needed by the independently installable edition."""
-
-    def find_package_modules(
-        self,
-        package: str,
-        package_dir: str,
-    ) -> list[tuple[str, str, str]]:
-        modules = super().find_package_modules(package, package_dir)
-        allowed = PACKAGE_MODULES[package]
-        return [module for module in modules if module[1] in allowed]
-
-
-setup(
-    name="mox-adv-direct",
-    version=release_version(),
+setup_provider_edition(
+    repository_root=REPOSITORY_ROOT,
+    distribution="mox-adv-direct",
     description="Headless standalone Yandex Direct integration module",
-    python_requires=">=3.9",
-    install_requires=[exact_core_requirement()],
-    entry_points={
-        "console_scripts": ["mox-adv-direct=mox_adv.direct_cli:main"],
-    },
-    packages=list(PACKAGE_MODULES),
-    package_dir={"": str(SOURCE_ROOT)},
-    cmdclass={"build_py": DirectBuildPy},
+    console_script="mox-adv-direct=mox_adv.direct_cli:main",
+    package_modules=PACKAGE_MODULES,
 )
