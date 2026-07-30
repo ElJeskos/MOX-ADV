@@ -2,66 +2,80 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import argparse
+import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
 
+from mox_adv.control_state import ControlRejected
 from mox_adv.metrika_production import MetrikaProductionReadCompositionV1
-from mox_adv.module_api.v1 import ModuleDecisionRecordStoreV1, ModuleV1
+from mox_adv.metrika_test_resources import (
+    authorize_metrika_site_publish_v1,
+    build_metrika_test_module_v1,
+    metrika_test_diagnostics_v1,
+)
 from mox_adv.module_cli import (
-    StandaloneRuntimeSettingsV1,
-    standalone_main_v1,
+    ProviderEditionV1,
+    prepare_state_directory_v1,
+    provider_edition_main_v1,
 )
 from mox_adv.modules.metrika import MetrikaModuleV1
 
-
-def _module(
-    settings: StandaloneRuntimeSettingsV1,
-    decisions: ModuleDecisionRecordStoreV1,
-) -> ModuleV1:
-    clock = lambda: datetime.now(timezone.utc)
-    if settings.configuration_path is None:
-        return MetrikaModuleV1(
-            clock=clock,
-            decision_records=decisions,
+METRIKA_EDITION_V1 = ProviderEditionV1(
+    program="mox-adv-metrika",
+    edition="METRIKA_STANDALONE",
+    distribution="mox-adv-metrika",
+    analysis_builder=lambda _settings, decisions: MetrikaModuleV1(
+        clock=lambda: datetime.now(timezone.utc),
+        decision_records=decisions,
+    ),
+    production_builder=lambda configuration, environment: (
+        MetrikaProductionReadCompositionV1(
+            configuration_path=configuration,
+            environment_path=environment,
         )
-    assert settings.environment_path is not None
-    return MetrikaProductionReadCompositionV1(
-        configuration_path=settings.configuration_path,
-        environment_path=settings.environment_path,
-    ).module(clock=clock, decision_records=decisions)
-
-
-def _diagnostics(
-    settings: StandaloneRuntimeSettingsV1,
-) -> Mapping[str, Any]:
-    if settings.configuration_path is None:
-        return {
-            "mode": "CUSTOMER_EVIDENCE",
-            "configuration_ready": True,
-            "read_credentials": [],
-        }
-    assert settings.environment_path is not None
-    composition = MetrikaProductionReadCompositionV1(
-        configuration_path=settings.configuration_path,
-        environment_path=settings.environment_path,
-    )
-    return {
-        "mode": "PROVIDER_READ",
-        "configuration_ready": composition.settings_or_none() is not None,
-        "read_credentials": list(composition.credential_checks()),
-    }
+    ),
+    test_builder=build_metrika_test_module_v1,
+    test_diagnostic_builder=metrika_test_diagnostics_v1,
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    return standalone_main_v1(
-        argv,
-        program="mox-adv-metrika",
-        edition="METRIKA_STANDALONE",
-        distribution="mox-adv-metrika",
-        module_builder=_module,
-        diagnostic_builder=_diagnostics,
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "authorize-site-test":
+        try:
+            return _authorize_site_test(arguments[1:])
+        except ControlRejected as error:
+            print(str(error), file=sys.stderr)
+            return 2
+    return provider_edition_main_v1(arguments, METRIKA_EDITION_V1)
+
+
+def _authorize_site_test(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="mox-adv-metrika authorize-site-test"
     )
+    parser.add_argument(
+        "--environment",
+        required=True,
+        choices=["TEST"],
+    )
+    parser.add_argument("--state-dir", required=True, type=Path)
+    parser.add_argument("--test-resources", required=True, type=Path)
+    parser.add_argument("--candidate-id", required=True)
+    parser.add_argument("--authority-id", required=True)
+    arguments = parser.parse_args(argv)
+    prepare_state_directory_v1(arguments.state_dir)
+    authority_id = authorize_metrika_site_publish_v1(
+        state_dir=arguments.state_dir,
+        resources_path=arguments.test_resources,
+        candidate_id=arguments.candidate_id,
+        authority_id=arguments.authority_id,
+        now=datetime.now(timezone.utc),
+    )
+    print(authority_id)
+    return 0
 
 
 if __name__ == "__main__":

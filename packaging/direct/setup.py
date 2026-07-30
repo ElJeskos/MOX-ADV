@@ -36,6 +36,7 @@ PACKAGE_MODULES = {
         "direct_management",
         "direct_production",
         "direct_provider",
+        "direct_test_resources",
         "egress",
         "errors",
         "fake_write_adapter",

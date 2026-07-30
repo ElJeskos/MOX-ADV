@@ -1,0 +1,47 @@
+name: Release compatibility
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  clean-wheel-release:
+    name: ${{ matrix.os }} / CPython ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            python: "3.9"
+          - os: ubuntu-24.04
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install exact release test tooling
+        run: |
+          python -m pip install --disable-pip-version-check \
+            'setuptools==75.8.2' \
+            'wheel==0.45.1' \
+            -r requirements-e2e.txt
+          python -m playwright install chromium
+      - name: Validate scope and knowledge bundle
+        run: make verify
+      - name: Exercise clean release artifacts
+        env:
+          PYTHONPATH: src:.
+        run: |
+          python -m unittest \
+            tests.e2e.test_release_distributions \
+            tests.e2e.test_release_lifecycle \
+            tests.e2e.test_release_production_safety \
+            tests.e2e.test_release_test_compositions

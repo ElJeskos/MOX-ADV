@@ -28,10 +28,20 @@ Use separate virtual environments when two customers or deployments need differe
 | Internal runtime | `mox-adv-core` | The version must exactly match each installed standalone distribution. |
 | HTTP/JSON API | `1.0.0` | Patch releases must remain backward-compatible with the published v1 OpenAPI document. |
 | Request and result schemas | `module-request-v1` and `module-result-v1` | Existing required fields, operations, response statuses, and response fields cannot be removed or narrowed in a patch release. |
-| Python | CPython `>=3.9` on supported macOS and Linux hosts | Every target Python and operating-system combination must pass the clean-wheel release E2E suite before publication. |
+| Python language baseline | CPython `>=3.9` | Package metadata accepts the shared language baseline, but a release is supported only on an operating-system and interpreter row listed in the verified target matrix below. |
 | Durable analysis replay | `analysis-replay-v1` | Release 1.0.x reads and replays the same SQLite state across a patch upgrade and rollback. |
 | Decision records | `module-decision-record-v1` | Records remain customer-owned external state and are not removed by package operations. |
 | Support diagnostics | `support-diagnostics-v1` | Fields contain compatibility and readiness metadata but never credential values. |
+
+### Verified target matrix
+
+The mandatory clean-wheel release matrix contains `macos-14` with CPython `3.9` and `ubuntu-24.04` with CPython `3.12`.
+
+The executable matrix is defined in [`.github/workflows/release-compatibility.yml`](../.github/workflows/release-compatibility.yml).
+
+The current local macOS acceptance evidence uses CPython `3.9`, and the hardened Linux container acceptance evidence uses CPython `3.12`.
+
+Do not claim another operating-system and interpreter combination as supported until the same clean-wheel job is added to the matrix and passes.
 
 The release pipeline must compare the candidate OpenAPI document with the previously published document before publication.
 
@@ -104,6 +114,76 @@ Use the customer-owned [`examples/reference_client`](../examples/reference_clien
 
 Standalone modules do not install a Dashboard, webhook consumer, queue, CRM connector, or non-technical onboarding UI.
 
+### Explicit standalone TEST compositions
+
+Write-capable standalone behavior is unavailable unless the operator selects `--environment TEST` and an explicit `--test-resources` file.
+
+The Direct TEST resource document uses schema `direct-test-resources-v1`.
+
+It binds one synthetic organization, connection, account, campaign, trusted change author, initial weekly budget, campaign safety allowlists, the approved policy path, and any exact campaign reservation and approval authorities.
+
+Start the installed Direct TEST host.
+
+```shell
+mkdir -p -m 700 ./customer-state/direct-test
+.venv-direct/bin/mox-adv-direct serve \
+  --environment TEST \
+  --state-dir ./customer-state/direct-test \
+  --test-resources ./customer-config/direct-test-resources.json \
+  --bind 127.0.0.1 \
+  --port 8802
+```
+
+Send `PLAN_OPTIMIZATION` through `POST /v1/runs`.
+
+The returned immutable proposal is not executable until an operator grants its short-lived TEST approval with a separate command.
+
+The approval command authenticates the real local operating-system account by UID and requires an exact match with the configured policy approver.
+
+```shell
+.venv-direct/bin/mox-adv-direct approve-test \
+  --environment TEST \
+  --state-dir ./customer-state/direct-test \
+  --test-resources ./customer-config/direct-test-resources.json \
+  --proposal-id proposal-from-plan \
+  --reason "Approved for the synthetic TEST campaign"
+```
+
+The customer ecosystem can then send the corresponding `APPLY_OPTIMIZATION` request through `POST /v1/runs`.
+
+`CREATE_CAMPAIGN` requires an exact campaign authorization in the TEST resource document whose run, execution, proposal, approval, reservation, expiry, and typed draft match the request.
+
+The Metrika TEST resource document uses schema `metrika-test-resources-v1`.
+
+It binds one explicit test connection, counter, site zone and version, the separate `TEST_SITE_PUBLISH` profile, exact mandate-issuer, approver, and product-signoff roles, an approved policy path, and exact goal-creation reservation and authority records.
+
+```shell
+mkdir -p -m 700 ./customer-state/metrika-test
+.venv-metrika/bin/mox-adv-metrika serve \
+  --environment TEST \
+  --state-dir ./customer-state/metrika-test \
+  --test-resources ./customer-config/metrika-test-resources.json \
+  --bind 127.0.0.1 \
+  --port 8801
+```
+
+After a goal candidate is created, authorize one short-lived TEST-site publication separately.
+
+The authorization command authenticates the real local operating-system account by UID and requires an exact match with the configured policy approver.
+
+```shell
+.venv-metrika/bin/mox-adv-metrika authorize-site-test \
+  --environment TEST \
+  --state-dir ./customer-state/metrika-test \
+  --test-resources ./customer-config/metrika-test-resources.json \
+  --candidate-id candidate-from-create \
+  --authority-id customer-approved-site-publication
+```
+
+The resource parsers reject unrecognized fields, invalid policy bindings, unbound targets, malformed authorities, and non-TEST adapter selection.
+
+Diagnostics validate the selected resource document without returning raw contents, tokens, or environment-file values.
+
 Install and start the paired edition.
 
 ```shell
@@ -124,6 +204,24 @@ The existing paired Dashboard remains available at `http://127.0.0.1:8878/`.
 The paired wheel depends on the released standalone wheels and does not contain copied Direct or Metrika provider implementation.
 
 The paired release pins the Playwright version that passed its visual contract, and a Playwright upgrade requires a new MOX-ADV patch release with the same browser regression evidence.
+
+To enable the existing paired Dashboard's production read-only mode after installation, pass all five customer-owned paths together.
+
+```shell
+.venv-paired/bin/mox-adv-paired ui \
+  --port 8878 \
+  --runs-dir ./customer-state/paired-runs \
+  --paired-production-configuration ./customer-config/paired-production-read.json \
+  --direct-production-configuration ./customer-config/direct-production-read.json \
+  --metrika-production-configuration ./customer-config/metrika-production-read.json \
+  --direct-production-environment-file ./customer-secrets/.env.direct-read \
+  --metrika-production-environment-file ./customer-secrets/.env.metrika-read \
+  --no-open
+```
+
+The paired command rejects a partial set of production paths.
+
+These paths remain outside the virtual environment and are preserved across package upgrade, rollback, and uninstall.
 
 ## External configuration and state
 
@@ -314,7 +412,8 @@ Run the clean-wheel distribution and lifecycle acceptance tests on every support
 PYTHONPATH=src:. python3 -m unittest \
   tests.e2e.test_release_distributions \
   tests.e2e.test_release_lifecycle \
-  tests.e2e.test_release_production_safety
+  tests.e2e.test_release_production_safety \
+  tests.e2e.test_release_test_compositions
 ```
 
-The release suites verify isolated build ownership, clean installation, exact dependency metadata, diagnostics, secret redaction, production write blocking before credentials and HTTP, a durable 1.0.0 to 1.0.1 upgrade, a 1.0.1 to 1.0.0 rollback, byte-identical replay, uninstall isolation, the installed Dashboard visual states, and preservation of external configuration and state.
+The release suites verify isolated build ownership, clean installation, exact dependency metadata, diagnostics, secret redaction, production write blocking before credentials and HTTP, explicit TEST authority and target binding, a durable 1.0.0 to 1.0.1 upgrade, a 1.0.1 to 1.0.0 rollback, byte-identical replay, uninstall isolation, the installed Dashboard visual states, and preservation of external configuration and state.

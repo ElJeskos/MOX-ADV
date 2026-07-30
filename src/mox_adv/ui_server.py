@@ -543,9 +543,13 @@ def build_server(
     port: int = 8878,
     runs_root: Path = Path("runs"),
     authenticator: Any | None = None,
+    production_reader: Any | None = None,
 ) -> UiHttpServer:
     server = UiHttpServer(("127.0.0.1", port), UiRequestHandler)
-    server.service = UiRunService(runs_root)
+    server.service = UiRunService(
+        runs_root,
+        production_reader=production_reader,
+    )
     server.dashboard = DashboardApplication(
         runs_root,
         server.service,
@@ -560,8 +564,13 @@ def serve_ui(
     port: int = 8878,
     runs_root: Path = Path("runs"),
     open_browser: bool = True,
+    production_reader: Any | None = None,
 ) -> None:
-    server = build_server(port=port, runs_root=runs_root)
+    server = build_server(
+        port=port,
+        runs_root=runs_root,
+        production_reader=production_reader,
+    )
     url = f"http://127.0.0.1:{server.server_port}"
     print(f"MOX-ADV UI: {url}")
     print("Press Ctrl+C to stop.")

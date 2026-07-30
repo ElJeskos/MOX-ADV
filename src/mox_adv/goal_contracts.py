@@ -251,10 +251,14 @@ def site_publish_plan(
     policy_id: str,
     candidate: GoalCandidateRecord,
     exact_diff: Mapping[str, Any],
+    credential_profile: str = "TEST_SITE_PUBLISH",
 ) -> dict[str, Any]:
+    if credential_profile != "TEST_SITE_PUBLISH":
+        raise GoalLifecycleRejected("TEST_SITE_PUBLISH_PROFILE_REQUIRED")
     return {
         "schema_version": "site-publish-plan-v1",
         "action": "SITE_PUBLISH",
+        "credential_profile": credential_profile,
         "policy_id": policy_id,
         "run_id": candidate.run_id,
         "proposal_id": candidate.proposal_id,

@@ -25,9 +25,9 @@ from mox_adv.pipeline import run_fixture
 
 
 class PrincipalAuthenticator(Protocol):
-    def authenticate(self): ...
+    def authenticate(self) -> Any: ...
 
-    def elevated_reauthenticate(self): ...
+    def elevated_reauthenticate(self) -> Any: ...
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,6 +132,31 @@ def build_parser() -> argparse.ArgumentParser:
     ui_parser.add_argument("--port", type=int, default=8878)
     ui_parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
     ui_parser.add_argument(
+        "--paired-production-configuration",
+        type=Path,
+        help="customer-owned paired production read configuration",
+    )
+    ui_parser.add_argument(
+        "--direct-production-configuration",
+        type=Path,
+        help="customer-owned Direct production read configuration",
+    )
+    ui_parser.add_argument(
+        "--metrika-production-configuration",
+        type=Path,
+        help="customer-owned Metrika production read configuration",
+    )
+    ui_parser.add_argument(
+        "--direct-production-environment-file",
+        type=Path,
+        help="customer-owned Direct read credential environment file",
+    )
+    ui_parser.add_argument(
+        "--metrika-production-environment-file",
+        type=Path,
+        help="customer-owned Metrika read credential environment file",
+    )
+    ui_parser.add_argument(
         "--no-open",
         action="store_true",
         help="do not open the UI in the default browser",
@@ -145,7 +170,7 @@ def _print_outcome(outcome: RunOutcome) -> int:
     )
     detail = "" if outcome.error_code is None else " [" + outcome.error_code + "]"
     print("Run " + outcome.run_id + ": " + outcome.status + detail + location)
-    return outcome.exit_code
+    return int(outcome.exit_code)
 
 
 def _default_control_state() -> DurableControlState:
@@ -224,14 +249,42 @@ def main(
         print(run_directory)
         return 0
     if arguments.command == "ui":
+        from mox_adv.paired_production import PairedYandexProductionReaderV1
         from mox_adv.ui_server import serve_ui
 
         if not 1 <= arguments.port <= 65535:
             parser.error("UI port must be between 1 and 65535.")
+        production_paths = (
+            arguments.paired_production_configuration,
+            arguments.direct_production_configuration,
+            arguments.metrika_production_configuration,
+            arguments.direct_production_environment_file,
+            arguments.metrika_production_environment_file,
+        )
+        if any(path is not None for path in production_paths) and not all(
+            path is not None for path in production_paths
+        ):
+            parser.error(
+                "paired production reads require all five production paths"
+            )
+        production_reader = (
+            None
+            if not all(path is not None for path in production_paths)
+            else PairedYandexProductionReaderV1(
+                paired_configuration_path=arguments.paired_production_configuration,
+                direct_configuration_path=arguments.direct_production_configuration,
+                metrika_configuration_path=arguments.metrika_production_configuration,
+                direct_environment_path=arguments.direct_production_environment_file,
+                metrika_environment_path=(
+                    arguments.metrika_production_environment_file
+                ),
+            )
+        )
         serve_ui(
             port=arguments.port,
             runs_root=arguments.runs_dir,
             open_browser=not arguments.no_open,
+            production_reader=production_reader,
         )
         return 0
     if arguments.command in {"approval", "kill-switch", "mandate"}:

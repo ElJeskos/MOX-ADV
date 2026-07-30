@@ -26,6 +26,7 @@ PACKAGE_MODULES = {
         "metrika_metrics",
         "metrika_production",
         "metrika_provider",
+        "metrika_test_resources",
     },
     "mox_adv.modules": {"metrika"},
 }

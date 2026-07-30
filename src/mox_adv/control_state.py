@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-import getpass
 import hashlib
 import json
 import os
+import platform
+import pwd
 import sqlite3
 import subprocess
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple
+from typing import Any, Protocol
 
 from mox_adv.commands import OptimizationAction
 from mox_adv.interrupt_state import (
@@ -107,7 +109,7 @@ class MacOSLocalPrincipalAuthenticator:
     def __init__(
         self,
         expected_identity: str = "sviridov",
-        elevated_verifier: Optional[ElevatedReauthenticationVerifier] = None,
+        elevated_verifier: ElevatedReauthenticationVerifier | None = None,
     ) -> None:
         self.expected_identity = expected_identity
         self.elevated_verifier = (
@@ -117,7 +119,13 @@ class MacOSLocalPrincipalAuthenticator:
         )
 
     def authenticate(self) -> AuthenticatedPrincipal:
-        identity = getpass.getuser()
+        try:
+            identity = pwd.getpwuid(os.getuid()).pw_name
+        except (KeyError, OSError) as error:
+            raise ControlRejected(
+                "UNAUTHENTICATED_PRINCIPAL",
+                "the local operating-system account cannot be resolved",
+            ) from error
         if identity != self.expected_identity:
             raise ControlRejected(
                 "UNAUTHENTICATED_PRINCIPAL",
@@ -136,6 +144,63 @@ class MacOSLocalPrincipalAuthenticator:
                 "macOS elevated reauthentication did not succeed.",
             )
         return principal
+
+
+class LocalOSPrincipalAuthenticatorV1:
+    """Authenticate the current supported macOS or Linux account."""
+
+    def __init__(self, expected_identity: str) -> None:
+        self.expected_identity = expected_identity
+
+    def authenticate(self) -> AuthenticatedPrincipal:
+        try:
+            identity = pwd.getpwuid(os.getuid()).pw_name
+        except (KeyError, OSError) as error:
+            raise ControlRejected(
+                "UNAUTHENTICATED_PRINCIPAL",
+                "the local operating-system account cannot be resolved",
+            ) from error
+        if identity != self.expected_identity:
+            raise ControlRejected(
+                "UNAUTHENTICATED_PRINCIPAL",
+                "the local operating-system user does not match the authority",
+            )
+        authentication = {
+            "Darwin": "authenticated_macos_user",
+            "Linux": "authenticated_linux_user",
+        }.get(platform.system())
+        if authentication is None:
+            raise ControlRejected(
+                "UNSUPPORTED_AUTHENTICATION_PLATFORM",
+                "local authority authentication supports macOS and Linux only",
+            )
+        return AuthenticatedPrincipal(
+            identity=identity,
+            authentication=authentication,
+        )
+
+
+class PrincipalAuthenticatorV1(Protocol):
+    def authenticate(self) -> AuthenticatedPrincipal: ...
+
+
+def authenticate_exact_local_principal_v1(
+    expected: AuthenticatedPrincipal,
+    authenticator: PrincipalAuthenticatorV1 | None = None,
+) -> AuthenticatedPrincipal:
+    """Authenticate one exact role without accepting caller-supplied identity."""
+
+    identity = (
+        LocalOSPrincipalAuthenticatorV1(expected.identity)
+        if authenticator is None
+        else authenticator
+    ).authenticate()
+    if identity != expected:
+        raise ControlRejected(
+            "UNAUTHENTICATED_PRINCIPAL",
+            "the authenticated operating-system principal does not match the role",
+        )
+    return identity
 
 
 class CampaignApprovalRepository:
@@ -268,7 +333,7 @@ class PreparedChange:
     expected_fingerprint: str
     risk: str
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["expected_diff"] = dict(self.expected_diff)
         return value
@@ -292,18 +357,13 @@ class PreparedChange:
         )
 
     def target_key(self) -> str:
-        return ":".join(
-            (
-                self.scope.organization,
-                self.scope.connection,
-                self.scope.account,
-                self.scope.campaign,
-                self.action,
-            )
+        return (
+            f"{self.scope.organization}:{self.scope.connection}:"
+            f"{self.scope.account}:{self.scope.campaign}:{self.action}"
         )
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> "PreparedChange":
+    def from_dict(cls, value: Mapping[str, Any]) -> PreparedChange:
         scope = value["scope"]
         if not isinstance(scope, Mapping):
             raise ControlRejected("INVALID_INPUT", "prepared scope is invalid.")
@@ -341,11 +401,11 @@ class ApprovalRecord:
     reason: str
     granted_at: str
     expires_at: str
-    revoked_at: Optional[str]
-    reserved_at: Optional[str]
-    reserved_execution_key: Optional[str]
-    used_at: Optional[str]
-    execution_key: Optional[str]
+    revoked_at: str | None
+    reserved_at: str | None
+    reserved_execution_key: str | None
+    used_at: str | None
+    execution_key: str | None
 
     @property
     def used(self) -> bool:
@@ -360,7 +420,7 @@ class ExecutionRecord:
     target_key: str
     current_value: Any
     target_value: Any
-    detail: Optional[str]
+    detail: str | None
     created_at: str
     updated_at: str
 
@@ -579,11 +639,17 @@ class DurableControlState:
         reason: str,
         principal: AuthenticatedPrincipal,
         now: datetime,
+        expected_principal: AuthenticatedPrincipal | None = None,
     ) -> ApprovalRecord:
-        if (
-            principal.identity != "sviridov"
-            or principal.authentication != "authenticated_macos_user"
-        ):
+        expected = (
+            AuthenticatedPrincipal(
+                identity="sviridov",
+                authentication="authenticated_macos_user",
+            )
+            if expected_principal is None
+            else expected_principal
+        )
+        if principal != expected:
             raise ControlRejected(
                 "UNAUTHENTICATED_PRINCIPAL",
                 "only the Gate 0 approver may grant approval.",
@@ -704,7 +770,7 @@ class DurableControlState:
         self,
         prepared: PreparedChange,
         now: datetime,
-    ) -> Tuple[ExecutionStatus, ExecutionRecord]:
+    ) -> tuple[ExecutionStatus, ExecutionRecord]:
         now_text = _utc_text(now)
         connection = self._connect()
         try:
@@ -835,8 +901,8 @@ class DurableControlState:
         approval: ApprovalRecord,
         now: datetime,
         sender: Callable[[], None],
-        at_dispatch_boundary: Optional[Callable[[], None]] = None,
-    ) -> Tuple[ExecutionStatus, ExecutionRecord]:
+        at_dispatch_boundary: Callable[[], None] | None = None,
+    ) -> tuple[ExecutionStatus, ExecutionRecord]:
         """Commit authority and IN_FLIGHT before the immediate dispatch boundary."""
 
         now_text = _utc_text(now)
@@ -1045,7 +1111,7 @@ class DurableControlState:
         self,
         execution_key: str,
         status: ExecutionStatus,
-        detail: Optional[str],
+        detail: str | None,
         now: datetime,
     ) -> ExecutionRecord:
         try:
@@ -1103,7 +1169,7 @@ class DurableControlState:
         now: datetime,
         *,
         cooldown_hours: int,
-        observation_window_hours: Optional[int] = None,
+        observation_window_hours: int | None = None,
         allow_active_kill_switch: bool = False,
     ) -> OperationalExecutionFacts:
         """Read current ledger limits and prove kill-switch storage is available."""
@@ -1175,10 +1241,10 @@ class DurableControlState:
                 prepared = json.loads(str(row["canonical_json"]))
                 expected_diff = prepared.get("expected_diff", {})
                 if not isinstance(expected_diff, Mapping):
-                    raise ValueError("prepared diff is invalid")
+                    raise TypeError("prepared diff is invalid")
                 step = expected_diff.get("relative_step_percent", 0)
                 if isinstance(step, bool) or not isinstance(step, int):
-                    raise ValueError("prepared step is invalid")
+                    raise TypeError("prepared step is invalid")
                 cumulative_change += abs(step)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ControlRejected(

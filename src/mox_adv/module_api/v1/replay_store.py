@@ -6,10 +6,20 @@ import copy
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Protocol, Tuple
+from typing import Any, Protocol
+
+ANALYSIS_REPLAY_COLUMNS_V1 = (
+    "module_id",
+    "idempotency_key",
+    "request_fingerprint",
+    "status_code",
+    "body_json",
+    "owner_token",
+)
 
 
 class AnalysisReplayConflictError(ValueError):
@@ -23,7 +33,7 @@ class AnalysisReplayPendingError(RuntimeError):
 @dataclass(frozen=True)
 class StoredAnalysisResponseV1:
     status_code: int
-    body: Dict[str, Any]
+    body: dict[str, Any]
 
 
 class AnalysisReplayStoreV1(Protocol):
@@ -34,7 +44,7 @@ class AnalysisReplayStoreV1(Protocol):
         idempotency_key: str,
         request_fingerprint: str,
         claim_token: str,
-    ) -> Optional[StoredAnalysisResponseV1]: ...
+    ) -> StoredAnalysisResponseV1 | None: ...
 
     def store_response(
         self,
@@ -60,9 +70,9 @@ class InMemoryAnalysisReplayStoreV1:
     """Process-local replay store for ANALYZE and PLAN compositions."""
 
     def __init__(self) -> None:
-        self._records: Dict[
-            Tuple[str, str],
-            Tuple[str, Optional[str], Optional[StoredAnalysisResponseV1]],
+        self._records: dict[
+            tuple[str, str],
+            tuple[str, str | None, StoredAnalysisResponseV1 | None],
         ] = {}
         self._lock = threading.Lock()
 
@@ -73,7 +83,7 @@ class InMemoryAnalysisReplayStoreV1:
         idempotency_key: str,
         request_fingerprint: str,
         claim_token: str,
-    ) -> Optional[StoredAnalysisResponseV1]:
+    ) -> StoredAnalysisResponseV1 | None:
         key = (module_id, idempotency_key)
         with self._lock:
             record = self._records.get(key)
@@ -168,7 +178,7 @@ class SqliteAnalysisReplayStoreV1:
         idempotency_key: str,
         request_fingerprint: str,
         claim_token: str,
-    ) -> Optional[StoredAnalysisResponseV1]:
+    ) -> StoredAnalysisResponseV1 | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -235,7 +245,7 @@ class SqliteAnalysisReplayStoreV1:
                 )
             body = json.loads(body_json)
             if not isinstance(body, dict):
-                raise RuntimeError("Stored analysis replay body is malformed.")
+                raise TypeError("Stored analysis replay body is malformed.")
             return StoredAnalysisResponseV1(
                 status_code=int(status_code),
                 body=body,
@@ -384,3 +394,26 @@ class SqliteAnalysisReplayStoreV1:
             connection.commit()
         finally:
             connection.close()
+
+
+def inspect_analysis_replay_store_v1(path: Path) -> bool:
+    """Check the v1 replay database without creating or mutating it."""
+
+    try:
+        connection = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro",
+            uri=True,
+        )
+        try:
+            integrity = connection.execute("PRAGMA quick_check").fetchone()
+            columns = tuple(
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(module_analysis_replays)"
+                )
+            )
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error):
+        return False
+    return integrity == ("ok",) and columns == ANALYSIS_REPLAY_COLUMNS_V1
