@@ -666,42 +666,21 @@ class MonitoringStore:
                 "WHERE proposal_id = ? AND active = 1",
                 (expected_proposal_id,),
             )
-            generation = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM active_proposals "
-                    "WHERE snapshot_id = ? AND reason_code = ?",
-                    (snapshot_id, reason_code),
-                ).fetchone()[0]
-            )
-            proposal_id = (
-                "monitoring-proposal-"
-                + hashlib.sha256(
-                    (
-                        snapshot_id
-                        + "\x00"
-                        + reason_code
-                        + "\x00"
-                        + str(generation)
-                    ).encode("utf-8")
-                ).hexdigest()[:24]
-            )
-            connection.execute(
-                "INSERT INTO active_proposals("
-                "proposal_id, snapshot_id, reason_code, created_at, active"
-                ") VALUES (?, ?, ?, ?, 1)",
-                (
-                    proposal_id,
-                    snapshot_id,
-                    reason_code,
-                    timestamp.isoformat(),
-                ),
-            )
-            return ActiveProposal(
-                proposal_id=proposal_id,
-                snapshot_id=snapshot_id,
-                reason_code=reason_code,
-                created_at=timestamp.isoformat(),
-                deduplicated=False,
+            generation_row = connection.execute(
+                "SELECT COUNT(*) FROM active_proposals "
+                "WHERE snapshot_id = ? AND reason_code = ?",
+                (snapshot_id, reason_code),
+            ).fetchone()
+            if generation_row is None:
+                raise MonitoringRejected(
+                    "Decision Trigger generation cannot be read."
+                )
+            return self._create_active_proposal(
+                connection,
+                snapshot_id,
+                reason_code,
+                timestamp,
+                generation=int(generation_row[0]),
             )
 
     @staticmethod
@@ -790,13 +769,7 @@ class MonitoringStore:
         reason_code: str,
         created_at: datetime,
     ) -> ActiveProposal:
-        timestamp = _utc(created_at).isoformat()
-        proposal_id = (
-            "monitoring-proposal-"
-            + hashlib.sha256(
-                (snapshot_id + "\x00" + reason_code).encode("utf-8")
-            ).hexdigest()[:24]
-        )
+        timestamp = _utc(created_at)
         existing = connection.execute(
             "SELECT proposal_id, created_at FROM active_proposals "
             "WHERE snapshot_id = ? AND reason_code = ? AND active = 1",
@@ -810,6 +783,31 @@ class MonitoringStore:
                 created_at=str(existing[1]),
                 deduplicated=True,
             )
+        return MonitoringStore._create_active_proposal(
+            connection,
+            snapshot_id,
+            reason_code,
+            timestamp,
+            generation=0,
+        )
+
+    @staticmethod
+    def _create_active_proposal(
+        connection: sqlite3.Connection,
+        snapshot_id: str,
+        reason_code: str,
+        created_at: datetime,
+        *,
+        generation: int,
+    ) -> ActiveProposal:
+        identity = snapshot_id + "\x00" + reason_code
+        if generation:
+            identity += "\x00" + str(generation)
+        proposal_id = (
+            "monitoring-proposal-"
+            + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        )
+        timestamp = _utc(created_at).isoformat()
         connection.execute(
             "INSERT INTO active_proposals("
             "proposal_id, snapshot_id, reason_code, created_at, active"
