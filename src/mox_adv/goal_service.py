@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode, urlparse
 
 from mox_adv.control_state import (
     ControlRejected,
@@ -265,9 +266,19 @@ class GoalLifecycleService:
     ) -> GoalTechnicalEvidence:
         candidate = self.store.load_candidate(candidate_id)
         publication = self.store.load_publication(candidate_id)
+        request_url = urlparse(event_evidence.request_url)
         if (
             event_evidence.event != candidate.event
             or event_evidence.selector != candidate.site_location
+            or not event_evidence.trigger_selector
+            or event_evidence.counter_id != candidate.counter_id
+            or event_evidence.http_method != "POST"
+            or request_url.scheme != "https"
+            or request_url.hostname != "mc.yandex.ru"
+            or request_url.port not in {None, 443}
+            or request_url.path != "/watch/" + candidate.counter_id
+            or request_url.query != urlencode({"event": candidate.event})
+            or request_url.fragment
             or event_evidence.emitted_count != 1
             or not event_evidence.intercepted_locally
             or event_evidence.real_network_requests != 0
@@ -330,9 +341,7 @@ class GoalLifecycleService:
         try:
             principal = self.semantic_authenticator.authenticate()
         except ControlRejected as error:
-            raise GoalLifecycleRejected(
-                "SEMANTIC_AUTHENTICATION_FAILED"
-            ) from error
+            raise GoalLifecycleRejected("SEMANTIC_AUTHENTICATION_FAILED") from error
         if (
             not reviewer
             or reviewer != principal.identity
@@ -501,6 +510,9 @@ class GoalLifecycleService:
             site_zone=publication.site_zone,
             event=candidate.event,
             selector=candidate.site_location,
+            trigger_selector=event_evidence.trigger_selector,
+            http_method=event_evidence.http_method,
+            request_url=event_evidence.request_url,
             classification=self._event_classification(candidate.event),
             emitted_count=event_evidence.emitted_count,
             duplicate_event_absent=event_evidence.emitted_count == 1,

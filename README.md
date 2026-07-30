@@ -82,3 +82,29 @@ MOX_ADV_RUN_DOCKER_TESTS=1 PYTHONPATH=src python3 -m unittest tests.test_docker_
 ```
 
 The integration test substitutes a temporary fake Keychain command and never reads a real credential.
+
+## Final read-only E2E
+
+Install the Playwright dependency and Chromium once.
+
+```shell
+python3 -m pip install --requirement requirements-e2e.txt
+python3 -m playwright install chromium
+```
+
+Run the two prototype modules through the local E2E harness.
+
+```shell
+PYTHONPATH=src:. python3 -m mox_adv.cli readonly-e2e \
+  --run-id readonly-e2e-1 \
+  --runs-dir runs
+```
+
+Run the command again with a new run identifier and compare `stability-fingerprint.json`.
+The analytics and optimization workflow uses linked local analytics, the deterministic model fixture, policy, Approval, Mandate, fake readback, monitoring, impact evaluation, idempotency, and the durable kill switch.
+The campaign and goal workflow uses the fake campaign saga, fake compensation, candidate-goal lifecycle, Playwright local interception, technical verification, rejection, and fake cleanup rollback.
+The Python process rejects non-loopback connection and connectionless socket operations.
+Playwright routes HTTP requests, intercepts the Metrica event locally, and keeps every WebSocket route disconnected from an external server.
+The external egress recorder accepts only an exact Direct Reports read through `DIRECT_PROD_READ`; the default E2E run does not load that credential or perform a real read.
+Every write-class method and `reachGoal` remains fake or locally intercepted.
+The final report contains exactly the fourteen normative capabilities and does not claim `CONTROLLED_PILOT` evidence.

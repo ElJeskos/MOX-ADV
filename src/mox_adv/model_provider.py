@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from mox_adv.recommend_contracts import (
     _FACT_EVIDENCE,
@@ -47,16 +48,13 @@ class DeterministicFakeModelProvider:
         status: str,
         action: str,
         explanation: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         limits = projection["policy_limits"]
-        evidence = {
-            field
-            for fact in projection["observed_facts"]
-            for field in _FACT_EVIDENCE[fact]
-        }
+        observed_facts = sorted(projection["observed_facts"])
+        evidence = {field for fact in observed_facts for field in _FACT_EVIDENCE[fact]}
         return {
             "status": status,
-            "observed_facts": list(projection["observed_facts"]),
+            "observed_facts": observed_facts,
             "hypotheses": [{"rank": 1, "code": status + "_CONDITION"}],
             "actions": [
                 {
@@ -71,9 +69,7 @@ class DeterministicFakeModelProvider:
             "expected_effect_direction": (
                 "NO_CHANGE" if action in {"KEEP", "REQUEST_HUMAN_HELP"} else "POSITIVE"
             ),
-            "minimum_observation_window_hours": limits[
-                "observation_window_hours"
-            ],
+            "minimum_observation_window_hours": limits["observation_window_hours"],
             "risks": ["PERFORMANCE_MAY_NOT_IMPROVE"],
             "preconditions": ["POLICY_RECHECK_REQUIRED"],
             "rollback_condition": "KPI_DEGRADES_AFTER_OBSERVATION",
@@ -83,7 +79,7 @@ class DeterministicFakeModelProvider:
         }
 
     @classmethod
-    def _effective(cls, projection: Mapping[str, Any]) -> Dict[str, Any]:
+    def _effective(cls, projection: Mapping[str, Any]) -> dict[str, Any]:
         payload = cls._base(
             projection,
             "EFFECTIVE",
@@ -99,7 +95,7 @@ class DeterministicFakeModelProvider:
         return payload
 
     @classmethod
-    def _ineffective(cls, projection: Mapping[str, Any]) -> Dict[str, Any]:
+    def _ineffective(cls, projection: Mapping[str, Any]) -> dict[str, Any]:
         payload = cls._base(
             projection,
             "INEFFECTIVE",
@@ -113,7 +109,7 @@ class DeterministicFakeModelProvider:
         return payload
 
     @classmethod
-    def _insufficient(cls, projection: Mapping[str, Any]) -> Dict[str, Any]:
+    def _insufficient(cls, projection: Mapping[str, Any]) -> dict[str, Any]:
         payload = cls._base(
             projection,
             "INSUFFICIENT_DATA",
@@ -125,7 +121,7 @@ class DeterministicFakeModelProvider:
         return payload
 
     @classmethod
-    def _needs_human(cls, projection: Mapping[str, Any]) -> Dict[str, Any]:
+    def _needs_human(cls, projection: Mapping[str, Any]) -> dict[str, Any]:
         payload = cls._base(
             projection,
             "NEEDS_HUMAN",

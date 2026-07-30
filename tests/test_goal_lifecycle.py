@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -485,6 +486,12 @@ class GoalLifecycleTests(unittest.TestCase):
             GoalEventEvidence(
                 event="lead_submitted",
                 selector="#lead-form",
+                trigger_selector="#lead-submit",
+                counter_id="sim-test-counter",
+                http_method="POST",
+                request_url=(
+                    "https://mc.yandex.ru/watch/sim-test-counter?event=lead_submitted"
+                ),
                 emitted_count=1,
                 intercepted_locally=True,
                 real_network_requests=0,
@@ -545,6 +552,57 @@ class GoalLifecycleTests(unittest.TestCase):
         )
         self.assertTrue(eligible.optimization_eligible)
 
+    def test_technical_verification_rejects_spoofed_event_binding(self) -> None:
+        candidate = self.publish_test_candidate()
+        valid = GoalEventEvidence(
+            event="lead_submitted",
+            selector="#lead-form",
+            trigger_selector="#lead-submit",
+            counter_id="sim-test-counter",
+            http_method="POST",
+            request_url=(
+                "https://mc.yandex.ru/watch/sim-test-counter?event=lead_submitted"
+            ),
+            emitted_count=1,
+            intercepted_locally=True,
+            real_network_requests=0,
+        )
+        cases = (
+            replace(valid, counter_id="other-counter"),
+            replace(valid, http_method="GET"),
+            replace(
+                valid,
+                request_url=(
+                    "https://mc.yandex.ru/watch/other-counter?event=lead_submitted"
+                ),
+            ),
+            replace(
+                valid,
+                request_url=("https://mc.yandex.ru/watch/sim-test-counter?event=other"),
+            ),
+            replace(
+                valid,
+                request_url=(
+                    "https://mc.yandex.ru/watch/sim-test-counter"
+                    "?event=lead_submitted&ignored="
+                ),
+            ),
+        )
+
+        for evidence in cases:
+            with (
+                self.subTest(evidence=evidence),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "GOAL_EVENT_EVIDENCE_INVALID",
+                ),
+            ):
+                self.service.verify_candidate_delivery(
+                    candidate.candidate_id,
+                    evidence,
+                    now=NOW,
+                )
+
     def test_virtual_polling_is_inconclusive_only_with_external_evidence(self) -> None:
         candidate = self.publish_test_candidate()
         self.goal_adapter.set_visit_observations(
@@ -555,6 +613,12 @@ class GoalLifecycleTests(unittest.TestCase):
         event_evidence = GoalEventEvidence(
             event="lead_submitted",
             selector="#lead-form",
+            trigger_selector="#lead-submit",
+            counter_id="sim-test-counter",
+            http_method="POST",
+            request_url=(
+                "https://mc.yandex.ru/watch/sim-test-counter?event=lead_submitted"
+            ),
             emitted_count=1,
             intercepted_locally=True,
             real_network_requests=0,
@@ -596,6 +660,13 @@ class GoalLifecycleTests(unittest.TestCase):
                 GoalEventEvidence(
                     event="lead_submitted",
                     selector="#lead-form",
+                    trigger_selector="#lead-submit",
+                    counter_id="sim-test-counter",
+                    http_method="POST",
+                    request_url=(
+                        "https://mc.yandex.ru/watch/sim-test-counter"
+                        "?event=lead_submitted"
+                    ),
                     emitted_count=1,
                     intercepted_locally=True,
                     real_network_requests=0,

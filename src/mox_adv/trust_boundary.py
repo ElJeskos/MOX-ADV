@@ -9,10 +9,11 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Any, Protocol
 
 from mox_adv.audit import (
     AuditAnchorSigner,
@@ -107,7 +108,16 @@ _SECRET_SCAN_CHANNELS = frozenset(
 )
 
 
-def _flatten_strings(value: Any) -> Tuple[str, ...]:
+def required_capability_contract() -> Mapping[str, tuple[str, ...]]:
+    """Return the normative capability order and acceptance-case bindings."""
+
+    return {
+        capability: _CAPABILITY_ACCEPTANCE_CASES[capability]
+        for capability in _REQUIRED_CAPABILITIES
+    }
+
+
+def _flatten_strings(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,)
     if isinstance(value, Mapping):
@@ -185,7 +195,7 @@ class AuditGuardedFakeWriteAdapter:
         journal: SQLiteAuditJournal,
         signer: AuditAnchorSigner,
         anchor: SignedAuditAnchor,
-        expected_pre_write_hash: Optional[str],
+        expected_pre_write_hash: str | None,
         *,
         maximum_anchor_age: timedelta,
         clock: Callable[[], datetime],
@@ -330,7 +340,7 @@ class DurablePreWriteAudit:
         anchor_path = self.root / (digest + ".anchor.json")
         if journal_path.exists() or anchor_path.exists():
             raise AuditWriteBlocked("PRE_WRITE_AUDIT_ALREADY_EXISTS")
-        journal: Optional[SQLiteAuditJournal] = None
+        journal: SQLiteAuditJournal | None = None
         try:
             journal = SQLiteAuditJournal(
                 journal_path,
@@ -412,7 +422,7 @@ class SecretCanaryScanner:
         *,
         channels: Mapping[str, str],
         artifact_paths: Sequence[Path],
-    ) -> Tuple[str, ...]:
+    ) -> tuple[str, ...]:
         missing_channels = _SECRET_SCAN_CHANNELS.difference(channels)
         if missing_channels:
             raise ValueError(
@@ -434,9 +444,9 @@ class CapabilityEvidence:
     capability: str
     status: str
     evidence_type: str
-    acceptance_cases: Tuple[str, ...]
-    evidence_paths: Tuple[str, ...]
-    limitations: Tuple[str, ...]
+    acceptance_cases: tuple[str, ...]
+    evidence_paths: tuple[str, ...]
+    limitations: tuple[str, ...]
 
     def as_dict(self) -> Mapping[str, Any]:
         if self.capability not in _REQUIRED_CAPABILITIES:
@@ -527,7 +537,7 @@ def build_run_capability_evidence(
     *,
     mode: str,
     status: str,
-) -> Tuple[CapabilityEvidence, ...]:
+) -> tuple[CapabilityEvidence, ...]:
     """Describe every normative capability without overclaiming local evidence."""
 
     exercised = (

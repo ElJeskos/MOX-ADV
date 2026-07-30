@@ -14,6 +14,10 @@ from mox_adv.goal_contracts import GoalTechnicalStatus
 class GoalEventEvidence:
     event: str
     selector: str
+    trigger_selector: str
+    counter_id: str
+    http_method: str
+    request_url: str
     emitted_count: int
     intercepted_locally: bool
     real_network_requests: int
@@ -28,6 +32,9 @@ class GoalTechnicalEvidence:
     site_zone: str
     event: str
     selector: str
+    trigger_selector: str
+    http_method: str
+    request_url: str
     classification: str
     emitted_count: int
     duplicate_event_absent: bool

@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
+from typing import Any, Protocol
 
 from mox_adv.autonomy import (
     DurableMandateAuthority,
@@ -118,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
     mandate_revoke = mandate_operations.add_parser("revoke")
     mandate_revoke.add_argument("--mandate-id", required=True)
     mandate_revoke.add_argument("--reason", required=True)
+    e2e_parser = subparsers.add_parser(
+        "readonly-e2e",
+        help="run both prototype modules with sealed writes and local interception",
+    )
+    e2e_parser.add_argument("--run-id", required=True)
+    e2e_parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
     return parser
 
 
@@ -170,11 +177,11 @@ def _default_mandate_authority(
 
 
 def main(
-    argv: Optional[Sequence[str]] = None,
+    argv: Sequence[str] | None = None,
     *,
-    control_state: Optional[DurableControlState] = None,
-    mandate_authority: Optional[DurableMandateAuthority] = None,
-    authenticator: Optional[PrincipalAuthenticator] = None,
+    control_state: DurableControlState | None = None,
+    mandate_authority: DurableMandateAuthority | None = None,
+    authenticator: PrincipalAuthenticator | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> int:
     parser = build_parser()
@@ -199,6 +206,12 @@ def main(
             policy_path=arguments.policy,
         )
         return _print_outcome(outcome)
+    if arguments.command == "readonly-e2e":
+        from mox_adv.e2e_runner import run_readonly_e2e
+
+        run_directory = run_readonly_e2e(arguments.runs_dir, arguments.run_id)
+        print(run_directory)
+        return 0
     if arguments.command in {"approval", "kill-switch", "mandate"}:
         state = _default_control_state() if control_state is None else control_state
         identity = (
@@ -312,3 +325,7 @@ def main(
             return 2
     parser.error("Unsupported command.")
     return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
