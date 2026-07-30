@@ -72,6 +72,12 @@ from mox_adv.module_api.v1.goal_lifecycle_contracts import (
     PublishGoalEventCommandV1,
     VerifyGoalDeliveryCommandV1,
 )
+from mox_adv.module_api.v1.impact_contracts import (
+    IMPACT_EVALUATION_COMMAND_SCHEMA_VERSION,
+    IMPACT_NEXT_DECISIONS,
+    ImpactEvaluationCommandV1,
+    ImpactEvaluationOutcomeV1,
+)
 
 __all__ = [
     "EXTERNAL_EVIDENCE_SCHEMA_VERSION",
@@ -82,6 +88,8 @@ __all__ = [
     "DIRECT_ACTION_COMMAND_SCHEMA_VERSION",
     "GOAL_CANDIDATE_INPUT_SCHEMA_VERSION",
     "GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION",
+    "IMPACT_EVALUATION_COMMAND_SCHEMA_VERSION",
+    "IMPACT_NEXT_DECISIONS",
     "MODULE_REQUEST_SCHEMA_VERSION",
     "MODULE_RESULT_SCHEMA_VERSION",
     "OPERATION_TYPES_BY_KIND",
@@ -108,6 +116,8 @@ __all__ = [
     "HttpJsonResponseV1",
     "InProcessModuleAdapterV1",
     "InMemoryDecisionRecordStoreV1",
+    "ImpactEvaluationCommandV1",
+    "ImpactEvaluationOutcomeV1",
     "MODULE_DECISION_RECORD_SCHEMA_VERSION",
     "MetricValueV1",
     "ModuleAssessmentV1",

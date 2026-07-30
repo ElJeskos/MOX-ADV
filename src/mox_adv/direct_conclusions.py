@@ -291,7 +291,7 @@ def evaluate_direct_conditions(
 def direct_hypotheses(
     calculated: Mapping[str, DirectMetric],
 ) -> Tuple[ModuleHypothesisV1, ...]:
-    hypotheses = []
+    hypotheses: list[ModuleHypothesisV1] = []
     ctr = _decimal(calculated["ctr_percent"])
     utilization = _decimal(calculated["budget_utilization_percent"])
     pacing = _decimal(calculated["pacing_percent"])
@@ -302,6 +302,7 @@ def direct_hypotheses(
     ):
         hypotheses.append(
             ModuleHypothesisV1(
+                rank=len(hypotheses) + 1,
                 code="LOW_CTR_MAY_REFLECT_AD_RELEVANCE",
                 summary=(
                     "Low CTR may indicate that the ad or targeting does not "
@@ -313,6 +314,7 @@ def direct_hypotheses(
     if utilization is not None and utilization >= Decimal(90):
         hypotheses.append(
             ModuleHypothesisV1(
+                rank=len(hypotheses) + 1,
                 code="BUDGET_PRESSURE_MAY_LIMIT_DELIVERY",
                 summary=(
                     "High budget utilization may limit campaign delivery "
@@ -327,6 +329,7 @@ def direct_hypotheses(
     if pacing is not None and pacing >= Decimal(120):
         hypotheses.append(
             ModuleHypothesisV1(
+                rank=len(hypotheses) + 1,
                 code="SPEND_MAY_BE_AHEAD_OF_PACING",
                 summary=(
                     "Spend may be progressing faster than the current weekly "
@@ -342,6 +345,7 @@ def direct_hypotheses(
     if not hypotheses:
         hypotheses.append(
             ModuleHypothesisV1(
+                rank=1,
                 code="DIRECT_TRAFFIC_EFFICIENCY_STABLE",
                 summary=(
                     "The available Direct-native traffic metrics do not cross "

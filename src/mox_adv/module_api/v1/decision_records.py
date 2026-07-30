@@ -29,6 +29,7 @@ from mox_adv.module_api.v1.contracts import (
     ModuleRequestV1,
     ModuleStatus,
 )
+from mox_adv.module_api.v1.impact_contracts import ImpactEvaluationOutcomeV1
 
 MODULE_DECISION_RECORD_SCHEMA_VERSION = "module-decision-record-v1"
 
@@ -52,6 +53,7 @@ class ModuleDecisionFactsV1:
     hypotheses: Tuple[ModuleHypothesisV1, ...] = ()
     lifecycle_outcome: GoalLifecycleOutcomeV1 | None = None
     campaign_creation_outcome: CampaignCreationOutcomeV1 | None = None
+    impact_outcome: ImpactEvaluationOutcomeV1 | None = None
 
     def as_dict(self) -> Dict[str, Any]:
         value = {
@@ -67,6 +69,8 @@ class ModuleDecisionFactsV1:
             value["campaign_creation_outcome"] = (
                 self.campaign_creation_outcome.as_dict()
             )
+        if self.impact_outcome is not None:
+            value["impact_outcome"] = self.impact_outcome.as_dict()
         return value
 
 

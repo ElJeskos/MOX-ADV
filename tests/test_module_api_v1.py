@@ -122,6 +122,33 @@ def successful_result_payload() -> dict[str, Any]:
     }
 
 
+def impact_request_payload() -> dict[str, Any]:
+    payload = valid_request_payload()
+    payload.pop("external_evidence")
+    scope = payload["scope"]
+    assert isinstance(scope, dict)
+    scope["account_id"] = "sim-account"
+    scope["campaign_id"] = "sim-campaign"
+    payload["operation"] = {
+        "kind": "ANALYZE",
+        "operation_type": "EVALUATE_IMPACT",
+    }
+    fixture = json.loads(
+        (
+            ROOT
+            / "fixtures"
+            / "impact"
+            / "IMPACT_CPA_IMPROVED_KEEP.json"
+        ).read_text(encoding="utf-8")
+    )
+    payload["impact_evaluation_command"] = {
+        "schema_version": "direct-impact-evaluation-command-v1",
+        "command": "EVALUATE_IMPACT",
+        **fixture,
+    }
+    return payload
+
+
 class RecordingModule:
     def __init__(self, module_id: str) -> None:
         self.identity = ModuleIdentityV1(
@@ -192,6 +219,27 @@ class ModuleRequestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ContractValidationError,
             "must be an object when present",
+        ):
+                ModuleRequestV1.from_dict(payload)
+
+    def test_impact_request_is_typed_closed_and_cannot_mix_raw_evidence(
+        self,
+    ) -> None:
+        payload = impact_request_payload()
+
+        request = ModuleRequestV1.from_dict(payload)
+
+        self.assertEqual(payload, request.as_dict())
+        command = payload["impact_evaluation_command"]
+        assert isinstance(command, dict)
+        command["raw_yandex_payload"] = {"anything": "unsafe"}
+        with self.assertRaisesRegex(ContractValidationError, "unexpected field"):
+            ModuleRequestV1.from_dict(payload)
+        command.pop("raw_yandex_payload")
+        payload["external_evidence"] = valid_request_payload()["external_evidence"]
+        with self.assertRaisesRegex(
+            ContractValidationError,
+            "cannot contain external_evidence",
         ):
             ModuleRequestV1.from_dict(payload)
 
@@ -465,6 +513,39 @@ class OpenAPIContractTests(unittest.TestCase):
             "hypotheses",
             schemas["ModuleResultV1"]["required"],
         )
+        self.assertEqual(
+            {"minimum": 1, "maximum": 3},
+            {
+                key: schemas["ModuleHypothesisV1"]["properties"]["rank"][key]
+                for key in ("minimum", "maximum")
+            },
+        )
+
+    def test_openapi_publishes_the_typed_impact_contract(self) -> None:
+        document = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+        schemas = document["components"]["schemas"]
+
+        self.assertEqual(
+            {"$ref": "#/components/schemas/ImpactEvaluationCommandV1"},
+            schemas["ModuleRequestV1"]["properties"][
+                "impact_evaluation_command"
+            ],
+        )
+        self.assertEqual(
+            {"$ref": "#/components/schemas/ImpactEvaluationOutcomeV1"},
+            schemas["ModuleResultV1"]["properties"]["impact_outcome"],
+        )
+        self.assertEqual(
+            [
+                "KEEP_CHANGE",
+                "ROLLBACK_CHANGE",
+                "ADJUST_CHANGE",
+                "ESCALATE_TO_HUMAN",
+            ],
+            schemas["ImpactEvaluationOutcomeV1"]["properties"][
+                "next_decision"
+            ]["enum"],
+        )
 
     def test_openapi_publishes_the_typed_goal_lifecycle_contract(self) -> None:
         document = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
@@ -523,7 +604,7 @@ class OpenAPIContractTests(unittest.TestCase):
                 identifier_schema["pattern"],
             )
         self.assertEqual(
-            4,
+            6,
             len(schemas["ModuleRequestV1"]["allOf"]),
         )
 

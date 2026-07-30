@@ -607,6 +607,28 @@ class MonitoringStore:
                 raise MonitoringRejected("Scheduler poll claim was lost.")
         return snapshot_version, proposals
 
+    def activate_proposal(
+        self,
+        snapshot_id: str,
+        reason_code: str,
+        created_at: datetime,
+    ) -> ActiveProposal:
+        """Reuse the durable Decision Trigger uniqueness rule outside polling."""
+
+        timestamp = _utc(created_at)
+        if not snapshot_id or not reason_code:
+            raise MonitoringRejected(
+                "Decision Trigger requires a snapshot and reason."
+            )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._active_proposal(
+                connection,
+                snapshot_id,
+                reason_code,
+                timestamp,
+            )
+
     @staticmethod
     def _save_snapshot(
         connection: sqlite3.Connection,

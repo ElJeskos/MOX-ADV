@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
 from mox_adv.direct_analysis import (
     DIRECT_IDENTITY,
@@ -44,12 +44,14 @@ class DirectModuleV1(BoundProviderModuleV1):
         provider_reader: Optional[AuthorizedDirectReadProviderV1] = None,
         action_runtime: Optional["DirectActionRuntimeV1"] = None,
         campaign_creation_runtime: Optional["DirectCampaignCreationRuntimeV1"] = None,
+        impact_policy: Optional[Mapping[str, Any]] = None,
         environment: ExecutionEnvironment = ExecutionEnvironment.PRODUCTION,
     ) -> None:
         if implementation is not None and (
             provider_reader is not None
             or action_runtime is not None
             or campaign_creation_runtime is not None
+            or impact_policy is not None
         ):
             raise ContractValidationError(
                 "Direct cannot combine a legacy implementation "
@@ -91,8 +93,18 @@ class DirectModuleV1(BoundProviderModuleV1):
                     campaign_creation_runtime,
                 )
             )
+            impact_evaluation = (
+                None
+                if impact_policy is None
+                else self._impact_service(impact_policy)
+            )
 
             def invoke(request: ModuleRequestV1) -> ModuleResultV1:
+                if (
+                    impact_evaluation is not None
+                    and request.operation.operation_type == "EVALUATE_IMPACT"
+                ):
+                    return impact_evaluation(request)
                 if (
                     campaign_creation is not None
                     and request.operation.operation_type == "CREATE_CAMPAIGN"
@@ -136,6 +148,17 @@ class DirectModuleV1(BoundProviderModuleV1):
             decision_records=self.decision_records,
             provider_reader=provider_reader,
             runtime=action_runtime,
+        ).invoke
+
+    def _impact_service(
+        self,
+        policy: Mapping[str, Any],
+    ) -> Callable[[ModuleRequestV1], ModuleResultV1]:
+        from mox_adv.direct_impact import StandaloneDirectImpactEvaluationV1
+
+        return StandaloneDirectImpactEvaluationV1(
+            policy=policy,
+            decision_records=self.decision_records,
         ).invoke
 
     def _block_campaign_creation(

@@ -61,6 +61,10 @@ from mox_adv.module_api.v1.goal_lifecycle_contracts import (
     GoalLifecycleCommandV1,
     GoalLifecycleOutcomeV1,
 )
+from mox_adv.module_api.v1.impact_contracts import (
+    ImpactEvaluationCommandV1,
+    ImpactEvaluationOutcomeV1,
+)
 
 MODULE_REQUEST_SCHEMA_VERSION = "module-request-v1"
 MODULE_RESULT_SCHEMA_VERSION = "module-result-v1"
@@ -409,6 +413,7 @@ class ModuleRequestV1:
     goal_lifecycle_command: Optional[GoalLifecycleCommandV1] = None
     direct_action_command: Optional[DirectActionCommandV1] = None
     campaign_creation_command: Optional[CreateCampaignCommandV1] = None
+    impact_evaluation_command: Optional[ImpactEvaluationCommandV1] = None
 
     def __post_init__(self) -> None:
         _one_of(
@@ -511,6 +516,24 @@ class ModuleRequestV1:
                 raise ContractValidationError(
                     "idempotency_key must equal campaign_creation_command.execution_key"
                 )
+        is_impact_evaluation = (
+            self.operation.kind == "ANALYZE"
+            and self.operation.operation_type == "EVALUATE_IMPACT"
+        )
+        if is_impact_evaluation != (self.impact_evaluation_command is not None):
+            raise ContractValidationError(
+                "impact_evaluation_command is required only for an ANALYZE "
+                "EVALUATE_IMPACT operation"
+            )
+        if self.impact_evaluation_command is not None:
+            if self.external_evidence is not None:
+                raise ContractValidationError(
+                    "impact evaluation requests cannot contain external_evidence"
+                )
+            if self.scope.account_id is None or self.scope.campaign_id is None:
+                raise ContractValidationError(
+                    "impact evaluation requests require an account and campaign"
+                )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleRequestV1":
@@ -533,12 +556,14 @@ class ModuleRequestV1:
                 "goal_lifecycle_command",
                 "direct_action_command",
                 "campaign_creation_command",
+                "impact_evaluation_command",
             ),
         )
         external_evidence = value.get("external_evidence")
         goal_lifecycle_command = value.get("goal_lifecycle_command")
         direct_action_command = value.get("direct_action_command")
         campaign_creation_command = value.get("campaign_creation_command")
+        impact_evaluation_command = value.get("impact_evaluation_command")
         if "external_evidence" in value and external_evidence is None:
             raise ContractValidationError(
                 "external_evidence must be an object when present"
@@ -602,6 +627,16 @@ class ModuleRequestV1:
                     )
                 )
             ),
+            impact_evaluation_command=(
+                None
+                if impact_evaluation_command is None
+                else ImpactEvaluationCommandV1.from_dict(
+                    _object(
+                        impact_evaluation_command,
+                        "impact_evaluation_command",
+                    )
+                )
+            ),
         )
 
     def as_dict(self) -> Dict[str, Any]:
@@ -624,6 +659,10 @@ class ModuleRequestV1:
         if self.campaign_creation_command is not None:
             value["campaign_creation_command"] = (
                 self.campaign_creation_command.as_dict()
+            )
+        if self.impact_evaluation_command is not None:
+            value["impact_evaluation_command"] = (
+                self.impact_evaluation_command.as_dict()
             )
         return value
 
@@ -726,8 +765,17 @@ class ModuleHypothesisV1:
     code: str
     summary: str
     evidence_metric_names: Tuple[str, ...]
+    rank: int = 1
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.rank, bool)
+            or not isinstance(self.rank, int)
+            or not 1 <= self.rank <= 3
+        ):
+            raise ContractValidationError(
+                "hypothesis.rank must be an integer from 1 to 3"
+            )
         _text(self.code, "hypothesis.code", maximum=128)
         _text(self.summary, "hypothesis.summary", maximum=1_000)
         if not self.evidence_metric_names:
@@ -751,9 +799,10 @@ class ModuleHypothesisV1:
         _exact_fields(
             value,
             field=field,
-            required=("code", "summary", "evidence_metric_names"),
+            required=("rank", "code", "summary", "evidence_metric_names"),
         )
         return cls(
+            rank=value["rank"],
             code=_text(value["code"], f"{field}.code", maximum=128),
             summary=_text(value["summary"], f"{field}.summary", maximum=1_000),
             evidence_metric_names=tuple(
@@ -767,6 +816,7 @@ class ModuleHypothesisV1:
 
     def as_dict(self) -> Dict[str, Any]:
         return {
+            "rank": self.rank,
             "code": self.code,
             "summary": self.summary,
             "evidence_metric_names": list(self.evidence_metric_names),
@@ -820,6 +870,12 @@ class ModuleProposalV1:
     proposal_id: str
     operation_type: str
     status: str
+    snapshot_id: Optional[str] = None
+    reason_code: Optional[str] = None
+    deduplicated: Optional[bool] = None
+    cooldown_hours: Optional[int] = None
+    observation_window_hours: Optional[int] = None
+    hypotheses: Tuple[ModuleHypothesisV1, ...] = ()
 
     def __post_init__(self) -> None:
         _one_of(
@@ -827,6 +883,52 @@ class ModuleProposalV1:
             "proposal.status",
             ("PROPOSED", "DRY_RUN"),
         )
+        trigger_fields = (
+            self.snapshot_id,
+            self.reason_code,
+            self.deduplicated,
+            self.cooldown_hours,
+            self.observation_window_hours,
+        )
+        if any(item is not None for item in trigger_fields) and not all(
+            item is not None for item in trigger_fields
+        ):
+            raise ContractValidationError(
+                "proposal trigger fields must be supplied together"
+            )
+        if self.snapshot_id is not None:
+            _text(self.snapshot_id, "proposal.snapshot_id", maximum=128)
+            _text(self.reason_code, "proposal.reason_code", maximum=128)
+            if not isinstance(self.deduplicated, bool):
+                raise ContractValidationError(
+                    "proposal.deduplicated must be boolean"
+                )
+            if (
+                isinstance(self.cooldown_hours, bool)
+                or not isinstance(self.cooldown_hours, int)
+                or self.cooldown_hours < 1
+            ):
+                raise ContractValidationError(
+                    "proposal.cooldown_hours must be a positive integer"
+                )
+            if (
+                isinstance(self.observation_window_hours, bool)
+                or not isinstance(self.observation_window_hours, int)
+                or self.observation_window_hours < 1
+            ):
+                raise ContractValidationError(
+                    "proposal.observation_window_hours must be a positive integer"
+                )
+        if len(self.hypotheses) > 3:
+            raise ContractValidationError(
+                "proposal must contain at most three hypotheses"
+            )
+        if tuple(item.rank for item in self.hypotheses) != tuple(
+            range(1, len(self.hypotheses) + 1)
+        ):
+            raise ContractValidationError(
+                "proposal hypotheses must use consecutive ranks"
+            )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleProposalV1":
@@ -834,6 +936,23 @@ class ModuleProposalV1:
             value,
             field="proposal",
             required=("proposal_id", "operation_type", "status"),
+            optional=(
+                "snapshot_id",
+                "reason_code",
+                "deduplicated",
+                "cooldown_hours",
+                "observation_window_hours",
+                "hypotheses",
+            ),
+        )
+        hypotheses = tuple(
+            ModuleHypothesisV1.from_dict(
+                _object(item, f"proposal.hypotheses[{index}]"),
+                field=f"proposal.hypotheses[{index}]",
+            )
+            for index, item in enumerate(
+                _array(value.get("hypotheses", ()), "proposal.hypotheses")
+            )
         )
         return cls(
             proposal_id=_text(
@@ -851,14 +970,43 @@ class ModuleProposalV1:
                 "proposal.status",
                 maximum=32,
             ),
+            snapshot_id=_optional_text(
+                value.get("snapshot_id"),
+                "proposal.snapshot_id",
+                maximum=128,
+            ),
+            reason_code=_optional_text(
+                value.get("reason_code"),
+                "proposal.reason_code",
+                maximum=128,
+            ),
+            deduplicated=value.get("deduplicated"),
+            cooldown_hours=value.get("cooldown_hours"),
+            observation_window_hours=value.get("observation_window_hours"),
+            hypotheses=hypotheses,
         )
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        value: Dict[str, Any] = {
             "proposal_id": self.proposal_id,
             "operation_type": self.operation_type,
             "status": self.status,
         }
+        if self.snapshot_id is not None:
+            value.update(
+                {
+                    "snapshot_id": self.snapshot_id,
+                    "reason_code": self.reason_code,
+                    "deduplicated": self.deduplicated,
+                    "cooldown_hours": self.cooldown_hours,
+                    "observation_window_hours": self.observation_window_hours,
+                }
+            )
+        if self.hypotheses:
+            value["hypotheses"] = [
+                hypothesis.as_dict() for hypothesis in self.hypotheses
+            ]
+        return value
 
 
 @dataclass(frozen=True)
@@ -1073,6 +1221,7 @@ class ModuleResultV1:
     hypotheses: Tuple[ModuleHypothesisV1, ...] = ()
     lifecycle_outcome: Optional[GoalLifecycleOutcomeV1] = None
     campaign_creation_outcome: Optional[CampaignCreationOutcomeV1] = None
+    impact_outcome: Optional[ImpactEvaluationOutcomeV1] = None
 
     def __post_init__(self) -> None:
         _one_of(
@@ -1099,6 +1248,14 @@ class ModuleResultV1:
             raise ContractValidationError(
                 "result cannot contain both lifecycle outcomes"
             )
+        if self.impact_outcome is not None and (
+            self.lifecycle_outcome is not None
+            or self.campaign_creation_outcome is not None
+            or self.execution_result is not None
+        ):
+            raise ContractValidationError(
+                "impact_outcome cannot be combined with execution or lifecycle outcomes"
+            )
         if status in ("BLOCKED", "REJECTED", "FAILED") and not self.errors:
             raise ContractValidationError(
                 f"result.errors must not be empty when status is {status}"
@@ -1106,6 +1263,12 @@ class ModuleResultV1:
         if len(self.hypotheses) > 3:
             raise ContractValidationError(
                 "result must contain at most three hypotheses"
+            )
+        if tuple(item.rank for item in self.hypotheses) != tuple(
+            range(1, len(self.hypotheses) + 1)
+        ):
+            raise ContractValidationError(
+                "result hypotheses must use consecutive ranks"
             )
         metric_names = {metric.name for metric in self.metrics}
         for hypothesis in self.hypotheses:
@@ -1117,6 +1280,11 @@ class ModuleResultV1:
             if unknown:
                 raise ContractValidationError(
                     "hypothesis references an unknown metric: " + sorted(unknown)[0]
+                )
+        if self.proposal is not None and self.proposal.hypotheses:
+            if self.proposal.hypotheses != self.hypotheses:
+                raise ContractValidationError(
+                    "proposal hypotheses must match result hypotheses"
                 )
 
     @classmethod
@@ -1144,12 +1312,14 @@ class ModuleResultV1:
                 "hypotheses",
                 "lifecycle_outcome",
                 "campaign_creation_outcome",
+                "impact_outcome",
             ),
         )
         proposal_value = value.get("proposal")
         execution_value = value.get("execution_result")
         lifecycle_outcome = value.get("lifecycle_outcome")
         campaign_creation_outcome = value.get("campaign_creation_outcome")
+        impact_outcome = value.get("impact_outcome")
         errors = tuple(
             ModuleErrorV1.from_dict(
                 _object(item, f"errors[{index}]"),
@@ -1248,6 +1418,13 @@ class ModuleResultV1:
                         campaign_creation_outcome,
                         "campaign_creation_outcome",
                     )
+                )
+            ),
+            impact_outcome=(
+                None
+                if impact_outcome is None
+                else ImpactEvaluationOutcomeV1.from_dict(
+                    _object(impact_outcome, "impact_outcome")
                 )
             ),
         )
@@ -1369,4 +1546,6 @@ class ModuleResultV1:
             value["campaign_creation_outcome"] = (
                 self.campaign_creation_outcome.as_dict()
             )
+        if self.impact_outcome is not None:
+            value["impact_outcome"] = self.impact_outcome.as_dict()
         return value

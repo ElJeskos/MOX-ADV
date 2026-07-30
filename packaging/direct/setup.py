@@ -27,6 +27,7 @@ PACKAGE_MODULES = {
         "direct_analysis",
         "direct_campaign_creation",
         "direct_conclusions",
+        "direct_impact",
         "direct_metrics",
         "direct_management",
         "direct_provider",
@@ -35,6 +36,7 @@ PACKAGE_MODULES = {
         "errors",
         "fake_write_adapter",
         "interrupt_state",
+        "impact",
         "module_analysis",
         "monitoring",
         "normalization",
@@ -54,6 +56,7 @@ PACKAGE_MODULES = {
         "decision_records",
         "direct_action_contracts",
         "goal_lifecycle_contracts",
+        "impact_contracts",
     },
     "mox_adv.modules": {"__init__", "_bound", "direct"},
 }

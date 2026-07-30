@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, Optional, Tuple
@@ -29,6 +27,7 @@ from mox_adv.module_api.v1 import (
 
 SUPPORTED_ACTION = OptimizationAction.INCREASE_WEEKLY_BUDGET
 ACTION_OPERATION_TYPE = "APPLY_OPTIMIZATION"
+TRIGGER_REASON_CODE = "BUDGET_UTILIZATION_AT_OR_ABOVE_THRESHOLD"
 
 
 @dataclass(frozen=True)
@@ -129,23 +128,6 @@ def proposal_projection(
     }
 
 
-def proposal_id(
-    request: ModuleRequestV1,
-    command: PlanDirectActionCommandV1,
-) -> str:
-    canonical = json.dumps(
-        {
-            "idempotency_key": request.idempotency_key,
-            "scope": request.scope.as_dict(),
-            "command": command.as_dict(),
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return "direct-action-" + digest[:32]
-
-
 def trusted_scope(
     runtime: DirectActionRuntimeV1,
     request: ModuleRequestV1,
@@ -169,13 +151,16 @@ def result_metrics(
     return (
         MetricValueV1("impressions", calculated["impressions"], "COUNT"),
         MetricValueV1("clicks", calculated["clicks"], "COUNT"),
+        MetricValueV1("cost_micros", calculated["cost_micros"], "MICROS_RUB"),
         MetricValueV1("conversions", calculated["conversions"], "COUNT"),
+        MetricValueV1("ctr_percent", calculated["ctr_percent"], "PERCENT"),
         MetricValueV1("cpa_rub", calculated["cpa_rub"], "RUB"),
         MetricValueV1(
             "budget_utilization_percent",
             calculated["budget_utilization_percent"],
             "PERCENT",
         ),
+        MetricValueV1("pacing_percent", calculated["pacing_percent"], "PERCENT"),
         MetricValueV1(
             "current_weekly_budget_micros",
             current.state.current_weekly_budget_micros,

@@ -199,8 +199,13 @@ class DirectActionExecutionV1:
         operational = self._runtime.state.load_operational_execution_facts(
             prepared.scope,
             now,
-            cooldown_hours=int(
-                self._runtime.policy["timing"]["cooldown_hours"]
+            cooldown_hours=max(
+                int(self._runtime.policy["timing"]["cooldown_hours"]),
+                int(
+                    self._runtime.policy["timing"][
+                        "observation_window_hours"
+                    ]
+                ),
             ),
         )
         return ExecutionFacts(

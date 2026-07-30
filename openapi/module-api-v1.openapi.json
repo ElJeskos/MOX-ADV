@@ -351,6 +351,397 @@
           }
         }
       },
+      "ImpactObservationV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "snapshot_id",
+          "campaign",
+          "period_start",
+          "period_end",
+          "watermarks",
+          "metrics",
+          "comparability_status",
+          "confidence_status"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "campaign": {
+            "type": "string",
+            "minLength": 1
+          },
+          "period_start": {
+            "type": "string",
+            "format": "date"
+          },
+          "period_end": {
+            "type": "string",
+            "format": "date"
+          },
+          "watermarks": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "direct_report",
+              "direct_state",
+              "metrika_report"
+            ],
+            "properties": {
+              "direct_report": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "direct_state": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "metrika_report": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "metrics": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "impressions",
+              "clicks",
+              "cost_micros",
+              "visits",
+              "goal_visits"
+            ],
+            "properties": {
+              "impressions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "clicks": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cost_micros": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "visits": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "goal_visits": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "comparability_status": {
+            "type": "string",
+            "enum": [
+              "COMPARABLE",
+              "PARTIAL",
+              "INCOMPATIBLE"
+            ]
+          },
+          "confidence_status": {
+            "type": "string",
+            "enum": [
+              "READY",
+              "INSUFFICIENT_DATA",
+              "STALE_DATA"
+            ]
+          }
+        }
+      },
+      "ImpactEvaluationCommandV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "command",
+          "fixture_name",
+          "run_id",
+          "change_id",
+          "policy_version",
+          "change_applied_at",
+          "evaluated_at",
+          "baseline",
+          "post_change",
+          "seasonality",
+          "known_interventions",
+          "confounders",
+          "evidence"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "direct-impact-evaluation-command-v1"
+          },
+          "command": {
+            "const": "EVALUATE_IMPACT"
+          },
+          "fixture_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "change_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "policy_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "change_applied_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "evaluated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "baseline": {
+            "$ref": "#/components/schemas/ImpactObservationV1"
+          },
+          "post_change": {
+            "$ref": "#/components/schemas/ImpactObservationV1"
+          },
+          "seasonality": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "known_interventions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          },
+          "confounders": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          }
+        }
+      },
+      "ImpactEvaluationOutcomeV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "policy_version",
+          "run_id",
+          "change_id",
+          "fixture_name",
+          "status",
+          "effect_classification",
+          "baseline",
+          "post_change",
+          "watermarks",
+          "delayed_conversion_cutoff_hours",
+          "observation_window_hours",
+          "seasonality",
+          "known_interventions",
+          "confounders",
+          "metric_changes",
+          "confidence",
+          "evidence",
+          "next_decision"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "impact-report-v1"
+          },
+          "policy_version": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "change_id": {
+            "type": "string"
+          },
+          "fixture_name": {
+            "type": "string"
+          },
+          "status": {
+            "const": "OBSERVED_POST_CHANGE"
+          },
+          "effect_classification": {
+            "const": "OBSERVED_ASSOCIATION"
+          },
+          "baseline": {
+            "$ref": "#/components/schemas/ImpactResultObservationV1"
+          },
+          "post_change": {
+            "$ref": "#/components/schemas/ImpactResultObservationV1"
+          },
+          "watermarks": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "baseline",
+              "post_change"
+            ],
+            "properties": {
+              "baseline": {
+                "$ref": "#/components/schemas/ImpactWatermarksV1"
+              },
+              "post_change": {
+                "$ref": "#/components/schemas/ImpactWatermarksV1"
+              }
+            }
+          },
+          "delayed_conversion_cutoff_hours": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "observation_window_hours": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "seasonality": {
+            "type": "string"
+          },
+          "known_interventions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "confounders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "metric_changes": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "cpa_rub"
+            ],
+            "properties": {
+              "cpa_rub": {
+                "$ref": "#/components/schemas/ImpactMetricChangeV1"
+              }
+            }
+          },
+          "confidence": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "next_decision": {
+            "type": "string",
+            "enum": [
+              "KEEP_CHANGE",
+              "ROLLBACK_CHANGE",
+              "ADJUST_CHANGE",
+              "ESCALATE_TO_HUMAN"
+            ]
+          }
+        }
+      },
+      "ImpactResultObservationV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "snapshot_id",
+          "period_start",
+          "period_end",
+          "cpa_rub"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string"
+          },
+          "period_start": {
+            "type": "string",
+            "format": "date"
+          },
+          "period_end": {
+            "type": "string",
+            "format": "date"
+          },
+          "cpa_rub": {
+            "type": "string"
+          }
+        }
+      },
+      "ImpactWatermarksV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "direct_report",
+          "direct_state",
+          "metrika_report"
+        ],
+        "properties": {
+          "direct_report": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "direct_state": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "metrika_report": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ImpactMetricChangeV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "baseline",
+          "post_change",
+          "improvement",
+          "improvement_percent"
+        ],
+        "properties": {
+          "baseline": {
+            "type": "string"
+          },
+          "post_change": {
+            "type": "string"
+          },
+          "improvement": {
+            "type": "string"
+          },
+          "improvement_percent": {
+            "type": "string"
+          }
+        }
+      },
       "GoalCandidateInputV1": {
         "type": "object",
         "additionalProperties": false,
@@ -872,6 +1263,9 @@
           "campaign_creation_command": {
             "$ref": "#/components/schemas/CreateCampaignCommandV1"
           },
+          "impact_evaluation_command": {
+            "$ref": "#/components/schemas/ImpactEvaluationCommandV1"
+          },
           "operation": {
             "$ref": "#/components/schemas/ModuleOperationV1"
           },
@@ -1006,6 +1400,70 @@
                 ]
               }
             }
+          },
+          {
+            "if": {
+              "properties": {
+                "operation": {
+                  "properties": {
+                    "kind": {
+                      "const": "ANALYZE"
+                    },
+                    "operation_type": {
+                      "const": "EVALUATE_IMPACT"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "operation_type"
+                  ]
+                }
+              },
+              "required": [
+                "operation"
+              ]
+            },
+            "then": {
+              "required": [
+                "impact_evaluation_command"
+              ]
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "impact_evaluation_command"
+              ]
+            },
+            "then": {
+              "properties": {
+                "operation": {
+                  "properties": {
+                    "kind": {
+                      "const": "ANALYZE"
+                    },
+                    "operation_type": {
+                      "const": "EVALUATE_IMPACT"
+                    }
+                  }
+                },
+                "scope": {
+                  "required": [
+                    "account_id",
+                    "campaign_id"
+                  ]
+                }
+              },
+              "required": [
+                "operation",
+                "scope"
+              ],
+              "not": {
+                "required": [
+                  "external_evidence"
+                ]
+              }
+            }
           }
         ]
       },
@@ -1097,11 +1555,17 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
+          "rank",
           "code",
           "summary",
           "evidence_metric_names"
         ],
         "properties": {
+          "rank": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          },
           "code": {
             "type": "string",
             "minLength": 1,
@@ -1149,6 +1613,34 @@
               "PROPOSED",
               "DRY_RUN"
             ]
+          },
+          "snapshot_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "reason_code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "deduplicated": {
+            "type": "boolean"
+          },
+          "cooldown_hours": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "observation_window_hours": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "hypotheses": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "$ref": "#/components/schemas/ModuleHypothesisV1"
+            }
           }
         }
       },
@@ -1693,6 +2185,9 @@
           },
           "campaign_creation_outcome": {
             "$ref": "#/components/schemas/CampaignCreationOutcomeV1"
+          },
+          "impact_outcome": {
+            "$ref": "#/components/schemas/ImpactEvaluationOutcomeV1"
           },
           "provenance": {
             "type": "array",

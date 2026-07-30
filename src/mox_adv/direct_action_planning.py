@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Mapping
+from typing import Mapping, Tuple
 
 from mox_adv.approval_execution import deterministic_action_is_eligible
 from mox_adv.commands import calculate_relative_target
@@ -15,10 +15,10 @@ from mox_adv.control_state import (
 from mox_adv.direct_action_common import (
     ACTION_OPERATION_TYPE,
     SUPPORTED_ACTION,
+    TRIGGER_REASON_CODE,
     DirectActionContext,
     decision_summary,
     eligibility_snapshot,
-    proposal_id,
     proposal_projection,
     result_metrics,
     state_fingerprint,
@@ -26,6 +26,7 @@ from mox_adv.direct_action_common import (
 )
 from mox_adv.direct_action_runtime import DirectActionRuntimeV1
 from mox_adv.direct_analysis import DIRECT_IDENTITY
+from mox_adv.direct_conclusions import direct_hypotheses
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
@@ -34,6 +35,7 @@ from mox_adv.module_api.v1 import (
     ModuleDecisionRecordStoreV1,
     ModuleDecisionV1,
     ModuleErrorV1,
+    ModuleHypothesisV1,
     ModuleProposalV1,
     ModuleRecommendationV1,
     ModuleResultV1,
@@ -74,12 +76,21 @@ class DirectActionPlanningV1:
             return self._policy_rejected(context)
         fingerprint = state_fingerprint(request, current)
         projection = proposal_projection(self._runtime, metrics)
-        identifier = proposal_id(request, command)
+        trigger_store = self._runtime.trigger_store
+        assert trigger_store is not None
+        active_trigger = trigger_store.activate_proposal(
+            fingerprint,
+            TRIGGER_REASON_CODE,
+            now,
+        )
+        identifier = active_trigger.proposal_id
         existing = self._runtime.proposal_store.load_active(
             identifier,
             projection,
             at=now,
         )
+        deduplicated = active_trigger.deduplicated or existing is not None
+        hypotheses = direct_hypotheses(metrics)
         if existing is None:
             proposal = self._new_proposal(
                 identifier,
@@ -87,6 +98,7 @@ class DirectActionPlanningV1:
                 command,
                 projection,
                 now,
+                hypotheses,
             )
             stored = self._runtime.proposal_store.save(
                 proposal,
@@ -100,6 +112,7 @@ class DirectActionPlanningV1:
                 ),
             )
             proposal_hash = stored.canonical_hash
+            deduplicated = deduplicated or stored.deduplicated
         else:
             proposal = existing
             proposal_hash = canonical_hash(proposal.as_dict())
@@ -153,6 +166,7 @@ class DirectActionPlanningV1:
                     assessment=assessment,
                     recommendations=recommendations,
                     provenance=provenance,
+                    hypotheses=hypotheses,
                 ),
             ),
         )
@@ -172,12 +186,23 @@ class DirectActionPlanningV1:
                     if self._runtime.environment is ExecutionEnvironment.TEST
                     else "DRY_RUN"
                 ),
+                snapshot_id=fingerprint,
+                reason_code=TRIGGER_REASON_CODE,
+                deduplicated=deduplicated,
+                cooldown_hours=int(
+                    self._runtime.policy["timing"]["cooldown_hours"]
+                ),
+                observation_window_hours=int(
+                    self._runtime.policy["timing"]["observation_window_hours"]
+                ),
+                hypotheses=hypotheses,
             ),
             execution_result=None,
             provenance=provenance,
             warnings=(),
             errors=(),
             decision_record_ref=receipt.reference,
+            hypotheses=hypotheses,
         )
 
     def _policy_rejected(
@@ -262,6 +287,7 @@ class DirectActionPlanningV1:
         command: PlanDirectActionCommandV1,
         projection: Mapping[str, object],
         now: datetime,
+        hypotheses: Tuple[ModuleHypothesisV1, ...],
     ) -> OptimizationProposalV1:
         return OptimizationProposalV1.from_mapping(
             {
@@ -275,7 +301,13 @@ class DirectActionPlanningV1:
                 "observed_facts": [
                     "BUDGET_UTILIZATION_AT_OR_ABOVE_THRESHOLD"
                 ],
-                "hypotheses": [],
+                "hypotheses": [
+                    {
+                        "rank": hypothesis.rank,
+                        "code": hypothesis.code,
+                    }
+                    for hypothesis in hypotheses
+                ],
                 "actions": [
                     {
                         "action": command.action,

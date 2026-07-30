@@ -22,6 +22,7 @@ PACKAGE_MODULES = {
         "goal_service",
         "goal_store",
         "interrupt_state",
+        "impact",
         "metrika_analysis",
         "metrika_goal_lifecycle",
         "metrika_metrics",
@@ -39,6 +40,7 @@ PACKAGE_MODULES = {
         "decision_records",
         "direct_action_contracts",
         "goal_lifecycle_contracts",
+        "impact_contracts",
     },
     "mox_adv.modules": {"__init__", "_bound", "metrika"},
 }

@@ -145,6 +145,33 @@ def direct_action_plan_request() -> dict[str, Any]:
     return request
 
 
+def direct_impact_request(fixture_name: str) -> dict[str, Any]:
+    request = customer_evidence_request()
+    request.pop("external_evidence")
+    scope = request["scope"]
+    assert isinstance(scope, dict)
+    scope["campaign_id"] = "sim-campaign"
+    request["operation"] = {
+        "kind": "ANALYZE",
+        "operation_type": "EVALUATE_IMPACT",
+    }
+    fixture = json.loads(
+        (
+            ROOT
+            / "fixtures"
+            / "impact"
+            / f"{fixture_name}.json"
+        ).read_text(encoding="utf-8")
+    )
+    request["impact_evaluation_command"] = {
+        "schema_version": "direct-impact-evaluation-command-v1",
+        "command": "EVALUATE_IMPACT",
+        **fixture,
+    }
+    request["idempotency_key"] = "direct-impact-" + fixture_name.lower()
+    return request
+
+
 def campaign_draft_payload() -> dict[str, Any]:
     return {
         "schema_version": "campaign-draft-v1",
@@ -559,6 +586,123 @@ class RecordingDirectStateReader:
 
 
 class StandaloneDirectCustomerE2ETests(unittest.TestCase):
+    def test_customer_evaluates_post_change_impact_in_production_without_write(
+        self,
+    ) -> None:
+        policy = json.loads(
+            (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
+        )
+        decision_records = InMemoryDecisionRecordStoreV1()
+        module = DirectModuleV1(
+            impact_policy=policy,
+            decision_records=decision_records,
+        )
+
+        response = HttpJsonModuleAdapterV1(
+            module,
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(direct_impact_request("IMPACT_MIXED_ADJUST"))
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("SUCCEEDED", response.body["status"])
+        self.assertIsNone(response.body["proposal"])
+        self.assertIsNone(response.body["execution_result"])
+        outcome = response.body["impact_outcome"]
+        self.assertEqual("OBSERVED_POST_CHANGE", outcome["status"])
+        self.assertEqual("ADJUST_CHANGE", outcome["next_decision"])
+        self.assertEqual("READY", outcome["confidence"])
+        self.assertEqual(72, outcome["observation_window_hours"])
+        self.assertEqual(72, outcome["delayed_conversion_cutoff_hours"])
+        self.assertIn("baseline", outcome)
+        self.assertIn("post_change", outcome)
+        self.assertIn("watermarks", outcome)
+        self.assertIn("known_interventions", outcome)
+        self.assertIn("confounders", outcome)
+        record = decision_records.read(response.body["decision_record_ref"])
+        self.assertEqual(outcome, record["facts"]["impact_outcome"])
+
+    def test_headless_impact_exposes_exactly_one_of_four_existing_decisions(
+        self,
+    ) -> None:
+        policy = json.loads(
+            (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
+        )
+        http = HttpJsonModuleAdapterV1(
+            DirectModuleV1(impact_policy=policy),
+            environment=ExecutionEnvironment.PRODUCTION,
+        )
+        expected = {
+            "IMPACT_CPA_IMPROVED_KEEP": "KEEP_CHANGE",
+            "IMPACT_CPA_WORSE_ROLLBACK": "ROLLBACK_CHANGE",
+            "IMPACT_MIXED_ADJUST": "ADJUST_CHANGE",
+            "IMPACT_INCONCLUSIVE_HUMAN": "ESCALATE_TO_HUMAN",
+        }
+
+        for fixture_name, next_decision in expected.items():
+            with self.subTest(fixture_name=fixture_name):
+                response = http.handle(direct_impact_request(fixture_name))
+
+                self.assertEqual(200, response.status_code)
+                self.assertEqual(
+                    next_decision,
+                    response.body["impact_outcome"]["next_decision"],
+                )
+                self.assertEqual(1, len(response.body["recommendations"]))
+                self.assertFalse(
+                    response.body["recommendations"][0]["executable"]
+                )
+
+    def test_impact_is_blocked_until_observation_and_delayed_data_complete(
+        self,
+    ) -> None:
+        policy = json.loads(
+            (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
+        )
+        request = direct_impact_request("IMPACT_CPA_IMPROVED_KEEP")
+        command = request["impact_evaluation_command"]
+        assert isinstance(command, dict)
+        evaluated_at = datetime.fromisoformat(command["evaluated_at"])
+        command["evaluated_at"] = (
+            evaluated_at - timedelta(microseconds=1)
+        ).isoformat()
+
+        response = HttpJsonModuleAdapterV1(
+            DirectModuleV1(impact_policy=policy),
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(422, response.status_code)
+        self.assertEqual("BLOCKED", response.body["status"])
+        self.assertEqual(
+            "DELAYED_CONVERSION_WINDOW_ACTIVE",
+            response.body["errors"][0]["code"],
+        )
+        self.assertNotIn("impact_outcome", response.body)
+        self.assertIsNone(response.body["execution_result"])
+
+    def test_impact_evidence_cannot_cross_the_requested_campaign_scope(
+        self,
+    ) -> None:
+        policy = json.loads(
+            (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
+        )
+        request = direct_impact_request("IMPACT_CPA_IMPROVED_KEEP")
+        scope = request["scope"]
+        assert isinstance(scope, dict)
+        scope["campaign_id"] = "another-campaign"
+
+        response = HttpJsonModuleAdapterV1(
+            DirectModuleV1(impact_policy=policy),
+            environment=ExecutionEnvironment.PRODUCTION,
+        ).handle(request)
+
+        self.assertEqual(422, response.status_code)
+        self.assertEqual(
+            "DIRECT_IMPACT_SCOPE_MISMATCH",
+            response.body["errors"][0]["code"],
+        )
+        self.assertIsNone(response.body["decision_record_ref"])
+
     def _campaign_creation_http(
         self,
         temporary: str,
@@ -1037,11 +1181,35 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             plan_request = direct_action_plan_request()
 
             planned = http.handle(plan_request)
-            planned_duplicate = http.handle(plan_request)
+            duplicate_request = direct_action_plan_request()
+            duplicate_request["idempotency_key"] = "different-customer-request-18"
+            planned_duplicate = http.handle(duplicate_request)
 
             self.assertEqual(200, planned.status_code)
             self.assertEqual("SUCCEEDED", planned.body["status"])
             self.assertEqual("PROPOSED", planned.body["proposal"]["status"])
+            self.assertFalse(planned.body["proposal"]["deduplicated"])
+            self.assertTrue(planned_duplicate.body["proposal"]["deduplicated"])
+            self.assertEqual(
+                "BUDGET_UTILIZATION_AT_OR_ABOVE_THRESHOLD",
+                planned.body["proposal"]["reason_code"],
+            )
+            self.assertEqual(
+                72,
+                planned.body["proposal"]["observation_window_hours"],
+            )
+            self.assertEqual(72, planned.body["proposal"]["cooldown_hours"])
+            hypotheses = planned.body["proposal"]["hypotheses"]
+            self.assertLessEqual(len(hypotheses), 3)
+            self.assertEqual(
+                list(range(1, len(hypotheses) + 1)),
+                [item["rank"] for item in hypotheses],
+            )
+            metric_names = {item["name"] for item in planned.body["metrics"]}
+            for hypothesis in hypotheses:
+                self.assertTrue(
+                    set(hypothesis["evidence_metric_names"]).issubset(metric_names)
+                )
             proposal_id = planned.body["proposal"]["proposal_id"]
             self.assertEqual(
                 proposal_id,
@@ -1242,6 +1410,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
         cases = (
             ("cooldown", "COOLDOWN_ACTIVE"),
+            ("observation_window", "COOLDOWN_ACTIVE"),
             ("quota", "ACTION_QUOTA_REACHED"),
             ("kill_switch", "KILL_SWITCH_ACTIVE"),
             ("unavailable", "CONTROL_STATE_UNAVAILABLE"),
@@ -1252,10 +1421,12 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 policy = json.loads(
                     (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
                 )
-                if case == "quota":
+                if case in {"observation_window", "quota"}:
                     policy["timing"]["cooldown_hours"] = 1
+                if case == "quota":
+                    policy["timing"]["observation_window_hours"] = 1
                 state = DurableControlState(root / "control.sqlite3")
-                if case in {"cooldown", "quota"}:
+                if case in {"cooldown", "observation_window", "quota"}:
                     record_prior_applied_action(
                         state,
                         policy,

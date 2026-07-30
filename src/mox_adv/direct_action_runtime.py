@@ -8,6 +8,7 @@ from typing import Any, Mapping, Optional
 from mox_adv.control_state import DurableControlState
 from mox_adv.environment import ExecutionEnvironment, parse_execution_environment
 from mox_adv.fake_write_adapter import FakeWriteAdapter
+from mox_adv.monitoring import MonitoringStore
 from mox_adv.proposal_store import ImmutableProposalStore
 
 
@@ -20,10 +21,19 @@ class DirectActionRuntimeV1:
     proposal_store: ImmutableProposalStore
     test_adapter: Optional[FakeWriteAdapter]
     environment: ExecutionEnvironment
+    trigger_store: Optional[MonitoringStore] = None
 
     def __post_init__(self) -> None:
         trusted_environment = parse_execution_environment(self.environment)
         object.__setattr__(self, "environment", trusted_environment)
+        if self.trigger_store is None:
+            object.__setattr__(
+                self,
+                "trigger_store",
+                MonitoringStore(
+                    self.proposal_store.root.parent / "monitoring.sqlite3"
+                ),
+            )
         if (
             self.test_adapter is not None
             and type(self.test_adapter) is not FakeWriteAdapter
