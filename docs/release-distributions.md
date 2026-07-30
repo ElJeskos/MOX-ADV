@@ -282,6 +282,10 @@ The builder uses a different temporary egg, build, and wheel tree for every arti
 
 It validates pairwise-disjoint installed paths and exact dependency metadata before publishing the completed wheelhouse atomically.
 
+Publication uses the operating system's atomic no-replace rename on supported macOS and Linux hosts.
+
+If another process creates the requested output pathname before publication, or the filesystem cannot provide atomic no-replace semantics, the builder fails closed and leaves the staged candidate unpublished.
+
 ```shell
 python3 scripts/build_release_distributions.py \
   --version 1.0.1 \

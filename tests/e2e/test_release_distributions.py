@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import selectors
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -13,6 +15,8 @@ import unittest
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from pathlib import Path
@@ -20,6 +24,7 @@ from typing import Any
 
 from playwright.sync_api import sync_playwright
 
+from scripts import build_release_distributions
 from tests.e2e.test_paired_dashboard_regression import (
     EXISTING_ROUTES,
     PRE_MIGRATION_SCREENSHOT_DIGESTS,
@@ -28,6 +33,149 @@ from tests.e2e.test_paired_dashboard_regression import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+EXACT_DASHBOARD_PORT = 8878
+
+
+@contextmanager
+def _exclusive_dashboard_port(
+    port: int = EXACT_DASHBOARD_PORT,
+) -> Iterator[None]:
+    """Serialize exact-port acceptance and prove the port has no owner."""
+
+    lock_path = (
+        Path(tempfile.gettempdir()) / f"mox-adv-dashboard-{port}.lock"
+    )
+    descriptor = os.open(
+        lock_path,
+        os.O_CREAT
+        | os.O_RDWR
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(("127.0.0.1", port))
+                probe.listen(1)
+            except OSError as error:
+                raise AssertionError(
+                    f"Dashboard port {port} is already owned by another process."
+                ) from error
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _assert_child_running(process: subprocess.Popen[str]) -> None:
+    return_code = process.poll()
+    if return_code is not None:
+        raise AssertionError(
+            f"Installed paired Dashboard exited unexpectedly with {return_code}."
+        )
+
+
+def _wait_for_dashboard_ready(
+    process: subprocess.Popen[str],
+    *,
+    timeout: float = 10,
+) -> str:
+    assert process.stdout is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            _assert_child_running(process)
+            if not selector.select(timeout=0.1):
+                continue
+            line = process.stdout.readline()
+            if not line.startswith("MOX-ADV UI: "):
+                continue
+            url = line.removeprefix("MOX-ADV UI: ").strip()
+            expected = f"http://127.0.0.1:{EXACT_DASHBOARD_PORT}"
+            if url != expected:
+                raise AssertionError(
+                    f"Installed paired Dashboard announced {url}, not {expected}."
+                )
+            _assert_child_running(process)
+            return url
+    finally:
+        selector.close()
+    raise AssertionError("Installed paired Dashboard did not announce readiness.")
+
+
+def _read_dashboard_overview(
+    process: subprocess.Popen[str],
+    origin: str,
+    *,
+    timeout: float = 10,
+) -> str:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        _assert_child_running(process)
+        try:
+            with urllib.request.urlopen(
+                origin + "/overview",
+                timeout=0.5,
+            ) as response:
+                page = response.read().decode("utf-8")
+            _assert_child_running(process)
+            return page
+        except (TimeoutError, urllib.error.URLError) as error:
+            last_error = error
+            time.sleep(0.05)
+    raise AssertionError(
+        "Installed paired Dashboard did not serve its overview: "
+        + repr(last_error)
+    )
+
+
+def _terminate_and_capture(
+    process: subprocess.Popen[str],
+) -> tuple[str, str]:
+    if process.poll() is None:
+        process.terminate()
+    try:
+        return process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.communicate(timeout=5)
+
+
+@contextmanager
+def _captured_dashboard_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+) -> Iterator[subprocess.Popen[str]]:
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        text=True,
+    )
+    try:
+        yield process
+        _assert_child_running(process)
+    except BaseException as error:
+        stdout, stderr = _terminate_and_capture(process)
+        raise AssertionError(
+            f"{error}\n"
+            f"Installed paired Dashboard stdout:\n{stdout}\n"
+            f"Installed paired Dashboard stderr:\n{stderr}"
+        ) from error
+    else:
+        _terminate_and_capture(process)
 
 
 def _build_wheel(setup_path: Path, destination: Path) -> Path:
@@ -318,6 +466,99 @@ class ReleaseDistributionTests(unittest.TestCase):
                     _installed_paths(left) & _installed_paths(right),
                 )
 
+    def test_release_publish_never_replaces_concurrently_created_output(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staging = root / "staging"
+            output = root / "wheelhouse"
+            staging.mkdir()
+            (staging / "release-manifest.json").write_text(
+                '{"release":"candidate"}\n',
+                encoding="utf-8",
+            )
+            output.mkdir()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "must not already exist",
+            ):
+                build_release_distributions._publish_release(
+                    staging,
+                    output,
+                )
+
+            self.assertEqual([], list(output.iterdir()))
+            self.assertTrue((staging / "release-manifest.json").is_file())
+
+    def test_dashboard_port_preflight_rejects_an_existing_owner(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as owner:
+            owner.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            owner.bind(("127.0.0.1", 0))
+            owner.listen(1)
+            port = int(owner.getsockname()[1])
+
+            with self.assertRaisesRegex(
+                AssertionError,
+                "already owned",
+            ), _exclusive_dashboard_port(port):
+                self.fail("The occupied port must not be yielded.")
+
+    def test_dashboard_port_lock_serializes_across_processes(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = int(probe.getsockname()[1])
+        lock_path = (
+            Path(tempfile.gettempdir()) / f"mox-adv-dashboard-{port}.lock"
+        )
+        contender = """
+import fcntl
+import os
+import sys
+
+descriptor = os.open(sys.argv[1], os.O_RDWR)
+try:
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("blocked")
+    raise SystemExit(0)
+raise SystemExit("lock unexpectedly acquired")
+"""
+
+        with _exclusive_dashboard_port(port):
+            completed = subprocess.run(
+                [sys.executable, "-c", contender, str(lock_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("blocked\n", completed.stdout)
+
+    def test_dashboard_child_failure_captures_stderr_after_termination(
+        self,
+    ) -> None:
+        child = (
+            "import sys,time;"
+            f"print('MOX-ADV UI: http://127.0.0.1:{EXACT_DASHBOARD_PORT}',"
+            "flush=True);"
+            "print('dashboard-stderr-marker',file=sys.stderr,flush=True);"
+            "time.sleep(30)"
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "dashboard-stderr-marker",
+        ), _captured_dashboard_process(
+            [sys.executable, "-c", child],
+            cwd=ROOT,
+            environment=dict(os.environ),
+        ) as process:
+            _wait_for_dashboard_ready(process)
+            raise AssertionError("forced acceptance failure")
+
     def test_clean_direct_install_starts_http_host_and_returns_module_result(
         self,
     ) -> None:
@@ -575,50 +816,27 @@ class ReleaseDistributionTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(0, installed.returncode, installed.stderr)
-            process = subprocess.Popen(
+            runtime_environment = {
+                name: value
+                for name, value in os.environ.items()
+                if name != "PYTHONPATH"
+            }
+            runtime_environment["PYTHONUNBUFFERED"] = "1"
+            with _exclusive_dashboard_port(), _captured_dashboard_process(
                 [
                     str(environment / "bin" / "mox-adv-paired"),
                     "ui",
                     "--port",
-                    "8878",
+                    str(EXACT_DASHBOARD_PORT),
                     "--runs-dir",
                     str(root / "runs"),
                     "--no-open",
                 ],
                 cwd=root,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                env={
-                    name: value
-                    for name, value in os.environ.items()
-                    if name != "PYTHONPATH"
-                },
-                text=True,
-            )
-            try:
-                deadline = time.monotonic() + 10
-                page = ""
-                last_error: Exception | None = None
-                while time.monotonic() < deadline and not page:
-                    if process.poll() is not None:
-                        break
-                    try:
-                        with urllib.request.urlopen(
-                            "http://127.0.0.1:8878/overview",
-                            timeout=0.5,
-                        ) as response:
-                            page = response.read().decode("utf-8")
-                    except (TimeoutError, urllib.error.URLError) as error:
-                        last_error = error
-                        time.sleep(0.05)
-                if not page:
-                    assert process.stderr is not None
-                    stderr = (
-                        process.stderr.read()
-                        if process.poll() is not None
-                        else repr(last_error)
-                    )
-                    self.fail("paired Dashboard did not start: " + stderr)
+                environment=runtime_environment,
+            ) as process:
+                origin = _wait_for_dashboard_ready(process)
+                page = _read_dashboard_overview(process, origin)
                 self.assertIn('lang="ru"', page)
                 self.assertIn("MOX-ADV", page)
                 page_errors: list[str] = []
@@ -641,50 +859,63 @@ class ReleaseDistributionTests(unittest.TestCase):
                             else None
                         ),
                     )
-                    origin = "http://127.0.0.1:8878"
-                    for route in EXISTING_ROUTES:
-                        response = dashboard.goto(
-                            origin + route,
+                    try:
+                        for route in EXISTING_ROUTES:
+                            _assert_child_running(process)
+                            response = dashboard.goto(
+                                origin + route,
+                                wait_until="networkidle",
+                            )
+                            _assert_child_running(process)
+                            if response is None:
+                                self.fail(
+                                    "Dashboard navigation returned no response."
+                                )
+                            self.assertTrue(response.ok)
+                        _assert_child_running(process)
+                        dashboard.goto(
+                            origin + "/cycle",
                             wait_until="networkidle",
                         )
-                        self.assertIsNotNone(response)
-                        self.assertTrue(response.ok)
-                    dashboard.goto(origin + "/cycle", wait_until="networkidle")
-                    visual_digests = {
-                        "test_initial": _visual_digest(
+                        _assert_child_running(process)
+                        visual_digests = {
+                            "test_initial": _visual_digest(
+                                _stable_screenshot(dashboard)
+                            )
+                        }
+                        dashboard.get_by_role("tab", name="Основной").click()
+                        dashboard.locator("#mode-name").get_by_text(
+                            "Реальные данные",
+                            exact=True,
+                        ).wait_for()
+                        _assert_child_running(process)
+                        visual_digests["production_initial"] = _visual_digest(
                             _stable_screenshot(dashboard)
                         )
-                    }
-                    dashboard.get_by_role("tab", name="Основной").click()
-                    dashboard.locator("#mode-name").get_by_text(
-                        "Реальные данные",
-                        exact=True,
-                    ).wait_for()
-                    visual_digests["production_initial"] = _visual_digest(
-                        _stable_screenshot(dashboard)
-                    )
-                    dashboard.get_by_role("tab", name="Тестовый").click()
-                    dashboard.locator("#mode-name").get_by_text(
-                        "Тестовые данные",
-                        exact=True,
-                    ).wait_for()
-                    dashboard.get_by_role(
-                        "button",
-                        name="Получить предложение",
-                    ).click()
-                    dashboard.get_by_text(
-                        "Предложение готово и ещё не применено",
-                        exact=True,
-                    ).wait_for()
-                    dashboard.locator("#report-run-id").evaluate(
-                        "(element) => {"
-                        " element.textContent = 'ui-reference-run';"
-                        " }"
-                    )
-                    visual_digests["test_result"] = _visual_digest(
-                        _stable_screenshot(dashboard)
-                    )
-                    browser.close()
+                        dashboard.get_by_role("tab", name="Тестовый").click()
+                        dashboard.locator("#mode-name").get_by_text(
+                            "Тестовые данные",
+                            exact=True,
+                        ).wait_for()
+                        dashboard.get_by_role(
+                            "button",
+                            name="Получить предложение",
+                        ).click()
+                        dashboard.get_by_text(
+                            "Предложение готово и ещё не применено",
+                            exact=True,
+                        ).wait_for()
+                        _assert_child_running(process)
+                        dashboard.locator("#report-run-id").evaluate(
+                            "(element) => {"
+                            " element.textContent = 'ui-reference-run';"
+                            " }"
+                        )
+                        visual_digests["test_result"] = _visual_digest(
+                            _stable_screenshot(dashboard)
+                        )
+                    finally:
+                        browser.close()
                 self.assertEqual([], page_errors)
                 application_console_errors = [
                     message
@@ -699,12 +930,7 @@ class ReleaseDistributionTests(unittest.TestCase):
                     PRE_MIGRATION_SCREENSHOT_DIGESTS,
                     visual_digests,
                 )
-            finally:
-                if process.poll() is None:
-                    process.terminate()
-                    process.wait(timeout=5)
-                if process.stderr is not None:
-                    process.stderr.close()
+                _assert_child_running(process)
 
     def test_installed_host_replays_same_result_after_process_restart(
         self,

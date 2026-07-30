@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -25,6 +27,9 @@ sys.path.insert(0, str(PACKAGING_ROOT))
 from release import release_version
 
 ARTIFACTS = ("core", "direct", "metrika", "paired")
+_AT_FDCWD = -100
+_LINUX_RENAME_NOREPLACE = 1
+_MACOS_RENAME_EXCL = 0x00000004
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -162,6 +167,65 @@ def _validate(
     }
 
 
+def _publish_release(staging: Path, output: Path) -> None:
+    """Atomically publish one directory without replacing any existing name."""
+
+    library = ctypes.CDLL(None, use_errno=True)
+    source = os.fsencode(staging)
+    destination = os.fsencode(output)
+    if sys.platform == "darwin":
+        rename = library.renamex_np
+        rename.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(source, destination, _MACOS_RENAME_EXCL)
+    elif sys.platform.startswith("linux"):
+        try:
+            rename = library.renameat2
+        except AttributeError as error:
+            raise RuntimeError(
+                "Atomic no-replace release publication requires renameat2."
+            ) from error
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            _AT_FDCWD,
+            source,
+            _AT_FDCWD,
+            destination,
+            _LINUX_RENAME_NOREPLACE,
+        )
+    else:
+        raise RuntimeError(
+            "Atomic no-replace release publication supports macOS and Linux."
+        )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise RuntimeError(
+            "The release output directory must not already exist."
+        )
+    if error_number in {errno.ENOSYS, errno.ENOTSUP}:
+        raise RuntimeError(
+            "The filesystem does not support atomic no-replace publication."
+        )
+    raise OSError(
+        error_number,
+        os.strerror(error_number),
+        os.fspath(output),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     os.environ["MOX_ADV_RELEASE_VERSION"] = arguments.version
@@ -206,7 +270,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             + "\n",
             encoding="utf-8",
         )
-        os.rename(staging, output)
+        _publish_release(staging, output)
     print(json.dumps(manifest, ensure_ascii=True, sort_keys=True))
     return 0
 
