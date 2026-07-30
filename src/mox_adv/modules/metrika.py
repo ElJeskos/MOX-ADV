@@ -76,8 +76,8 @@ class MetrikaModuleV1(BoundProviderModuleV1):
 
                 def invoke(request: ModuleRequestV1) -> ModuleResultV1:
                     if (
-                        request.operation.operation_type
-                        == "MANAGE_GOAL_CANDIDATE"
+                        request.operation.kind == "EXECUTE"
+                        and request.operation.operation_type == "MANAGE_GOAL_CANDIDATE"
                     ):
                         return lifecycle.invoke(request)
                     return service.invoke(request)

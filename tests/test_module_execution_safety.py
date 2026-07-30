@@ -15,8 +15,6 @@ from mox_adv.approval_execution import (
 )
 from mox_adv.autonomy_contracts import BoundedAutonomyRequest
 from mox_adv.autonomy_execution import BoundedAutonomyService
-from mox_adv.mandate_signing import HMACMandateSigner
-from mox_adv.mandate_store import DurableMandateAuthority
 from mox_adv.control_state import DurableControlState, TrustedScope
 from mox_adv.direct_management import (
     DirectManagementConnectorV1,
@@ -29,8 +27,8 @@ from mox_adv.egress import (
     EgressDenied,
     HttpEgressGuard,
 )
-from mox_adv.environment import ExecutionEnvironment
-from mox_adv.environment import EnvironmentWriteDenied
+from mox_adv.environment import EnvironmentWriteDenied, ExecutionEnvironment
+from mox_adv.fake_write_adapter import FakeWriteAdapter
 from mox_adv.goal_lifecycle import (
     FakeMetrikaGoalAdapter,
     FakeSitePublishAdapter,
@@ -42,7 +40,8 @@ from mox_adv.host_launcher import (
     CredentialProfileRejected,
     resolve_keychain_binding,
 )
-from mox_adv.fake_write_adapter import FakeWriteAdapter
+from mox_adv.mandate_signing import HMACMandateSigner
+from mox_adv.mandate_store import DurableMandateAuthority
 from mox_adv.module_api.v1 import (
     HttpJsonModuleAdapterV1,
     InMemoryDecisionRecordStoreV1,
@@ -52,7 +51,6 @@ from mox_adv.module_api.v1 import (
     ModuleRequestV1,
     ModuleResultV1,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "config" / "gate0-policy.json"
@@ -77,7 +75,7 @@ def request_payload(
             "goal_id": "goal-3",
         }
         connection_id = "customer-metrika"
-    return {
+    payload: dict[str, Any] = {
         "schema_version": "module-request-v1",
         "connection_ref": {"connection_id": connection_id},
         "environment": environment,
@@ -111,6 +109,27 @@ def request_payload(
         },
         "idempotency_key": "customer-run-" + operation_type.lower(),
     }
+    if operation_type == "MANAGE_GOAL_CANDIDATE":
+        payload.pop("external_evidence")
+        payload["goal_lifecycle_command"] = {
+            "schema_version": "goal-lifecycle-command-v1",
+            "action": "CREATE_CANDIDATE",
+            "run_id": "safety-goal-run",
+            "proposal_id": "safety-goal-proposal",
+            "reservation_id": "safety-goal-reservation",
+            "authority_id": "safety-goal-authority",
+            "candidate": {
+                "schema_version": "goal-candidate-input-v1",
+                "name": "Safety candidate",
+                "event": "lead_submitted",
+                "site_location": "#lead-form",
+                "type": "ACTION",
+                "business_meaning": "Exercise the environment guard.",
+                "priority": 1,
+                "duplicate_signals": [],
+            },
+        }
+    return payload
 
 
 class RecordingWriteModule:
@@ -195,11 +214,15 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
                         result = response.body
                     else:
                         typed_request = ModuleRequestV1.from_dict(payload)
-                        result = InProcessModuleAdapterV1(
-                            implementation,
-                            environment=ExecutionEnvironment.PRODUCTION,
-                            decision_records=records,
-                        ).invoke(typed_request).as_dict()
+                        result = (
+                            InProcessModuleAdapterV1(
+                                implementation,
+                                environment=ExecutionEnvironment.PRODUCTION,
+                                decision_records=records,
+                            )
+                            .invoke(typed_request)
+                            .as_dict()
+                        )
 
                     self.assertEqual("BLOCKED", result["status"])
                     self.assertEqual(
@@ -255,12 +278,12 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
                             implementation,
                             environment=ExecutionEnvironment.PRODUCTION,
                             decision_records=records,
-                        ).handle(copy.deepcopy(payload)).body,
+                        )
+                        .handle(copy.deepcopy(payload))
+                        .body,
                     ]
                 else:
-                    typed_request = ModuleRequestV1.from_dict(
-                        copy.deepcopy(payload)
-                    )
+                    typed_request = ModuleRequestV1.from_dict(copy.deepcopy(payload))
                     in_process_adapter = InProcessModuleAdapterV1(
                         implementation,
                         environment=ExecutionEnvironment.PRODUCTION,
@@ -273,7 +296,9 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
                             implementation,
                             environment=ExecutionEnvironment.PRODUCTION,
                             decision_records=records,
-                        ).invoke(typed_request).as_dict(),
+                        )
+                        .invoke(typed_request)
+                        .as_dict(),
                     ]
                 for result in results:
                     self.assertEqual("BLOCKED", result["status"])
@@ -283,12 +308,7 @@ class ModuleEnvironmentSafetyE2ETests(unittest.TestCase):
                     )
                 self.assertEqual(
                     1,
-                    len(
-                        {
-                            result["decision_record_ref"]
-                            for result in results
-                        }
-                    ),
+                    len({result["decision_record_ref"] for result in results}),
                 )
         self.assertEqual(0, implementation.credential_resolutions)
         self.assertEqual(0, implementation.write_http_requests)
@@ -371,10 +391,7 @@ class LegacyEnvironmentSafetyE2ETests(unittest.TestCase):
                 ("Goals", "deleteGoal"),
                 ("BrowserTag", "reachGoal"),
             },
-            {
-                (str(item["service"]), str(item["method"]))
-                for item in cases
-            },
+            {(str(item["service"]), str(item["method"])) for item in cases},
         )
         for item in cases:
             path = (
@@ -673,5 +690,7 @@ class _PermissiveRegistry:
     def production_authority_is_valid(self, authority: object) -> bool:
         del authority
         return True
+
+
 if __name__ == "__main__":
     unittest.main()

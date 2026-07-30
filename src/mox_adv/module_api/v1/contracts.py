@@ -3,25 +3,52 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from typing import (
     Any,
     Dict,
     Literal,
     Mapping,
     Optional,
-    Sequence,
     Tuple,
     Union,
     cast,
     get_args,
 )
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mox_adv.environment import PRODUCTION_WRITE_FORBIDDEN
+from mox_adv.module_api.v1.contract_validation import (
+    ContractValidationError,
+)
+from mox_adv.module_api.v1.contract_validation import (
+    array_value as _array,
+)
+from mox_adv.module_api.v1.contract_validation import (
+    exact_fields as _exact_fields,
+)
+from mox_adv.module_api.v1.contract_validation import (
+    iso_date as _iso_date,
+)
+from mox_adv.module_api.v1.contract_validation import (
+    object_value as _object,
+)
+from mox_adv.module_api.v1.contract_validation import (
+    one_of as _one_of,
+)
+from mox_adv.module_api.v1.contract_validation import (
+    optional_text as _optional_text,
+)
+from mox_adv.module_api.v1.contract_validation import (
+    text as _text,
+)
+from mox_adv.module_api.v1.contract_validation import (
+    timestamp as _timestamp,
+)
+from mox_adv.module_api.v1.contract_validation import (
+    timezone_name as _timezone,
+)
 from mox_adv.module_api.v1.goal_lifecycle_contracts import (
     GoalLifecycleCommandV1,
-    GoalLifecycleContractError,
     GoalLifecycleOutcomeV1,
 )
 
@@ -57,125 +84,16 @@ ModuleStatus = Literal[
 MODULE_STATUSES = cast(Tuple[ModuleStatus, ...], get_args(ModuleStatus))
 
 
-class ContractValidationError(ValueError):
-    """Raised when an object cannot cross the public module boundary."""
-
-
 def _goal_lifecycle_command(
     value: Mapping[str, Any],
 ) -> GoalLifecycleCommandV1:
-    try:
-        return GoalLifecycleCommandV1.from_dict(value)
-    except GoalLifecycleContractError as error:
-        raise ContractValidationError(str(error)) from error
+    return GoalLifecycleCommandV1.from_dict(value)
 
 
 def _goal_lifecycle_outcome(
     value: Mapping[str, Any],
 ) -> GoalLifecycleOutcomeV1:
-    try:
-        return GoalLifecycleOutcomeV1.from_dict(value)
-    except GoalLifecycleContractError as error:
-        raise ContractValidationError(str(error)) from error
-
-
-def _object(value: Any, field: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ContractValidationError(f"{field} must be an object")
-    return value
-
-
-def _array(value: Any, field: str) -> Sequence[Any]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise ContractValidationError(f"{field} must be an array")
-    return value
-
-
-def _exact_fields(
-    value: Mapping[str, Any],
-    *,
-    field: str,
-    required: Sequence[str],
-    optional: Sequence[str] = (),
-) -> None:
-    allowed = set(required) | set(optional)
-    unexpected = sorted(set(value) - allowed)
-    if unexpected:
-        raise ContractValidationError(
-            f"{field} has unexpected field: {unexpected[0]}"
-        )
-    missing = sorted(set(required) - set(value))
-    if missing:
-        raise ContractValidationError(f"{field} is missing field: {missing[0]}")
-
-
-def _text(
-    value: Any,
-    field: str,
-    *,
-    minimum: int = 1,
-    maximum: int = 500,
-) -> str:
-    if not isinstance(value, str):
-        raise ContractValidationError(f"{field} must be a string")
-    if not minimum <= len(value) <= maximum:
-        raise ContractValidationError(
-            f"{field} length must be between {minimum} and {maximum}"
-        )
-    return value
-
-
-def _optional_text(
-    value: Any,
-    field: str,
-    *,
-    maximum: int = 500,
-) -> Optional[str]:
-    if value is None:
-        return None
-    return _text(value, field, maximum=maximum)
-
-
-def _one_of(value: Any, field: str, allowed: Sequence[str]) -> str:
-    parsed = _text(value, field)
-    if parsed not in allowed:
-        raise ContractValidationError(
-            f"{field} must be one of: {', '.join(allowed)}"
-        )
-    return parsed
-
-
-def _iso_date(value: Any, field: str) -> str:
-    parsed = _text(value, field)
-    try:
-        date.fromisoformat(parsed)
-    except ValueError as error:
-        raise ContractValidationError(f"{field} must be an ISO date") from error
-    return parsed
-
-
-def _timestamp(value: Any, field: str) -> str:
-    parsed = _text(value, field)
-    try:
-        timestamp = datetime.fromisoformat(parsed.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise ContractValidationError(
-            f"{field} must be an ISO-8601 timestamp"
-        ) from error
-    if timestamp.tzinfo is None:
-        raise ContractValidationError(f"{field} must include a UTC offset")
-    return parsed
-
-
-def _timezone(value: Any, field: str) -> str:
-    parsed = _text(value, field)
-    try:
-        ZoneInfo(parsed)
-    except ZoneInfoNotFoundError as error:
-        raise ContractValidationError(
-            f"{field} must name an IANA timezone"
-        ) from error
-    return parsed
+    return GoalLifecycleOutcomeV1.from_dict(value)
 
 
 @dataclass(frozen=True)
@@ -323,8 +241,7 @@ class MetricValueV1:
         )
         metric_value = value["value"]
         if isinstance(metric_value, bool) or not (
-            metric_value is None
-            or isinstance(metric_value, (str, int, float))
+            metric_value is None or isinstance(metric_value, (str, int, float))
         ):
             raise ContractValidationError(f"{field}.value must be a JSON scalar")
         return cls(
@@ -387,9 +304,7 @@ class ExternalEvidenceV1:
             )
         )
         if not metrics:
-            raise ContractValidationError(
-                "external_evidence.metrics must not be empty"
-            )
+            raise ContractValidationError("external_evidence.metrics must not be empty")
         return cls(
             schema_version=schema_version,
             evidence_id=_text(
@@ -501,9 +416,8 @@ class ModuleRequestV1:
                 raise ContractValidationError(
                     f"{field} must be a {expected_type.__name__}"
                 )
-        if (
-            self.external_evidence is not None
-            and not isinstance(self.external_evidence, ExternalEvidenceV1)
+        if self.external_evidence is not None and not isinstance(
+            self.external_evidence, ExternalEvidenceV1
         ):
             raise ContractValidationError(
                 "external_evidence must be an ExternalEvidenceV1"
@@ -512,9 +426,9 @@ class ModuleRequestV1:
             self.operation.kind == "EXECUTE"
             and self.operation.operation_type == "MANAGE_GOAL_CANDIDATE"
         )
-        if self.goal_lifecycle_command is not None and not is_goal_lifecycle:
+        if is_goal_lifecycle != (self.goal_lifecycle_command is not None):
             raise ContractValidationError(
-                "goal_lifecycle_command is accepted only for an EXECUTE "
+                "goal_lifecycle_command is required only for an EXECUTE "
                 "MANAGE_GOAL_CANDIDATE operation"
             )
         if self.goal_lifecycle_command is not None:
@@ -618,9 +532,7 @@ class ModuleRequestV1:
         if self.external_evidence is not None:
             value["external_evidence"] = self.external_evidence.as_dict()
         if self.goal_lifecycle_command is not None:
-            value["goal_lifecycle_command"] = (
-                self.goal_lifecycle_command.as_dict()
-            )
+            value["goal_lifecycle_command"] = self.goal_lifecycle_command.as_dict()
         return value
 
 
@@ -730,9 +642,7 @@ class ModuleHypothesisV1:
             raise ContractValidationError(
                 "hypothesis.evidence_metric_names must not be empty"
             )
-        if len(set(self.evidence_metric_names)) != len(
-            self.evidence_metric_names
-        ):
+        if len(set(self.evidence_metric_names)) != len(self.evidence_metric_names):
             raise ContractValidationError(
                 "hypothesis.evidence_metric_names must not contain duplicates"
             )
@@ -1077,9 +987,7 @@ class ModuleResultV1:
         )
         _text(self.run_id, "result.run_id", maximum=128)
         if not isinstance(self.module, ModuleIdentityV1):
-            raise ContractValidationError(
-                "result.module must be a ModuleIdentityV1"
-            )
+            raise ContractValidationError("result.module must be a ModuleIdentityV1")
         status = _one_of(
             self.status,
             "result.status",
@@ -1106,8 +1014,7 @@ class ModuleResultV1:
             unknown = set(hypothesis.evidence_metric_names) - metric_names
             if unknown:
                 raise ContractValidationError(
-                    "hypothesis references an unknown metric: "
-                    + sorted(unknown)[0]
+                    "hypothesis references an unknown metric: " + sorted(unknown)[0]
                 )
 
     @classmethod
@@ -1153,9 +1060,7 @@ class ModuleResultV1:
                 maximum=64,
             ),
             run_id=_text(value["run_id"], "result.run_id", maximum=128),
-            module=ModuleIdentityV1.from_dict(
-                _object(value["module"], "module")
-            ),
+            module=ModuleIdentityV1.from_dict(_object(value["module"], "module")),
             status=cast(
                 ModuleStatus,
                 _text(value["status"], "result.status", maximum=32),
@@ -1186,9 +1091,7 @@ class ModuleResultV1:
             proposal=(
                 None
                 if proposal_value is None
-                else ModuleProposalV1.from_dict(
-                    _object(proposal_value, "proposal")
-                )
+                else ModuleProposalV1.from_dict(_object(proposal_value, "proposal"))
             ),
             execution_result=(
                 None
@@ -1202,9 +1105,7 @@ class ModuleResultV1:
                     _object(item, f"provenance[{index}]"),
                     field=f"provenance[{index}]",
                 )
-                for index, item in enumerate(
-                    _array(value["provenance"], "provenance")
-                )
+                for index, item in enumerate(_array(value["provenance"], "provenance"))
             ),
             warnings=tuple(
                 ModuleWarningV1.from_dict(
@@ -1296,8 +1197,7 @@ class ModuleResultV1:
                 ModuleErrorV1(
                     code=PRODUCTION_WRITE_FORBIDDEN,
                     message=(
-                        "Changing commands are available only in the TEST "
-                        "environment."
+                        "Changing commands are available only in the TEST environment."
                     ),
                     field="environment",
                     retryable=False,
@@ -1316,9 +1216,7 @@ class ModuleResultV1:
             "assessment": (
                 None if self.assessment is None else self.assessment.as_dict()
             ),
-            "recommendations": [
-                item.as_dict() for item in self.recommendations
-            ],
+            "recommendations": [item.as_dict() for item in self.recommendations],
             "hypotheses": [item.as_dict() for item in self.hypotheses],
             "proposal": None if self.proposal is None else self.proposal.as_dict(),
             "execution_result": (

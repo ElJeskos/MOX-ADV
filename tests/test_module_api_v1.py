@@ -359,15 +359,11 @@ class ModuleAdapterContractTests(unittest.TestCase):
         direct_result = InProcessModuleAdapterV1(
             direct,
             environment=ExecutionEnvironment.PRODUCTION,
-        ).invoke(
-            ModuleRequestV1.from_dict(valid_request_payload())
-        )
+        ).invoke(ModuleRequestV1.from_dict(valid_request_payload()))
         metrika_result = InProcessModuleAdapterV1(
             metrika,
             environment=ExecutionEnvironment.PRODUCTION,
-        ).invoke(
-            ModuleRequestV1.from_dict(valid_request_payload())
-        )
+        ).invoke(ModuleRequestV1.from_dict(valid_request_payload()))
 
         self.assertEqual("YANDEX_DIRECT", direct_result.module.module_id)
         self.assertEqual("YANDEX_METRIKA", metrika_result.module.module_id)
@@ -433,9 +429,9 @@ class OpenAPIContractTests(unittest.TestCase):
         )
         self.assertEqual(
             1,
-            schemas["ModuleHypothesisV1"]["properties"][
-                "evidence_metric_names"
-            ]["minItems"],
+            schemas["ModuleHypothesisV1"]["properties"]["evidence_metric_names"][
+                "minItems"
+            ],
         )
         self.assertIn(
             "hypotheses",
@@ -477,9 +473,30 @@ class OpenAPIContractTests(unittest.TestCase):
         )
         self.assertEqual(
             "^[0-9a-f]{64}$",
-            schemas["GoalLifecycleOutcomeV1"]["properties"][
-                "evidence_digest"
-            ]["pattern"],
+            schemas["GoalLifecycleOutcomeV1"]["properties"]["evidence_digest"][
+                "pattern"
+            ],
+        )
+        self.assertEqual(
+            "goal-candidate-input-v1",
+            schemas["GoalCandidateInputV1"]["properties"]["schema_version"]["const"],
+        )
+        for field in (
+            "run_id",
+            "proposal_id",
+            "reservation_id",
+            "authority_id",
+            "candidate_id",
+        ):
+            identifier_schema = schemas["GoalLifecycleCommandV1"]["properties"][field]
+            self.assertEqual(128, identifier_schema["maxLength"])
+            self.assertEqual(
+                "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+                identifier_schema["pattern"],
+            )
+        self.assertEqual(
+            2,
+            len(schemas["ModuleRequestV1"]["allOf"]),
         )
 
     def test_result_proposal_and_execution_are_optional_inputs(self) -> None:

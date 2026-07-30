@@ -4,131 +4,31 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
+from mox_adv.module_api.v1.contract_validation import (
+    ContractValidationError,
+    array_value,
+    boolean,
+    count,
+    exact_fields,
+    identifier,
+    object_value,
+    one_of,
+    text,
+    timestamp,
+)
+
+GOAL_CANDIDATE_INPUT_SCHEMA_VERSION = "goal-candidate-input-v1"
 GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION = "goal-lifecycle-command-v1"
-GOAL_LIFECYCLE_ACTION_FIELDS = {
-    "CREATE_CANDIDATE": (
-        "run_id",
-        "proposal_id",
-        "reservation_id",
-        "authority_id",
-        "candidate",
-    ),
-    "PUBLISH_EVENT": (
-        "candidate_id",
-        "authority_id",
-        "site_zone",
-        "expected_version",
-    ),
-    "VERIFY_DELIVERY": ("candidate_id", "event_evidence"),
-    "DECIDE_BUSINESS_SEMANTICS": ("candidate_id", "approved", "reviewer"),
-    "EVALUATE_OPTIMIZATION_ELIGIBILITY": (
-        "candidate_id",
-        "observed_at",
-        "sample_clicks",
-        "sample_conversions",
-    ),
-    "CLEANUP_REJECTED_CANDIDATE": ("candidate_id", "run_id"),
-}
-
-
-class GoalLifecycleContractError(ValueError):
-    """A goal lifecycle value cannot cross the public module boundary."""
-
-
-def _object(value: Any, field: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise GoalLifecycleContractError(f"{field} must be an object")
-    return value
-
-
-def _array(value: Any, field: str) -> Sequence[Any]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise GoalLifecycleContractError(f"{field} must be an array")
-    return value
-
-
-def _exact_fields(
-    value: Mapping[str, Any],
-    *,
-    field: str,
-    required: Sequence[str],
-) -> None:
-    unexpected = sorted(set(value) - set(required))
-    if unexpected:
-        raise GoalLifecycleContractError(
-            f"{field} has unexpected field: {unexpected[0]}"
-        )
-    missing = sorted(set(required) - set(value))
-    if missing:
-        raise GoalLifecycleContractError(
-            f"{field} is missing field: {missing[0]}"
-        )
-
-
-def _text(
-    value: Any,
-    field: str,
-    *,
-    minimum: int = 1,
-    maximum: int = 500,
-) -> str:
-    if not isinstance(value, str):
-        raise GoalLifecycleContractError(f"{field} must be a string")
-    if not minimum <= len(value) <= maximum:
-        raise GoalLifecycleContractError(
-            f"{field} length must be between {minimum} and {maximum}"
-        )
-    return value
-
-
-def _one_of(
-    value: Any,
-    field: str,
-    allowed: Sequence[str],
-) -> str:
-    parsed = _text(value, field)
-    if parsed not in allowed:
-        raise GoalLifecycleContractError(
-            f"{field} must be one of: {', '.join(allowed)}"
-        )
-    return parsed
-
-
-def _timestamp(value: Any, field: str) -> str:
-    parsed = _text(value, field)
-    try:
-        timestamp = datetime.fromisoformat(parsed.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise GoalLifecycleContractError(
-            f"{field} must be an ISO-8601 timestamp"
-        ) from error
-    if timestamp.tzinfo is None:
-        raise GoalLifecycleContractError(f"{field} must include a UTC offset")
-    return parsed
-
-
-def _boolean(value: Any, field: str) -> bool:
-    if not isinstance(value, bool):
-        raise GoalLifecycleContractError(f"{field} must be boolean")
-    return value
-
-
-def _count(value: Any, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise GoalLifecycleContractError(
-            f"{field} must be a non-negative integer"
-        )
-    return value
 
 
 @dataclass(frozen=True)
 class GoalCandidateInputV1:
-    """Closed candidate input without provider transport details."""
+    """Customer input translated into the unchanged legacy goal candidate."""
 
     schema_version: str
     name: str
@@ -152,15 +52,15 @@ class GoalCandidateInputV1:
             "priority",
             "duplicate_signals",
         )
-        _exact_fields(value, field=field, required=fields)
-        priority = _count(value["priority"], f"{field}.priority")
+        exact_fields(value, field=field, required=fields)
+        priority = count(value["priority"], f"{field}.priority")
         if priority < 1:
-            raise GoalLifecycleContractError(
+            raise ContractValidationError(
                 f"{field}.priority must be a positive integer"
             )
         duplicate_signals = tuple(
-            _text(item, f"{field}.duplicate_signals[]", maximum=500)
-            for item in _array(
+            text(item, f"{field}.duplicate_signals[]", maximum=500)
+            for item in array_value(
                 value["duplicate_signals"],
                 f"{field}.duplicate_signals",
             )
@@ -168,25 +68,24 @@ class GoalCandidateInputV1:
         if len(duplicate_signals) > 128 or len(set(duplicate_signals)) != len(
             duplicate_signals
         ):
-            raise GoalLifecycleContractError(
-                f"{field}.duplicate_signals must contain at most 128 "
-                "unique values"
+            raise ContractValidationError(
+                f"{field}.duplicate_signals must contain at most 128 unique values"
             )
         return cls(
-            schema_version=_one_of(
+            schema_version=one_of(
                 value["schema_version"],
                 f"{field}.schema_version",
-                ("goal-candidate-v1",),
+                (GOAL_CANDIDATE_INPUT_SCHEMA_VERSION,),
             ),
-            name=_text(value["name"], f"{field}.name", maximum=128),
-            event=_text(value["event"], f"{field}.event", maximum=128),
-            site_location=_text(
+            name=text(value["name"], f"{field}.name", maximum=128),
+            event=text(value["event"], f"{field}.event", maximum=128),
+            site_location=text(
                 value["site_location"],
                 f"{field}.site_location",
                 maximum=500,
             ),
-            goal_type=_text(value["type"], f"{field}.type", maximum=64),
-            business_meaning=_text(
+            goal_type=text(value["type"], f"{field}.type", maximum=64),
+            business_meaning=text(
                 value["business_meaning"],
                 f"{field}.business_meaning",
                 maximum=500,
@@ -206,6 +105,13 @@ class GoalCandidateInputV1:
             "priority": self.priority,
             "duplicate_signals": list(self.duplicate_signals),
         }
+
+    def as_legacy_payload(self) -> dict[str, Any]:
+        """Translate only at the existing lifecycle seam."""
+
+        value = self.as_dict()
+        value["schema_version"] = "goal-candidate-v1"
+        return value
 
 
 @dataclass(frozen=True)
@@ -236,39 +142,35 @@ class GoalEventEvidenceV1:
             "intercepted_locally",
             "real_network_requests",
         )
-        _exact_fields(value, field=field, required=fields)
+        exact_fields(value, field=field, required=fields)
         return cls(
-            event=_text(value["event"], f"{field}.event", maximum=128),
-            selector=_text(value["selector"], f"{field}.selector", maximum=500),
-            trigger_selector=_text(
+            event=text(value["event"], f"{field}.event", maximum=128),
+            selector=text(value["selector"], f"{field}.selector", maximum=500),
+            trigger_selector=text(
                 value["trigger_selector"],
                 f"{field}.trigger_selector",
                 maximum=500,
             ),
-            counter_id=_text(
-                value["counter_id"],
-                f"{field}.counter_id",
-                maximum=128,
-            ),
-            http_method=_one_of(
+            counter_id=identifier(value["counter_id"], f"{field}.counter_id"),
+            http_method=one_of(
                 value["http_method"],
                 f"{field}.http_method",
                 ("POST",),
             ),
-            request_url=_text(
+            request_url=text(
                 value["request_url"],
                 f"{field}.request_url",
                 maximum=2_000,
             ),
-            emitted_count=_count(
+            emitted_count=count(
                 value["emitted_count"],
                 f"{field}.emitted_count",
             ),
-            intercepted_locally=_boolean(
+            intercepted_locally=boolean(
                 value["intercepted_locally"],
                 f"{field}.intercepted_locally",
             ),
-            real_network_requests=_count(
+            real_network_requests=count(
                 value["real_network_requests"],
                 f"{field}.real_network_requests",
             ),
@@ -288,66 +190,323 @@ class GoalEventEvidenceV1:
         }
 
 
-@dataclass(frozen=True)
-class GoalLifecycleCommandV1:
-    """One high-level lifecycle action, never a Yandex HTTP payload."""
+class GoalLifecycleCommandV1(ABC):
+    """Closed base for one of six typed lifecycle commands."""
 
-    schema_version: str
-    action: str
-    values: Mapping[str, Any]
+    action: ClassVar[str]
+    schema_version: ClassVar[str] = GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> GoalLifecycleCommandV1:
-        action = _one_of(
+        action = one_of(
             value.get("action"),
             "goal_lifecycle_command.action",
-            tuple(GOAL_LIFECYCLE_ACTION_FIELDS),
+            tuple(GOAL_LIFECYCLE_COMMAND_TYPES),
         )
-        action_fields = GOAL_LIFECYCLE_ACTION_FIELDS[action]
-        _exact_fields(
-            value,
-            field="goal_lifecycle_command",
-            required=("schema_version", "action", *action_fields),
-        )
-        _one_of(
-            value["schema_version"],
-            "goal_lifecycle_command.schema_version",
-            (GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION,),
-        )
-        parsed: dict[str, Any] = {}
-        for field in action_fields:
-            item = value[field]
-            field_name = f"goal_lifecycle_command.{field}"
-            if field == "candidate":
-                parsed[field] = GoalCandidateInputV1.from_dict(
-                    _object(item, field_name)
-                )
-            elif field == "event_evidence":
-                parsed[field] = GoalEventEvidenceV1.from_dict(
-                    _object(item, field_name)
-                )
-            elif field == "approved":
-                parsed[field] = _boolean(item, field_name)
-            elif field in ("sample_clicks", "sample_conversions"):
-                parsed[field] = _count(item, field_name)
-            elif field == "observed_at":
-                parsed[field] = _timestamp(item, field_name)
-            else:
-                parsed[field] = _text(item, field_name, maximum=500)
-        return cls(
-            schema_version=GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION,
-            action=action,
-            values=parsed,
-        )
+        return GOAL_LIFECYCLE_COMMAND_TYPES[action].from_dict(value)
 
+    @abstractmethod
     def as_dict(self) -> dict[str, Any]:
-        value: dict[str, Any] = {
+        """Return the closed public JSON representation."""
+
+    def _envelope(self) -> dict[str, Any]:
+        return {
             "schema_version": self.schema_version,
             "action": self.action,
         }
-        for field, item in self.values.items():
-            value[field] = item.as_dict() if hasattr(item, "as_dict") else item
-        return value
+
+
+class CandidateGoalLifecycleCommandV1(GoalLifecycleCommandV1):
+    """Typed base for actions targeting an existing candidate."""
+
+    candidate_id: str
+
+
+def _command_fields(
+    value: Mapping[str, Any],
+    action: str,
+    fields: tuple[str, ...],
+) -> None:
+    exact_fields(
+        value,
+        field="goal_lifecycle_command",
+        required=("schema_version", "action", *fields),
+    )
+    one_of(
+        value["schema_version"],
+        "goal_lifecycle_command.schema_version",
+        (GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION,),
+    )
+    one_of(value["action"], "goal_lifecycle_command.action", (action,))
+
+
+@dataclass(frozen=True)
+class CreateGoalCandidateCommandV1(GoalLifecycleCommandV1):
+    action: ClassVar[str] = "CREATE_CANDIDATE"
+    run_id: str
+    proposal_id: str
+    reservation_id: str
+    authority_id: str
+    candidate: GoalCandidateInputV1
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+    ) -> CreateGoalCandidateCommandV1:
+        fields = (
+            "run_id",
+            "proposal_id",
+            "reservation_id",
+            "authority_id",
+            "candidate",
+        )
+        _command_fields(value, cls.action, fields)
+        return cls(
+            run_id=identifier(value["run_id"], "goal_lifecycle_command.run_id"),
+            proposal_id=identifier(
+                value["proposal_id"],
+                "goal_lifecycle_command.proposal_id",
+            ),
+            reservation_id=identifier(
+                value["reservation_id"],
+                "goal_lifecycle_command.reservation_id",
+            ),
+            authority_id=identifier(
+                value["authority_id"],
+                "goal_lifecycle_command.authority_id",
+            ),
+            candidate=GoalCandidateInputV1.from_dict(
+                object_value(
+                    value["candidate"],
+                    "goal_lifecycle_command.candidate",
+                )
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self._envelope(),
+            "run_id": self.run_id,
+            "proposal_id": self.proposal_id,
+            "reservation_id": self.reservation_id,
+            "authority_id": self.authority_id,
+            "candidate": self.candidate.as_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class PublishGoalEventCommandV1(CandidateGoalLifecycleCommandV1):
+    action: ClassVar[str] = "PUBLISH_EVENT"
+    candidate_id: str
+    authority_id: str
+    site_zone: str
+    expected_version: str
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+    ) -> PublishGoalEventCommandV1:
+        fields = (
+            "candidate_id",
+            "authority_id",
+            "site_zone",
+            "expected_version",
+        )
+        _command_fields(value, cls.action, fields)
+        return cls(
+            candidate_id=identifier(
+                value["candidate_id"],
+                "goal_lifecycle_command.candidate_id",
+            ),
+            authority_id=identifier(
+                value["authority_id"],
+                "goal_lifecycle_command.authority_id",
+            ),
+            site_zone=text(
+                value["site_zone"],
+                "goal_lifecycle_command.site_zone",
+                maximum=500,
+            ),
+            expected_version=text(
+                value["expected_version"],
+                "goal_lifecycle_command.expected_version",
+                maximum=500,
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self._envelope(),
+            "candidate_id": self.candidate_id,
+            "authority_id": self.authority_id,
+            "site_zone": self.site_zone,
+            "expected_version": self.expected_version,
+        }
+
+
+@dataclass(frozen=True)
+class VerifyGoalDeliveryCommandV1(CandidateGoalLifecycleCommandV1):
+    action: ClassVar[str] = "VERIFY_DELIVERY"
+    candidate_id: str
+    event_evidence: GoalEventEvidenceV1
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+    ) -> VerifyGoalDeliveryCommandV1:
+        fields = ("candidate_id", "event_evidence")
+        _command_fields(value, cls.action, fields)
+        return cls(
+            candidate_id=identifier(
+                value["candidate_id"],
+                "goal_lifecycle_command.candidate_id",
+            ),
+            event_evidence=GoalEventEvidenceV1.from_dict(
+                object_value(
+                    value["event_evidence"],
+                    "goal_lifecycle_command.event_evidence",
+                )
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self._envelope(),
+            "candidate_id": self.candidate_id,
+            "event_evidence": self.event_evidence.as_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class DecideGoalSemanticsCommandV1(CandidateGoalLifecycleCommandV1):
+    action: ClassVar[str] = "DECIDE_BUSINESS_SEMANTICS"
+    candidate_id: str
+    approved: bool
+    reviewer: str
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+    ) -> DecideGoalSemanticsCommandV1:
+        fields = ("candidate_id", "approved", "reviewer")
+        _command_fields(value, cls.action, fields)
+        return cls(
+            candidate_id=identifier(
+                value["candidate_id"],
+                "goal_lifecycle_command.candidate_id",
+            ),
+            approved=boolean(
+                value["approved"],
+                "goal_lifecycle_command.approved",
+            ),
+            reviewer=identifier(
+                value["reviewer"],
+                "goal_lifecycle_command.reviewer",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self._envelope(),
+            "candidate_id": self.candidate_id,
+            "approved": self.approved,
+            "reviewer": self.reviewer,
+        }
+
+
+@dataclass(frozen=True)
+class EvaluateGoalEligibilityCommandV1(CandidateGoalLifecycleCommandV1):
+    action: ClassVar[str] = "EVALUATE_OPTIMIZATION_ELIGIBILITY"
+    candidate_id: str
+    observed_at: str
+    sample_clicks: int
+    sample_conversions: int
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+    ) -> EvaluateGoalEligibilityCommandV1:
+        fields = (
+            "candidate_id",
+            "observed_at",
+            "sample_clicks",
+            "sample_conversions",
+        )
+        _command_fields(value, cls.action, fields)
+        return cls(
+            candidate_id=identifier(
+                value["candidate_id"],
+                "goal_lifecycle_command.candidate_id",
+            ),
+            observed_at=timestamp(
+                value["observed_at"],
+                "goal_lifecycle_command.observed_at",
+            ),
+            sample_clicks=count(
+                value["sample_clicks"],
+                "goal_lifecycle_command.sample_clicks",
+            ),
+            sample_conversions=count(
+                value["sample_conversions"],
+                "goal_lifecycle_command.sample_conversions",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self._envelope(),
+            "candidate_id": self.candidate_id,
+            "observed_at": self.observed_at,
+            "sample_clicks": self.sample_clicks,
+            "sample_conversions": self.sample_conversions,
+        }
+
+
+@dataclass(frozen=True)
+class CleanupRejectedGoalCommandV1(CandidateGoalLifecycleCommandV1):
+    action: ClassVar[str] = "CLEANUP_REJECTED_CANDIDATE"
+    candidate_id: str
+    run_id: str
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+    ) -> CleanupRejectedGoalCommandV1:
+        fields = ("candidate_id", "run_id")
+        _command_fields(value, cls.action, fields)
+        return cls(
+            candidate_id=identifier(
+                value["candidate_id"],
+                "goal_lifecycle_command.candidate_id",
+            ),
+            run_id=identifier(value["run_id"], "goal_lifecycle_command.run_id"),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self._envelope(),
+            "candidate_id": self.candidate_id,
+            "run_id": self.run_id,
+        }
+
+
+GOAL_LIFECYCLE_COMMAND_TYPES = {
+    command.action: command
+    for command in (
+        CreateGoalCandidateCommandV1,
+        PublishGoalEventCommandV1,
+        VerifyGoalDeliveryCommandV1,
+        DecideGoalSemanticsCommandV1,
+        EvaluateGoalEligibilityCommandV1,
+        CleanupRejectedGoalCommandV1,
+    )
+}
 
 
 @dataclass(frozen=True)
@@ -383,40 +542,36 @@ class GoalLifecycleEvidenceOutcomeV1:
             "poll_count",
             "checked_at",
         )
-        _exact_fields(value, field=field, required=fields)
+        exact_fields(value, field=field, required=fields)
         return cls(
-            event=_text(value["event"], f"{field}.event", maximum=128),
-            counter_id=_text(
-                value["counter_id"],
-                f"{field}.counter_id",
-                maximum=128,
-            ),
-            emitted_count=_count(
+            event=text(value["event"], f"{field}.event", maximum=128),
+            counter_id=identifier(value["counter_id"], f"{field}.counter_id"),
+            emitted_count=count(
                 value["emitted_count"],
                 f"{field}.emitted_count",
             ),
-            duplicate_event_absent=_boolean(
+            duplicate_event_absent=boolean(
                 value["duplicate_event_absent"],
                 f"{field}.duplicate_event_absent",
             ),
-            intercepted_locally=_boolean(
+            intercepted_locally=boolean(
                 value["intercepted_locally"],
                 f"{field}.intercepted_locally",
             ),
-            real_network_requests=_count(
+            real_network_requests=count(
                 value["real_network_requests"],
                 f"{field}.real_network_requests",
             ),
-            delivery_observed=_boolean(
+            delivery_observed=boolean(
                 value["delivery_observed"],
                 f"{field}.delivery_observed",
             ),
-            virtual_elapsed_minutes=_count(
+            virtual_elapsed_minutes=count(
                 value["virtual_elapsed_minutes"],
                 f"{field}.virtual_elapsed_minutes",
             ),
-            poll_count=_count(value["poll_count"], f"{field}.poll_count"),
-            checked_at=_timestamp(value["checked_at"], f"{field}.checked_at"),
+            poll_count=count(value["poll_count"], f"{field}.poll_count"),
+            checked_at=timestamp(value["checked_at"], f"{field}.checked_at"),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -450,12 +605,12 @@ class GoalLifecycleOutcomeV1:
     evidence_digest: str
 
     def __post_init__(self) -> None:
-        _one_of(
+        one_of(
             self.action,
             "lifecycle_outcome.action",
-            tuple(GOAL_LIFECYCLE_ACTION_FIELDS),
+            tuple(GOAL_LIFECYCLE_COMMAND_TYPES),
         )
-        _one_of(
+        one_of(
             self.lifecycle_status,
             "lifecycle_outcome.lifecycle_status",
             (
@@ -470,26 +625,27 @@ class GoalLifecycleOutcomeV1:
                 "CLEANED_UP",
             ),
         )
-        _one_of(
+        identifier(self.candidate_id, "lifecycle_outcome.candidate_id")
+        identifier(self.goal_id, "lifecycle_outcome.goal_id")
+        one_of(
             self.candidate_status,
             "lifecycle_outcome.candidate_status",
             ("CANDIDATE", "APPROVED", "REJECTED"),
         )
-        _one_of(
+        one_of(
             self.technical_status,
             "lifecycle_outcome.technical_status",
             ("PENDING", "VERIFIED", "INCONCLUSIVE"),
         )
-        _boolean(
+        boolean(
             self.optimization_eligible,
             "lifecycle_outcome.optimization_eligible",
         )
-        _boolean(self.cleaned_up, "lifecycle_outcome.cleaned_up")
+        boolean(self.cleaned_up, "lifecycle_outcome.cleaned_up")
         if len(self.evidence_digest) != 64 or any(
-            character not in "0123456789abcdef"
-            for character in self.evidence_digest
+            character not in "0123456789abcdef" for character in self.evidence_digest
         ):
-            raise GoalLifecycleContractError(
+            raise ContractValidationError(
                 "lifecycle_outcome.evidence_digest must be a SHA-256 hex digest"
             )
 
@@ -538,44 +694,42 @@ class GoalLifecycleOutcomeV1:
             "event_evidence",
             "evidence_digest",
         )
-        _exact_fields(value, field="lifecycle_outcome", required=fields)
+        exact_fields(value, field="lifecycle_outcome", required=fields)
         event_evidence = value["event_evidence"]
         outcome = cls(
-            action=_text(
+            action=one_of(
                 value["action"],
                 "lifecycle_outcome.action",
-                maximum=128,
+                tuple(GOAL_LIFECYCLE_COMMAND_TYPES),
             ),
-            lifecycle_status=_text(
+            lifecycle_status=text(
                 value["lifecycle_status"],
                 "lifecycle_outcome.lifecycle_status",
                 maximum=128,
             ),
-            candidate_id=_text(
+            candidate_id=identifier(
                 value["candidate_id"],
                 "lifecycle_outcome.candidate_id",
-                maximum=128,
             ),
-            goal_id=_text(
+            goal_id=identifier(
                 value["goal_id"],
                 "lifecycle_outcome.goal_id",
-                maximum=128,
             ),
-            candidate_status=_text(
+            candidate_status=text(
                 value["candidate_status"],
                 "lifecycle_outcome.candidate_status",
                 maximum=32,
             ),
-            technical_status=_text(
+            technical_status=text(
                 value["technical_status"],
                 "lifecycle_outcome.technical_status",
                 maximum=32,
             ),
-            optimization_eligible=_boolean(
+            optimization_eligible=boolean(
                 value["optimization_eligible"],
                 "lifecycle_outcome.optimization_eligible",
             ),
-            cleaned_up=_boolean(
+            cleaned_up=boolean(
                 value["cleaned_up"],
                 "lifecycle_outcome.cleaned_up",
             ),
@@ -583,10 +737,13 @@ class GoalLifecycleOutcomeV1:
                 None
                 if event_evidence is None
                 else GoalLifecycleEvidenceOutcomeV1.from_dict(
-                    _object(event_evidence, "lifecycle_outcome.event_evidence")
+                    object_value(
+                        event_evidence,
+                        "lifecycle_outcome.event_evidence",
+                    )
                 )
             ),
-            evidence_digest=_text(
+            evidence_digest=text(
                 value["evidence_digest"],
                 "lifecycle_outcome.evidence_digest",
                 minimum=64,
@@ -594,7 +751,7 @@ class GoalLifecycleOutcomeV1:
             ),
         )
         if outcome.evidence_digest != outcome.computed_evidence_digest():
-            raise GoalLifecycleContractError(
+            raise ContractValidationError(
                 "lifecycle_outcome evidence digest does not match its facts"
             )
         return outcome
@@ -610,9 +767,7 @@ class GoalLifecycleOutcomeV1:
             "optimization_eligible": self.optimization_eligible,
             "cleaned_up": self.cleaned_up,
             "event_evidence": (
-                None
-                if self.event_evidence is None
-                else self.event_evidence.as_dict()
+                None if self.event_evidence is None else self.event_evidence.as_dict()
             ),
         }
 

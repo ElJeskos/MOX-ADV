@@ -23,6 +23,7 @@ PACKAGE_MODULES = {
     "mox_adv.module_api.v1": {
         "__init__",
         "adapters",
+        "contract_validation",
         "contracts",
         "decision_records",
         "goal_lifecycle_contracts",

@@ -230,7 +230,8 @@
           "counter_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "goal_id": {
             "type": "string",
@@ -365,7 +366,8 @@
         ],
         "properties": {
           "schema_version": {
-            "const": "goal-candidate-v1"
+            "const": "goal-candidate-input-v1",
+            "description": "Customer input translated to the unchanged internal goal-candidate-v1 only after trusted connection and scope validation."
           },
           "name": {
             "type": "string",
@@ -441,7 +443,8 @@
           "counter_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "http_method": {
             "const": "POST"
@@ -489,27 +492,32 @@
           "run_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 500
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "proposal_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 500
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "reservation_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 500
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "authority_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 500
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "candidate_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 500
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "candidate": {
             "$ref": "#/components/schemas/GoalCandidateInputV1"
@@ -533,7 +541,8 @@
           "reviewer": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 500
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "observed_at": {
             "type": "string",
@@ -748,7 +757,66 @@
             "minLength": 1,
             "maxLength": 128
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "operation": {
+                  "properties": {
+                    "kind": {
+                      "const": "EXECUTE"
+                    },
+                    "operation_type": {
+                      "const": "MANAGE_GOAL_CANDIDATE"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "operation_type"
+                  ]
+                }
+              },
+              "required": [
+                "operation"
+              ]
+            },
+            "then": {
+              "required": [
+                "goal_lifecycle_command"
+              ]
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "goal_lifecycle_command"
+              ]
+            },
+            "then": {
+              "properties": {
+                "operation": {
+                  "properties": {
+                    "kind": {
+                      "const": "EXECUTE"
+                    },
+                    "operation_type": {
+                      "const": "MANAGE_GOAL_CANDIDATE"
+                    }
+                  }
+                }
+              },
+              "required": [
+                "operation"
+              ],
+              "not": {
+                "required": [
+                  "external_evidence"
+                ]
+              }
+            }
+          }
+        ]
       },
       "ModuleIdentityV1": {
         "type": "object",
@@ -1047,7 +1115,8 @@
           "counter_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "emitted_count": {
             "type": "integer",
@@ -1124,12 +1193,14 @@
           "candidate_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "goal_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
           },
           "candidate_status": {
             "type": "string",

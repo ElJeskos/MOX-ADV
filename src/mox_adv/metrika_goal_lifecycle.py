@@ -14,6 +14,11 @@ from mox_adv.goal_evidence import GoalEventEvidence, GoalTechnicalEvidence
 from mox_adv.goal_service import GoalLifecycleService
 from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
+    CandidateGoalLifecycleCommandV1,
+    CleanupRejectedGoalCommandV1,
+    CreateGoalCandidateCommandV1,
+    DecideGoalSemanticsCommandV1,
+    EvaluateGoalEligibilityCommandV1,
     GoalEventEvidenceV1,
     GoalLifecycleCommandV1,
     GoalLifecycleEvidenceOutcomeV1,
@@ -27,6 +32,8 @@ from mox_adv.module_api.v1 import (
     ModuleIdentityV1,
     ModuleRequestV1,
     ModuleResultV1,
+    PublishGoalEventCommandV1,
+    VerifyGoalDeliveryCommandV1,
 )
 
 
@@ -55,6 +62,24 @@ class BoundMetrikaGoalLifecycleProviderV1:
     credential_profile: str
     lifecycle: GoalLifecycleService
 
+    def __post_init__(self) -> None:
+        try:
+            test_counter = self.lifecycle.policy["bindings"]["simulation"][
+                "test_counter"
+            ]
+        except (KeyError, TypeError) as error:
+            raise MetrikaGoalLifecycleAuthorizationError(
+                "The stored test connection is not bound to a test counter."
+            ) from error
+        if (
+            self.counter_id != test_counter
+            or self.credential_profile != "METRIKA_TEST_WRITE"
+        ):
+            raise MetrikaGoalLifecycleAuthorizationError(
+                "The stored connection must use METRIKA_TEST_WRITE for the "
+                "configured test counter."
+            )
+
     def manage_goal_candidate(
         self,
         connection_id: str,
@@ -66,79 +91,90 @@ class BoundMetrikaGoalLifecycleProviderV1:
             raise MetrikaGoalLifecycleAuthorizationError(
                 "The stored test connection does not authorize this counter."
             )
-        action = command.action
-        values = command.values
         technical_evidence = None
-        if action == "CREATE_CANDIDATE":
+        if isinstance(command, CreateGoalCandidateCommandV1):
             candidate = self.lifecycle.create_candidate(
-                run_id=values["run_id"],
-                proposal_id=values["proposal_id"],
-                reservation_id=values["reservation_id"],
-                authority_id=values["authority_id"],
+                run_id=command.run_id,
+                proposal_id=command.proposal_id,
+                reservation_id=command.reservation_id,
+                authority_id=command.authority_id,
                 counter_id=counter_id,
                 credential_profile=self.credential_profile,
-                payload=values["candidate"].as_dict(),
+                payload=command.candidate.as_legacy_payload(),
                 now=now,
             )
             lifecycle_status = "CANDIDATE"
-        elif action == "PUBLISH_EVENT":
+        else:
+            if not isinstance(command, CandidateGoalLifecycleCommandV1):
+                raise MetrikaGoalLifecycleAuthorizationError(
+                    "The goal lifecycle command type is unsupported."
+                )
+            candidate = self._bound_candidate(command.candidate_id)
+        if isinstance(command, PublishGoalEventCommandV1):
             self.lifecycle.publish_candidate_event(
-                values["candidate_id"],
-                authority_id=values["authority_id"],
-                site_zone=values["site_zone"],
-                expected_version=values["expected_version"],
+                command.candidate_id,
+                authority_id=command.authority_id,
+                site_zone=command.site_zone,
+                expected_version=command.expected_version,
                 now=now,
             )
-            candidate = self.lifecycle.store.load_candidate(values["candidate_id"])
+            candidate = self._bound_candidate(command.candidate_id)
             lifecycle_status = "EVENT_PUBLISHED"
-        elif action == "VERIFY_DELIVERY":
+        elif isinstance(command, VerifyGoalDeliveryCommandV1):
             technical_evidence = self.lifecycle.verify_candidate_delivery(
-                values["candidate_id"],
-                self._event_evidence(values["event_evidence"]),
+                command.candidate_id,
+                self._event_evidence(command.event_evidence),
                 now=now,
             )
-            candidate = self.lifecycle.store.load_candidate(values["candidate_id"])
+            candidate = self._bound_candidate(command.candidate_id)
             lifecycle_status = (
                 "TECHNICALLY_VERIFIED"
                 if technical_evidence.delivery_observed
                 else "TECHNICALLY_INCONCLUSIVE"
             )
-        elif action == "DECIDE_BUSINESS_SEMANTICS":
+        elif isinstance(command, DecideGoalSemanticsCommandV1):
             candidate = self.lifecycle.decide_business_semantics(
-                values["candidate_id"],
-                approved=values["approved"],
-                reviewer=values["reviewer"],
+                command.candidate_id,
+                approved=command.approved,
+                reviewer=command.reviewer,
                 now=now,
             )
             lifecycle_status = candidate.status.value
-        elif action == "EVALUATE_OPTIMIZATION_ELIGIBILITY":
+        elif isinstance(command, EvaluateGoalEligibilityCommandV1):
             candidate = self.lifecycle.evaluate_optimization_eligibility(
-                values["candidate_id"],
+                command.candidate_id,
                 observed_at=datetime.fromisoformat(
-                    values["observed_at"].replace("Z", "+00:00")
+                    command.observed_at.replace("Z", "+00:00")
                 ),
-                sample_clicks=values["sample_clicks"],
-                sample_conversions=values["sample_conversions"],
+                sample_clicks=command.sample_clicks,
+                sample_conversions=command.sample_conversions,
             )
             lifecycle_status = (
                 "OPTIMIZATION_ELIGIBLE"
                 if candidate.optimization_eligible
                 else "OPTIMIZATION_INELIGIBLE"
             )
-        else:
-            assert action == "CLEANUP_REJECTED_CANDIDATE"
+        elif isinstance(command, CleanupRejectedGoalCommandV1):
             self.lifecycle.cleanup_rejected_candidate(
-                values["candidate_id"],
-                run_id=values["run_id"],
+                command.candidate_id,
+                run_id=command.run_id,
             )
-            candidate = self.lifecycle.store.load_candidate(values["candidate_id"])
+            candidate = self._bound_candidate(command.candidate_id)
             lifecycle_status = "CLEANED_UP"
         return self._outcome(
-            action=action,
+            action=command.action,
             lifecycle_status=lifecycle_status,
             candidate=candidate,
             technical_evidence=technical_evidence,
         )
+
+    def _bound_candidate(self, candidate_id: str) -> GoalCandidateRecord:
+        candidate = self.lifecycle.store.load_candidate(candidate_id)
+        if candidate.counter_id != self.counter_id:
+            raise MetrikaGoalLifecycleAuthorizationError(
+                "The stored test connection does not authorize this candidate."
+            )
+        return candidate
 
     @staticmethod
     def _event_evidence(value: GoalEventEvidenceV1) -> GoalEventEvidence:
@@ -163,9 +199,7 @@ class BoundMetrikaGoalLifecycleProviderV1:
                 intercepted_locally=technical_evidence.intercepted_locally,
                 real_network_requests=technical_evidence.real_network_requests,
                 delivery_observed=technical_evidence.delivery_observed,
-                virtual_elapsed_minutes=(
-                    technical_evidence.virtual_elapsed_minutes
-                ),
+                virtual_elapsed_minutes=(technical_evidence.virtual_elapsed_minutes),
                 poll_count=technical_evidence.poll_count,
                 checked_at=technical_evidence.checked_at,
             )
@@ -200,8 +234,18 @@ class StandaloneMetrikaGoalLifecycleV1:
         self._clock = clock
 
     def invoke(self, request: ModuleRequestV1) -> ModuleResultV1:
-        assert request.goal_lifecycle_command is not None
-        assert request.scope.counter_id is not None
+        if request.goal_lifecycle_command is None:
+            return self._rejected(
+                request,
+                code="METRIKA_GOAL_COMMAND_REQUIRED",
+                message="A typed goal lifecycle command is required.",
+            )
+        if request.scope.counter_id is None:
+            return self._rejected(
+                request,
+                code="METRIKA_GOAL_SCOPE_REJECTED",
+                message="A test counter is required.",
+            )
         try:
             outcome = self._provider.manage_goal_candidate(
                 request.connection_ref.connection_id,

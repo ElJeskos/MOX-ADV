@@ -30,6 +30,7 @@ from mox_adv.module_api.v1 import (
 )
 from mox_adv.modules.metrika import (
     BoundMetrikaGoalLifecycleProviderV1,
+    MetrikaGoalLifecycleAuthorizationError,
     MetrikaModuleV1,
 )
 
@@ -52,7 +53,7 @@ def goal_candidate(event: str = "lead_submitted") -> dict[str, Any]:
     }
     name, selector, meaning = details[event]
     return {
-        "schema_version": "goal-candidate-v1",
+        "schema_version": "goal-candidate-input-v1",
         "name": name,
         "event": event,
         "site_location": selector,
@@ -61,6 +62,12 @@ def goal_candidate(event: str = "lead_submitted") -> dict[str, Any]:
         "priority": 1,
         "duplicate_signals": [],
     }
+
+
+def legacy_goal_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    value = dict(candidate)
+    value["schema_version"] = "goal-candidate-v1"
+    return value
 
 
 def goal_request(command: dict[str, Any]) -> dict[str, Any]:
@@ -106,9 +113,14 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.store = GoalLifecycleStore(Path(temporary.name) / "goals.sqlite3")
-        self.goal_adapter = FakeMetrikaGoalAdapter(("sim-test-counter",))
+        self.goal_adapter = FakeMetrikaGoalAdapter(
+            ("sim-test-counter", "sim-pilot-counter")
+        )
         self.site_adapter = FakeSitePublishAdapter(
-            {"sim-test-site-zone": "test-page-v1"}
+            {
+                "sim-test-site-zone": "test-page-v1",
+                "sim-pilot-site-zone": "pilot-page-v1",
+            }
         )
         self.lifecycle = GoalLifecycleService(
             self.policy,
@@ -169,7 +181,7 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
                 counter_id="sim-test-counter",
                 site_zone="sim-test-site-zone",
                 credential_profile="METRIKA_TEST_WRITE",
-                payload=candidate,
+                payload=legacy_goal_candidate(candidate),
             ),
         )
         self.store.register_reservation(reservation)
@@ -228,6 +240,55 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
         request["idempotency_key"] = "publish-" + candidate.run_id
         return self.adapter.handle(request).body
 
+    def _seed_pilot_candidate(self) -> str:
+        run_id = "pilot-run"
+        proposal_id = "pilot-proposal"
+        candidate = goal_candidate("form_started")
+        reservation = CreationReservation(
+            reservation_id="pilot-reservation",
+            scope_binding="pilot_counter",
+            object_type="METRIKA_GOAL",
+            proposal_id=proposal_id,
+            credential_profile="METRIKA_PILOT_WRITE",
+            expires_at=NOW + timedelta(minutes=15),
+        )
+        authority = GoalAuthority(
+            authority_id="pilot-authority",
+            kind=AuthorityKind.MANDATE,
+            principal="sviridov",
+            authentication="authenticated_macos_user",
+            proposal_id=proposal_id,
+            counter_id="sim-pilot-counter",
+            site_zone="sim-pilot-site-zone",
+            allowed_actions=("GOAL_AUTHORING",),
+            expires_at=NOW + timedelta(hours=1),
+            policy_id=self.policy["policy_id"],
+            binding_hash=goal_creation_binding(
+                policy_id=self.policy["policy_id"],
+                run_id=run_id,
+                candidate_id="candidate-" + run_id,
+                proposal_id=proposal_id,
+                reservation_id=reservation.reservation_id,
+                counter_id="sim-pilot-counter",
+                site_zone="sim-pilot-site-zone",
+                credential_profile="METRIKA_PILOT_WRITE",
+                payload=legacy_goal_candidate(candidate),
+            ),
+        )
+        self.store.register_reservation(reservation)
+        self.store.register_authority(authority)
+        created = self.lifecycle.create_candidate(
+            run_id=run_id,
+            proposal_id=proposal_id,
+            reservation_id=reservation.reservation_id,
+            authority_id=authority.authority_id,
+            counter_id="sim-pilot-counter",
+            credential_profile="METRIKA_PILOT_WRITE",
+            payload=legacy_goal_candidate(candidate),
+            now=NOW,
+        )
+        return created.candidate_id
+
     def _invoke(
         self,
         command: dict[str, Any],
@@ -254,9 +315,7 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
                 "optimization_eligible": False,
                 "cleaned_up": False,
                 "event_evidence": None,
-                "evidence_digest": result["lifecycle_outcome"][
-                    "evidence_digest"
-                ],
+                "evidence_digest": result["lifecycle_outcome"]["evidence_digest"],
             },
             result["lifecycle_outcome"],
         )
@@ -269,9 +328,7 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
             result["decision_record_ref"],
             r"^decision-records/[0-9a-f]{64}\.json$",
         )
-        record = self.module.decision_records.read(
-            result["decision_record_ref"]
-        )
+        record = self.module.decision_records.read(result["decision_record_ref"])
         self.assertEqual(
             result["lifecycle_outcome"],
             record["facts"]["lifecycle_outcome"],
@@ -318,9 +375,7 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
                     "request_url": browser_evidence.request_url,
                     "emitted_count": browser_evidence.emitted_count,
                     "intercepted_locally": browser_evidence.intercepted_locally,
-                    "real_network_requests": (
-                        browser_evidence.real_network_requests
-                    ),
+                    "real_network_requests": (browser_evidence.real_network_requests),
                 },
             },
             "verify-goal-run-1",
@@ -359,9 +414,7 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
             "OPTIMIZATION_ELIGIBLE",
             eligible["lifecycle_outcome"]["lifecycle_status"],
         )
-        self.assertTrue(
-            eligible["lifecycle_outcome"]["optimization_eligible"]
-        )
+        self.assertTrue(eligible["lifecycle_outcome"]["optimization_eligible"])
         parsed = ModuleResultV1.from_dict(verified)
         tampered = parsed.as_dict()
         tampered["lifecycle_outcome"]["event_evidence"]["emitted_count"] = 2
@@ -395,9 +448,7 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
             "REJECTED",
             rejected["lifecycle_outcome"]["candidate_status"],
         )
-        self.assertFalse(
-            rejected["lifecycle_outcome"]["optimization_eligible"]
-        )
+        self.assertFalse(rejected["lifecycle_outcome"]["optimization_eligible"])
         self.goal_adapter.seed_existing_goal(
             "sim-test-counter",
             {
@@ -489,9 +540,7 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
             "method": "POST",
             "url": "https://api-metrika.yandex.net/management/v1/counter/other/goals",
         }
-        rejected_contract = self.adapter.handle(
-            goal_request(arbitrary_payload)
-        )
+        rejected_contract = self.adapter.handle(goal_request(arbitrary_payload))
         self.assertEqual(400, rejected_contract.status_code)
         self.assertEqual(0, self.goal_adapter.add_calls)
         wrong_scope = goal_request(command)
@@ -505,6 +554,88 @@ class StandaloneMetrikaGoalLifecycleE2ETests(unittest.TestCase):
             rejected_scope.body["errors"][0]["code"],
         )
         self.assertEqual(0, self.goal_adapter.add_calls)
+
+    def test_non_create_action_cannot_cross_the_bound_candidate_counter(
+        self,
+    ) -> None:
+        candidate_id = self._seed_pilot_candidate()
+
+        result = self._invoke(
+            {
+                "schema_version": "goal-lifecycle-command-v1",
+                "action": "DECIDE_BUSINESS_SEMANTICS",
+                "candidate_id": candidate_id,
+                "approved": False,
+                "reviewer": "sviridov",
+            },
+            "cross-counter-decision",
+        )
+
+        self.assertEqual("REJECTED", result["status"])
+        self.assertEqual(
+            "METRIKA_GOAL_SCOPE_REJECTED",
+            result["errors"][0]["code"],
+        )
+        self.assertEqual(
+            "CANDIDATE",
+            self.store.load_candidate(candidate_id).status.value,
+        )
+
+    def test_trusted_composition_requires_test_counter_and_write_profile(
+        self,
+    ) -> None:
+        for counter_id, credential_profile in (
+            ("sim-pilot-counter", "METRIKA_TEST_WRITE"),
+            ("sim-test-counter", "METRIKA_PILOT_WRITE"),
+        ):
+            with (
+                self.subTest(
+                    counter_id=counter_id,
+                    credential_profile=credential_profile,
+                ),
+                self.assertRaises(MetrikaGoalLifecycleAuthorizationError),
+            ):
+                BoundMetrikaGoalLifecycleProviderV1(
+                    connection_id="invalid-binding",
+                    counter_id=counter_id,
+                    credential_profile=credential_profile,
+                    lifecycle=self.lifecycle,
+                )
+
+    def test_missing_or_malformed_typed_command_is_a_contract_rejection(
+        self,
+    ) -> None:
+        valid = goal_request(
+            {
+                "schema_version": "goal-lifecycle-command-v1",
+                "action": "CREATE_CANDIDATE",
+                "run_id": "valid-run",
+                "proposal_id": "valid-proposal",
+                "reservation_id": "valid-reservation",
+                "authority_id": "valid-authority",
+                "candidate": goal_candidate(),
+            }
+        )
+        missing = dict(valid)
+        missing.pop("goal_lifecycle_command")
+        missing_response = self.adapter.handle(missing)
+        malformed = goal_request(
+            {
+                "schema_version": "goal-lifecycle-command-v1",
+                "action": "CLEANUP_REJECTED_CANDIDATE",
+                "candidate_id": "../pilot-candidate",
+                "run_id": "valid-run",
+            }
+        )
+        malformed_response = self.adapter.handle(malformed)
+
+        for response in (missing_response, malformed_response):
+            self.assertEqual(400, response.status_code)
+            self.assertEqual("REJECTED", response.body["status"])
+            self.assertEqual(
+                "CONTRACT_VALIDATION_FAILED",
+                response.body["errors"][0]["code"],
+            )
 
 
 if __name__ == "__main__":
