@@ -79,6 +79,15 @@ The Python operation mapping is canonical for the closed operation vocabulary, a
 Generating the complete OpenAPI document from code is intentionally deferred to a dedicated contract-tooling slice.
 The existing paired runtime and Dashboard continue to use the legacy composition until their dedicated migration slice.
 
+## Standalone Metrika
+
+`MetrikaModuleV1` runs headlessly through either the HTTP/JSON or in-process module adapter.
+It can start without Direct, the Dashboard, or a provider reader when the customer supplies validated `visits` and `goal_visits` evidence.
+Provider-owned reads use `BoundMetrikaReadProviderV1` to bind a stored connection to one allowlisted counter, goal, and campaign before the underlying read connector is called.
+The module validates the closed period, daily grain, scope, attribution, timestamps, watermark ordering, and the six-hour Metrika freshness window.
+It returns the existing exact conversion-rate calculation, assessment, non-executable recommendations, provenance, warnings, typed errors, and a Decision Record reference.
+Because Metrika alone has no campaign spend or state, the standalone result is partial and never produces a financial proposal.
+
 ## Environment safety
 
 Every legacy execution service and provider egress guard requires an explicit trusted `ExecutionEnvironment`.

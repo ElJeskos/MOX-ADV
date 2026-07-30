@@ -7,7 +7,7 @@ import hashlib
 import json
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Protocol
+from typing import Any, Dict, Mapping, Protocol, Sequence
 
 from mox_adv.environment import (
     PRODUCTION_WRITE_FORBIDDEN,
@@ -17,7 +17,6 @@ from mox_adv.module_api.v1.contracts import (
     ModuleIdentityV1,
     ModuleRequestV1,
 )
-
 
 MODULE_DECISION_RECORD_SCHEMA_VERSION = "module-decision-record-v1"
 
@@ -38,6 +37,16 @@ class ModuleDecisionRecordStoreV1(Protocol):
         module: ModuleIdentityV1,
         request: ModuleRequestV1,
         trusted_environment: ExecutionEnvironment,
+    ) -> ModuleDecisionRecordReceiptV1: ...
+
+    def record_module_decision(
+        self,
+        module: ModuleIdentityV1,
+        request: ModuleRequestV1,
+        *,
+        outcome: str,
+        reason_codes: Sequence[str],
+        facts: Mapping[str, Any],
     ) -> ModuleDecisionRecordReceiptV1: ...
 
 
@@ -66,6 +75,34 @@ class InMemoryDecisionRecordStoreV1:
             "outcome": "BLOCKED",
             "reason_code": PRODUCTION_WRITE_FORBIDDEN,
         }
+        return self._store(record)
+
+    def record_module_decision(
+        self,
+        module: ModuleIdentityV1,
+        request: ModuleRequestV1,
+        *,
+        outcome: str,
+        reason_codes: Sequence[str],
+        facts: Mapping[str, Any],
+    ) -> ModuleDecisionRecordReceiptV1:
+        record: Dict[str, Any] = {
+            "schema_version": MODULE_DECISION_RECORD_SCHEMA_VERSION,
+            "module": module.as_dict(),
+            "idempotency_key": request.idempotency_key,
+            "environment": request.environment,
+            "operation_kind": request.operation.kind,
+            "operation_type": request.operation.operation_type,
+            "outcome": outcome,
+            "reason_codes": list(reason_codes),
+            "facts": copy.deepcopy(dict(facts)),
+        }
+        return self._store(record)
+
+    def _store(
+        self,
+        record: Mapping[str, Any],
+    ) -> ModuleDecisionRecordReceiptV1:
         canonical = json.dumps(
             record,
             ensure_ascii=True,
@@ -74,7 +111,7 @@ class InMemoryDecisionRecordStoreV1:
         )
         decision_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         reference = "decision-records/" + decision_id + ".json"
-        stored = dict(record)
+        stored = copy.deepcopy(dict(record))
         stored["decision_id"] = decision_id
         with self._lock:
             self._records[reference] = stored

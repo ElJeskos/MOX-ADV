@@ -81,6 +81,22 @@ def _decimal_text(value: MetricValue) -> str:
     return format(normalized, "f")
 
 
+def calculate_metrika_metrics(
+    *,
+    visits: int,
+    goal_visits: int,
+) -> Mapping[str, Union[int, str]]:
+    """Calculate the provider-native Metrika aggregate with legacy precision."""
+
+    return {
+        "visits": visits,
+        "goal_visits": goal_visits,
+        "conversion_rate_percent": _decimal_text(
+            _ratio(goal_visits, visits, ONE_HUNDRED)
+        ),
+    }
+
+
 def _display(value: MetricValue) -> str:
     if isinstance(value, str):
         return value
