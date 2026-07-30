@@ -19,20 +19,16 @@ class DirectActionRuntimeV1:
     policy: Mapping[str, Any]
     state: DurableControlState
     proposal_store: ImmutableProposalStore
+    trigger_store: MonitoringStore
     test_adapter: Optional[FakeWriteAdapter]
     environment: ExecutionEnvironment
-    trigger_store: Optional[MonitoringStore] = None
 
     def __post_init__(self) -> None:
         trusted_environment = parse_execution_environment(self.environment)
         object.__setattr__(self, "environment", trusted_environment)
-        if self.trigger_store is None:
-            object.__setattr__(
-                self,
-                "trigger_store",
-                MonitoringStore(
-                    self.proposal_store.root.parent / "monitoring.sqlite3"
-                ),
+        if not isinstance(self.trigger_store, MonitoringStore):
+            raise ValueError(
+                "Standalone Direct requires an explicit MonitoringStore."
             )
         if (
             self.test_adapter is not None

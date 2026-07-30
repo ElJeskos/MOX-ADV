@@ -26,6 +26,7 @@ from mox_adv.module_api.v1 import (
     ModuleRequestV1,
     ModuleResultV1,
 )
+from mox_adv.monitoring import MonitoringStore
 from mox_adv.modules.direct import (
     BoundDirectReadProviderV1,
     DirectModuleV1,
@@ -1166,6 +1167,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 ),
                 state=state,
                 proposal_store=ImmutableProposalStore(root / "proposals"),
+                trigger_store=MonitoringStore(root / "monitoring.sqlite3"),
                 test_adapter=adapter,
                 environment=ExecutionEnvironment.TEST,
             )
@@ -1255,6 +1257,61 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             self.assertEqual(1, adapter.write_calls)
             self.assertGreaterEqual(len(reader.state_calls), 3)
 
+    def test_expired_trigger_proposal_is_replaced_without_duplicate_active_rows(
+        self,
+    ) -> None:
+        from mox_adv.control_state import DurableControlState
+        from mox_adv.direct_action import DirectActionRuntimeV1
+        from mox_adv.fake_write_adapter import FakeWriteAdapter
+        from mox_adv.proposal_store import ImmutableProposalStore
+
+        current_time = [
+            datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trigger_store = MonitoringStore(root / "monitoring.sqlite3")
+            runtime = DirectActionRuntimeV1(
+                policy=json.loads(
+                    (ROOT / "config" / "gate0-policy.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+                state=DurableControlState(root / "control.sqlite3"),
+                proposal_store=ImmutableProposalStore(root / "proposals"),
+                trigger_store=trigger_store,
+                test_adapter=FakeWriteAdapter(),
+                environment=ExecutionEnvironment.TEST,
+            )
+            http = HttpJsonModuleAdapterV1(
+                DirectModuleV1(
+                    clock=lambda: current_time[0],
+                    provider_reader=ActionAuthorizedDirectReader(),
+                    action_runtime=runtime,
+                ),
+                environment=ExecutionEnvironment.TEST,
+            )
+
+            first = http.handle(direct_action_plan_request())
+            current_time[0] += timedelta(minutes=31)
+            replacement_request = direct_action_plan_request()
+            replacement_request["idempotency_key"] = "after-expiry-18"
+            replacement = http.handle(replacement_request)
+
+            self.assertEqual(200, first.status_code)
+            self.assertEqual(200, replacement.status_code)
+            self.assertNotEqual(
+                first.body["proposal"]["proposal_id"],
+                replacement.body["proposal"]["proposal_id"],
+            )
+            self.assertFalse(replacement.body["proposal"]["deduplicated"])
+            duplicate = http.handle(replacement_request)
+            self.assertEqual(
+                replacement.body["proposal"]["proposal_id"],
+                duplicate.body["proposal"]["proposal_id"],
+            )
+            self.assertTrue(duplicate.body["proposal"]["deduplicated"])
+
     def test_changed_direct_fingerprint_blocks_before_test_adapter_write(
         self,
     ) -> None:
@@ -1285,6 +1342,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 ),
                 state=state,
                 proposal_store=ImmutableProposalStore(root / "proposals"),
+                trigger_store=MonitoringStore(root / "monitoring.sqlite3"),
                 test_adapter=adapter,
                 environment=ExecutionEnvironment.TEST,
             )
@@ -1362,6 +1420,9 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                     ),
                     state=DurableControlState(root / "control.sqlite3"),
                     proposal_store=ImmutableProposalStore(root / "proposals"),
+                    trigger_store=MonitoringStore(
+                        root / "monitoring.sqlite3"
+                    ),
                     test_adapter=adapter,
                     environment=ExecutionEnvironment.TEST,
                 )
@@ -1410,7 +1471,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
         cases = (
             ("cooldown", "COOLDOWN_ACTIVE"),
-            ("observation_window", "COOLDOWN_ACTIVE"),
+            ("observation_window", "OBSERVATION_WINDOW_ACTIVE"),
             ("quota", "ACTION_QUOTA_REACHED"),
             ("kill_switch", "KILL_SWITCH_ACTIVE"),
             ("unavailable", "CONTROL_STATE_UNAVAILABLE"),
@@ -1450,6 +1511,9 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                     policy=policy,
                     state=state,
                     proposal_store=ImmutableProposalStore(root / "proposals"),
+                    trigger_store=MonitoringStore(
+                        root / "monitoring.sqlite3"
+                    ),
                     test_adapter=adapter,
                     environment=ExecutionEnvironment.TEST,
                 )
@@ -1552,6 +1616,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 ),
                 state=state,
                 proposal_store=ImmutableProposalStore(root / "proposals"),
+                trigger_store=MonitoringStore(root / "monitoring.sqlite3"),
                 test_adapter=adapter,
                 environment=ExecutionEnvironment.TEST,
             )

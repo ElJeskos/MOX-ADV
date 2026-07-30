@@ -90,6 +90,21 @@ class ImmutableProposalStore:
         projection: Mapping[str, Any],
         at: Optional[datetime] = None,
     ) -> Optional[OptimizationProposalV1]:
+        proposal = self.load(proposal_id, projection)
+        if proposal is None:
+            return None
+        now = datetime.now(timezone.utc) if at is None else at.astimezone(timezone.utc)
+        if _parse_utc(proposal.expires_at, "Proposal expiry") <= now:
+            return None
+        return proposal
+
+    def load(
+        self,
+        proposal_id: str,
+        projection: Mapping[str, Any],
+    ) -> Optional[OptimizationProposalV1]:
+        """Load an immutable proposal regardless of its active time window."""
+
         if _SAFE_IDENTIFIER.fullmatch(proposal_id) is None:
             raise SchemaValidationError("Proposal ID is invalid.")
         path = self.root / (proposal_id + ".json")
@@ -102,9 +117,6 @@ class ImmutableProposalStore:
         )
         if _canonical_hash(proposal.as_dict()) != envelope["canonical_hash"]:
             raise ProposalConflictError("Stored proposal canonical hash is invalid.")
-        now = datetime.now(timezone.utc) if at is None else at.astimezone(timezone.utc)
-        if _parse_utc(proposal.expires_at, "Proposal expiry") <= now:
-            return None
         return proposal
 
     @staticmethod

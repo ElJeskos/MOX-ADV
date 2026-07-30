@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from mox_adv.direct_analysis import DIRECT_IDENTITY
-from mox_adv.impact import ImpactEvaluator, ImpactRejected
+from mox_adv.impact import (
+    IMPACT_NEXT_DECISIONS,
+    ImpactEvaluator,
+    ImpactRejected,
+)
 from mox_adv.module_analysis import terminal_module_result
 from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
@@ -56,6 +60,8 @@ class StandaloneDirectImpactEvaluationV1:
         policy: Mapping[str, Any],
         decision_records: ModuleDecisionRecordStoreV1,
     ) -> None:
+        if tuple(_RECOMMENDATIONS) != IMPACT_NEXT_DECISIONS:
+            raise ValueError("Direct impact recommendation vocabulary is invalid.")
         self._evaluator = ImpactEvaluator(policy)
         self._decision_records = decision_records
 

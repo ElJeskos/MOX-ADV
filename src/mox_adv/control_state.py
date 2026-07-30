@@ -370,6 +370,7 @@ class OperationalExecutionFacts:
     """Current durable limits and interrupt availability for a write decision."""
 
     cooldown_active: bool
+    observation_window_active: bool
     actions_in_last_24h: int
     cumulative_daily_change_percent: int
     kill_switch_available: bool
@@ -1102,6 +1103,7 @@ class DurableControlState:
         now: datetime,
         *,
         cooldown_hours: int,
+        observation_window_hours: Optional[int] = None,
     ) -> OperationalExecutionFacts:
         """Read current ledger limits and prove kill-switch storage is available."""
 
@@ -1115,6 +1117,15 @@ class DurableControlState:
                 "cooldown hours must be a positive integer.",
             )
         now_utc = now.astimezone(timezone.utc)
+        if observation_window_hours is not None and (
+            isinstance(observation_window_hours, bool)
+            or not isinstance(observation_window_hours, int)
+            or observation_window_hours < 1
+        ):
+            raise ControlRejected(
+                "INVALID_INPUT",
+                "observation window hours must be a positive integer.",
+            )
         self.any_kill_switch_active(scope)
         try:
             with self._connect() as connection:
@@ -1134,9 +1145,15 @@ class DurableControlState:
         last_24_hours = now_utc - timedelta(hours=24)
         day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
         cooldown_start = now_utc - timedelta(hours=cooldown_hours)
+        observation_start = (
+            None
+            if observation_window_hours is None
+            else now_utc - timedelta(hours=observation_window_hours)
+        )
         action_count = 0
         cumulative_change = 0
         cooldown_active = False
+        observation_window_active = False
         try:
             for row in rows:
                 updated_at = _parse_utc(str(row["updated_at"]))
@@ -1144,6 +1161,11 @@ class DurableControlState:
                     action_count += 1
                 if updated_at >= cooldown_start:
                     cooldown_active = True
+                if (
+                    observation_start is not None
+                    and updated_at >= observation_start
+                ):
+                    observation_window_active = True
                 if updated_at < day_start:
                     continue
                 prepared = json.loads(str(row["canonical_json"]))
@@ -1161,6 +1183,7 @@ class DurableControlState:
             ) from error
         return OperationalExecutionFacts(
             cooldown_active=cooldown_active,
+            observation_window_active=observation_window_active,
             actions_in_last_24h=action_count,
             cumulative_daily_change_percent=cumulative_change,
             kill_switch_available=True,

@@ -71,6 +71,7 @@ class ExecutionFacts:
     campaign_strategy: str
     current_fingerprint: str
     cooldown_active: bool
+    observation_window_active: bool
     actions_in_last_24h: int
     cumulative_daily_change_percent: int
     monetary_exposure_rub: int
@@ -221,6 +222,10 @@ class ApprovalRequiredPolicy:
                 "FINGERPRINT_MISMATCH",
             ),
             (not facts.cooldown_active, "COOLDOWN_ACTIVE"),
+            (
+                not facts.observation_window_active,
+                "OBSERVATION_WINDOW_ACTIVE",
+            ),
             (
                 facts.actions_in_last_24h
                 < int(self.policy["limits"]["mandate_actions_per_24h"]),

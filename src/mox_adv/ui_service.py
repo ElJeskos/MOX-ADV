@@ -383,6 +383,7 @@ def _execute_simulated_change(
             campaign_strategy=str(snapshot["campaign"]["strategy"]),
             current_fingerprint=prepared.expected_fingerprint,
             cooldown_active=False,
+            observation_window_active=False,
             actions_in_last_24h=0,
             cumulative_daily_change_percent=0,
             monetary_exposure_rub=(

@@ -10,6 +10,7 @@ from typing import Any
 
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.module_api.v1 import (
+    IMPACT_NEXT_DECISIONS,
     OPERATION_TYPES_BY_KIND,
     ContractValidationError,
     HttpJsonModuleAdapterV1,
@@ -536,12 +537,7 @@ class OpenAPIContractTests(unittest.TestCase):
             schemas["ModuleResultV1"]["properties"]["impact_outcome"],
         )
         self.assertEqual(
-            [
-                "KEEP_CHANGE",
-                "ROLLBACK_CHANGE",
-                "ADJUST_CHANGE",
-                "ESCALATE_TO_HUMAN",
-            ],
+            list(IMPACT_NEXT_DECISIONS),
             schemas["ImpactEvaluationOutcomeV1"]["properties"][
                 "next_decision"
             ]["enum"],

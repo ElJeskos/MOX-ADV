@@ -157,6 +157,7 @@ def make_facts() -> ExecutionFacts:
         campaign_strategy="HIGHEST_POSITION",
         current_fingerprint="sha256:" + "2" * 64,
         cooldown_active=False,
+        observation_window_active=False,
         actions_in_last_24h=0,
         cumulative_daily_change_percent=0,
         monetary_exposure_rub=200,

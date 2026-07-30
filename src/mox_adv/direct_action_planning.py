@@ -89,6 +89,23 @@ class DirectActionPlanningV1:
             projection,
             at=now,
         )
+        if (
+            existing is None
+            and self._runtime.proposal_store.load(identifier, projection)
+            is not None
+        ):
+            active_trigger = trigger_store.rotate_active_proposal(
+                fingerprint,
+                TRIGGER_REASON_CODE,
+                identifier,
+                now,
+            )
+            identifier = active_trigger.proposal_id
+            existing = self._runtime.proposal_store.load_active(
+                identifier,
+                projection,
+                at=now,
+            )
         deduplicated = active_trigger.deduplicated or existing is not None
         hypotheses = direct_hypotheses(metrics)
         if existing is None:
@@ -97,7 +114,7 @@ class DirectActionPlanningV1:
                 fingerprint,
                 command,
                 projection,
-                now,
+                datetime.fromisoformat(active_trigger.created_at),
                 hypotheses,
             )
             stored = self._runtime.proposal_store.save(

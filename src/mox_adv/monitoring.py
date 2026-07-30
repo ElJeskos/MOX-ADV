@@ -629,6 +629,81 @@ class MonitoringStore:
                 timestamp,
             )
 
+    def rotate_active_proposal(
+        self,
+        snapshot_id: str,
+        reason_code: str,
+        expected_proposal_id: str,
+        created_at: datetime,
+    ) -> ActiveProposal:
+        """Replace one expired active proposal without racing another planner."""
+
+        timestamp = _utc(created_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT proposal_id, created_at FROM active_proposals "
+                "WHERE snapshot_id = ? AND reason_code = ? AND active = 1",
+                (snapshot_id, reason_code),
+            ).fetchone()
+            if current is None:
+                return self._active_proposal(
+                    connection,
+                    snapshot_id,
+                    reason_code,
+                    timestamp,
+                )
+            if str(current[0]) != expected_proposal_id:
+                return ActiveProposal(
+                    proposal_id=str(current[0]),
+                    snapshot_id=snapshot_id,
+                    reason_code=reason_code,
+                    created_at=str(current[1]),
+                    deduplicated=True,
+                )
+            connection.execute(
+                "UPDATE active_proposals SET active = 0 "
+                "WHERE proposal_id = ? AND active = 1",
+                (expected_proposal_id,),
+            )
+            generation = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM active_proposals "
+                    "WHERE snapshot_id = ? AND reason_code = ?",
+                    (snapshot_id, reason_code),
+                ).fetchone()[0]
+            )
+            proposal_id = (
+                "monitoring-proposal-"
+                + hashlib.sha256(
+                    (
+                        snapshot_id
+                        + "\x00"
+                        + reason_code
+                        + "\x00"
+                        + str(generation)
+                    ).encode("utf-8")
+                ).hexdigest()[:24]
+            )
+            connection.execute(
+                "INSERT INTO active_proposals("
+                "proposal_id, snapshot_id, reason_code, created_at, active"
+                ") VALUES (?, ?, ?, ?, 1)",
+                (
+                    proposal_id,
+                    snapshot_id,
+                    reason_code,
+                    timestamp.isoformat(),
+                ),
+            )
+            return ActiveProposal(
+                proposal_id=proposal_id,
+                snapshot_id=snapshot_id,
+                reason_code=reason_code,
+                created_at=timestamp.isoformat(),
+                deduplicated=False,
+            )
+
     @staticmethod
     def _save_snapshot(
         connection: sqlite3.Connection,

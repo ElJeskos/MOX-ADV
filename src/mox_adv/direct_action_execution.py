@@ -199,13 +199,11 @@ class DirectActionExecutionV1:
         operational = self._runtime.state.load_operational_execution_facts(
             prepared.scope,
             now,
-            cooldown_hours=max(
-                int(self._runtime.policy["timing"]["cooldown_hours"]),
-                int(
-                    self._runtime.policy["timing"][
-                        "observation_window_hours"
-                    ]
-                ),
+            cooldown_hours=int(
+                self._runtime.policy["timing"]["cooldown_hours"]
+            ),
+            observation_window_hours=int(
+                self._runtime.policy["timing"]["observation_window_hours"]
             ),
         )
         return ExecutionFacts(
@@ -233,6 +231,9 @@ class DirectActionExecutionV1:
             campaign_strategy=current.state.strategy,
             current_fingerprint=fingerprint,
             cooldown_active=operational.cooldown_active,
+            observation_window_active=(
+                operational.observation_window_active
+            ),
             actions_in_last_24h=operational.actions_in_last_24h,
             cumulative_daily_change_percent=(
                 operational.cumulative_daily_change_percent

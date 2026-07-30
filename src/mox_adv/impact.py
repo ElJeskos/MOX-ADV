@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
-_DECISIONS = (
+IMPACT_NEXT_DECISIONS = (
     "KEEP_CHANGE",
     "ROLLBACK_CHANGE",
     "ADJUST_CHANGE",
@@ -318,7 +318,7 @@ class ImpactEvaluator:
 
     def __init__(self, policy: Mapping[str, Any]) -> None:
         self.policy = policy
-        if tuple(policy["impact"]["decision_values"]) != _DECISIONS:
+        if tuple(policy["impact"]["decision_values"]) != IMPACT_NEXT_DECISIONS:
             raise ImpactRejected("Gate 0 impact decision enum is invalid.")
 
     def evaluate(self, request: ImpactEvaluationRequest) -> ImpactReport:
