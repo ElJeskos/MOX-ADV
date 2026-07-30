@@ -17,6 +17,10 @@ from typing import (
 )
 
 from mox_adv.environment import PRODUCTION_WRITE_FORBIDDEN
+from mox_adv.module_api.v1.campaign_creation_contracts import (
+    CampaignCreationOutcomeV1,
+    CreateCampaignCommandV1,
+)
 from mox_adv.module_api.v1.contract_validation import (
     ContractValidationError,
 )
@@ -100,6 +104,12 @@ def _goal_lifecycle_outcome(
     value: Mapping[str, Any],
 ) -> GoalLifecycleOutcomeV1:
     return GoalLifecycleOutcomeV1.from_dict(value)
+
+
+def _campaign_creation_outcome(
+    value: Mapping[str, Any],
+) -> CampaignCreationOutcomeV1:
+    return CampaignCreationOutcomeV1.from_dict(value)
 
 
 @dataclass(frozen=True)
@@ -398,6 +408,7 @@ class ModuleRequestV1:
     idempotency_key: str
     goal_lifecycle_command: Optional[GoalLifecycleCommandV1] = None
     direct_action_command: Optional[DirectActionCommandV1] = None
+    campaign_creation_command: Optional[CreateCampaignCommandV1] = None
 
     def __post_init__(self) -> None:
         _one_of(
@@ -463,25 +474,42 @@ class ModuleRequestV1:
                     "direct_action_command is allowed only for Direct "
                     "optimization operations"
                 )
-            if (
-                self.operation.kind == "PLAN"
-                and not isinstance(
-                    self.direct_action_command,
-                    PlanDirectActionCommandV1,
-                )
+            if self.operation.kind == "PLAN" and not isinstance(
+                self.direct_action_command,
+                PlanDirectActionCommandV1,
             ):
                 raise ContractValidationError(
                     "PLAN_OPTIMIZATION requires a PLAN_INTENT command"
                 )
-            if (
-                self.operation.kind == "EXECUTE"
-                and not isinstance(
-                    self.direct_action_command,
-                    ExecuteDirectActionCommandV1,
-                )
+            if self.operation.kind == "EXECUTE" and not isinstance(
+                self.direct_action_command,
+                ExecuteDirectActionCommandV1,
             ):
                 raise ContractValidationError(
                     "APPLY_OPTIMIZATION requires an EXECUTE_PROPOSAL command"
+                )
+        is_campaign_creation = (
+            self.operation.kind == "EXECUTE"
+            and self.operation.operation_type == "CREATE_CAMPAIGN"
+        )
+        if is_campaign_creation != (self.campaign_creation_command is not None):
+            raise ContractValidationError(
+                "campaign_creation_command is required only for an EXECUTE "
+                "CREATE_CAMPAIGN operation"
+            )
+        if self.campaign_creation_command is not None:
+            if self.external_evidence is not None:
+                raise ContractValidationError(
+                    "campaign creation requests cannot contain external_evidence"
+                )
+            if self.scope.account_id is None or self.scope.campaign_id is not None:
+                raise ContractValidationError(
+                    "campaign creation requests require scope.account_id and "
+                    "cannot target an existing scope.campaign_id"
+                )
+            if self.idempotency_key != self.campaign_creation_command.execution_key:
+                raise ContractValidationError(
+                    "idempotency_key must equal campaign_creation_command.execution_key"
                 )
 
     @classmethod
@@ -504,11 +532,13 @@ class ModuleRequestV1:
                 "external_evidence",
                 "goal_lifecycle_command",
                 "direct_action_command",
+                "campaign_creation_command",
             ),
         )
         external_evidence = value.get("external_evidence")
         goal_lifecycle_command = value.get("goal_lifecycle_command")
         direct_action_command = value.get("direct_action_command")
+        campaign_creation_command = value.get("campaign_creation_command")
         if "external_evidence" in value and external_evidence is None:
             raise ContractValidationError(
                 "external_evidence must be an object when present"
@@ -562,6 +592,16 @@ class ModuleRequestV1:
                 if direct_action_command is None
                 else direct_action_command_object(direct_action_command)
             ),
+            campaign_creation_command=(
+                None
+                if campaign_creation_command is None
+                else CreateCampaignCommandV1.from_dict(
+                    _object(
+                        campaign_creation_command,
+                        "campaign_creation_command",
+                    )
+                )
+            ),
         )
 
     def as_dict(self) -> Dict[str, Any]:
@@ -581,6 +621,10 @@ class ModuleRequestV1:
             value["goal_lifecycle_command"] = self.goal_lifecycle_command.as_dict()
         if self.direct_action_command is not None:
             value["direct_action_command"] = self.direct_action_command.as_dict()
+        if self.campaign_creation_command is not None:
+            value["campaign_creation_command"] = (
+                self.campaign_creation_command.as_dict()
+            )
         return value
 
 
@@ -836,6 +880,8 @@ class ModuleExecutionResultV1:
                 "ALREADY_PROCESSED",
                 "UNKNOWN_RESULT",
                 "FAILED",
+                "PARTIALLY_APPLIED",
+                "COMPENSATION_REQUIRED",
             ),
         )
 
@@ -1026,6 +1072,7 @@ class ModuleResultV1:
     decision_record_ref: Optional[str]
     hypotheses: Tuple[ModuleHypothesisV1, ...] = ()
     lifecycle_outcome: Optional[GoalLifecycleOutcomeV1] = None
+    campaign_creation_outcome: Optional[CampaignCreationOutcomeV1] = None
 
     def __post_init__(self) -> None:
         _one_of(
@@ -1044,6 +1091,13 @@ class ModuleResultV1:
         if self.proposal is not None and self.execution_result is not None:
             raise ContractValidationError(
                 "result cannot contain both proposal and execution_result"
+            )
+        if (
+            self.lifecycle_outcome is not None
+            and self.campaign_creation_outcome is not None
+        ):
+            raise ContractValidationError(
+                "result cannot contain both lifecycle outcomes"
             )
         if status in ("BLOCKED", "REJECTED", "FAILED") and not self.errors:
             raise ContractValidationError(
@@ -1089,11 +1143,13 @@ class ModuleResultV1:
                 "execution_result",
                 "hypotheses",
                 "lifecycle_outcome",
+                "campaign_creation_outcome",
             ),
         )
         proposal_value = value.get("proposal")
         execution_value = value.get("execution_result")
         lifecycle_outcome = value.get("lifecycle_outcome")
+        campaign_creation_outcome = value.get("campaign_creation_outcome")
         errors = tuple(
             ModuleErrorV1.from_dict(
                 _object(item, f"errors[{index}]"),
@@ -1182,6 +1238,16 @@ class ModuleResultV1:
                 if lifecycle_outcome is None
                 else _goal_lifecycle_outcome(
                     _object(lifecycle_outcome, "lifecycle_outcome")
+                )
+            ),
+            campaign_creation_outcome=(
+                None
+                if campaign_creation_outcome is None
+                else _campaign_creation_outcome(
+                    _object(
+                        campaign_creation_outcome,
+                        "campaign_creation_outcome",
+                    )
                 )
             ),
         )
@@ -1299,4 +1365,8 @@ class ModuleResultV1:
         }
         if self.lifecycle_outcome is not None:
             value["lifecycle_outcome"] = self.lifecycle_outcome.as_dict()
+        if self.campaign_creation_outcome is not None:
+            value["campaign_creation_outcome"] = (
+                self.campaign_creation_outcome.as_dict()
+            )
         return value

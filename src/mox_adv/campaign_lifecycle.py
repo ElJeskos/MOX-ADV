@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
+from mox_adv.control_state import (
+    CampaignApprovalRepository,
+    ControlRejected,
+    DurableControlState,
+)
 from mox_adv.direct_management import (
     CreatedDirectObject,
     DirectAdapterFailure,
@@ -19,11 +24,6 @@ from mox_adv.direct_management import (
     DirectOutcomeUnknown,
     DirectService,
     ProductionPilotAuthority,
-)
-from mox_adv.control_state import (
-    CampaignApprovalRepository,
-    ControlRejected,
-    DurableControlState,
 )
 from mox_adv.recommend_contracts import CampaignDraftV1, SchemaValidationError
 
@@ -166,6 +166,14 @@ class CampaignSagaResult:
     completed_steps: Tuple[CampaignSagaStep, ...]
     created_objects: Tuple[CreatedDirectObject, ...]
     detail: Optional[str]
+
+
+@dataclass(frozen=True)
+class CampaignCreatedObjectEvidence:
+    service: DirectService
+    object_id: str
+    actual_type: str
+    compensated: bool
 
 
 def validate_campaign_draft(
@@ -541,7 +549,8 @@ class CampaignSagaStore:
                 raise LifecycleRejected(error.reason_code) from error
             reserved = connection.execute(
                 "UPDATE creation_reservations SET status = 'RESERVED', "
-                "reserved_execution_key = ? WHERE reservation_id = ? AND status = 'AVAILABLE'",
+                "reserved_execution_key = ? WHERE reservation_id = ? "
+                "AND status = 'AVAILABLE'",
                 (request.execution_key, request.reservation_id),
             ).rowcount
             if reserved != 1:
@@ -758,6 +767,44 @@ class CampaignSagaStore:
             )
             for row in rows
         )
+
+    def created_object_evidence(
+        self,
+        run_id: str,
+    ) -> Tuple[CampaignCreatedObjectEvidence, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT service, object_id, actual_type, compensated_at "
+                "FROM campaign_created_objects WHERE run_id = ? ORDER BY rowid",
+                (run_id,),
+            ).fetchall()
+        return tuple(
+            CampaignCreatedObjectEvidence(
+                service=DirectService(row["service"]),
+                object_id=row["object_id"],
+                actual_type=row["actual_type"],
+                compensated=row["compensated_at"] is not None,
+            )
+            for row in rows
+        )
+
+    def step_response(
+        self,
+        execution_key: str,
+        step_name: CampaignSagaStep,
+    ) -> Optional[Mapping[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT response_json FROM campaign_saga_steps "
+                "WHERE execution_key = ? AND step_name = ?",
+                (execution_key, CampaignSagaStep(step_name).value),
+            ).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row["response_json"])
+        if not isinstance(value, dict):
+            raise LifecycleRejected("SAGA_STEP_RESPONSE_INVALID")
+        return value
 
     def register_created_objects(
         self,

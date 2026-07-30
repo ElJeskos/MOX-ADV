@@ -129,6 +129,84 @@ def request_payload(
                 "duplicate_signals": [],
             },
         }
+    elif operation_type == "CREATE_CAMPAIGN":
+        payload.pop("external_evidence")
+        payload["scope"] = {
+            "organization_id": "customer-42",
+            "account_id": "account-8",
+        }
+        execution_key = "customer-run-create-campaign"
+        payload["idempotency_key"] = execution_key
+        payload["campaign_creation_command"] = {
+            "schema_version": "campaign-creation-command-v1",
+            "command": "CREATE_CAMPAIGN",
+            "run_id": "safety-campaign-run",
+            "execution_key": execution_key,
+            "proposal_id": "safety-campaign-proposal",
+            "approval_id": "safety-campaign-approval",
+            "reservation_id": "safety-campaign-reservation",
+            "draft": {
+                "schema_version": "campaign-draft-v1",
+                "draft_id": "safety-campaign-draft",
+                "business_goal": {
+                    "event": "lead_submitted",
+                    "meaning": "A visitor submitted the lead form.",
+                },
+                "primary_conversion": {"event": "lead_submitted"},
+                "campaign_type": "UNIFIED_CAMPAIGN",
+                "strategy": {
+                    "placement": "SEARCH",
+                    "search": "HIGHEST_POSITION",
+                    "network": "SERVING_OFF",
+                },
+                "geography": ["RU"],
+                "schedule": {
+                    "timezone": "Europe/Moscow",
+                    "days": ["MONDAY"],
+                    "start": "09:00",
+                    "end": "18:00",
+                },
+                "budget": {
+                    "currency": "RUB",
+                    "weekly_micros": 500_000_000,
+                },
+                "limits": {
+                    "maximum_weekly_micros": 500_000_000,
+                    "maximum_bid_micros": 100_000_000,
+                },
+                "groups": [
+                    {
+                        "name": "Lead service",
+                        "keywords": ["lead service"],
+                        "negative_keywords": ["free"],
+                        "audiences": [],
+                        "ads": [
+                            {
+                                "variant_id": "A",
+                                "title": "Lead service",
+                                "text": "Submit a request",
+                                "landing_page": ("https://allowlisted.example/lead"),
+                                "utm": "utm_source=yandex&utm_content=a",
+                                "media_reference": "prepared-media-1",
+                            },
+                            {
+                                "variant_id": "B",
+                                "title": "Lead service alternative",
+                                "text": "Request a consultation",
+                                "landing_page": ("https://allowlisted.example/lead"),
+                                "utm": "utm_source=yandex&utm_content=b",
+                                "media_reference": "prepared-media-2",
+                            },
+                        ],
+                    }
+                ],
+                "landing_page": "https://allowlisted.example/lead",
+                "media_references": [
+                    "prepared-media-1",
+                    "prepared-media-2",
+                ],
+            },
+        }
     return payload
 
 

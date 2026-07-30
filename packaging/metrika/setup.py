@@ -26,11 +26,13 @@ PACKAGE_MODULES = {
         "metrika_metrics",
         "metrika_provider",
         "module_analysis",
+        "recommend_contracts",
     },
     "mox_adv.module_api": {"__init__"},
     "mox_adv.module_api.v1": {
         "__init__",
         "adapters",
+        "campaign_creation_contracts",
         "contract_validation",
         "contracts",
         "decision_records",

@@ -523,9 +523,54 @@ class OpenAPIContractTests(unittest.TestCase):
                 identifier_schema["pattern"],
             )
         self.assertEqual(
-            2,
+            4,
             len(schemas["ModuleRequestV1"]["allOf"]),
         )
+
+    def test_openapi_publishes_the_closed_campaign_creation_contract(
+        self,
+    ) -> None:
+        document = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+        schemas = document["components"]["schemas"]
+        request_properties = schemas["ModuleRequestV1"]["properties"]
+        result_properties = schemas["ModuleResultV1"]["properties"]
+
+        self.assertEqual(
+            {"$ref": "#/components/schemas/CreateCampaignCommandV1"},
+            request_properties["campaign_creation_command"],
+        )
+        self.assertEqual(
+            {"$ref": "#/components/schemas/CampaignCreationOutcomeV1"},
+            result_properties["campaign_creation_outcome"],
+        )
+        command = schemas["CreateCampaignCommandV1"]
+        self.assertFalse(command["additionalProperties"])
+        self.assertEqual(
+            "../schemas/campaign-draft-v1.schema.json",
+            command["properties"]["draft"]["$ref"],
+        )
+        self.assertEqual(
+            {
+                "APPLIED",
+                "NO_CHANGE",
+                "UNKNOWN_RESULT",
+                "PARTIALLY_APPLIED",
+                "COMPENSATION_REQUIRED",
+                "FAILED",
+            },
+            set(schemas["CampaignCreationOutcomeV1"]["properties"]["status"]["enum"]),
+        )
+        self.assertEqual(
+            "^[0-9a-f]{64}$",
+            schemas["CampaignCreationOutcomeV1"]["properties"]["evidence_digest"][
+                "pattern"
+            ],
+        )
+        execution_statuses = set(
+            schemas["ModuleExecutionResultV1"]["properties"]["status"]["enum"]
+        )
+        self.assertIn("PARTIALLY_APPLIED", execution_statuses)
+        self.assertIn("COMPENSATION_REQUIRED", execution_statuses)
 
     def test_openapi_publishes_the_closed_direct_action_contract(self) -> None:
         document = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))

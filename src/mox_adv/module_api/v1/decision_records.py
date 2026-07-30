@@ -13,6 +13,9 @@ from mox_adv.environment import (
     PRODUCTION_WRITE_FORBIDDEN,
     ExecutionEnvironment,
 )
+from mox_adv.module_api.v1.campaign_creation_contracts import (
+    CampaignCreationOutcomeV1,
+)
 from mox_adv.module_api.v1.contracts import (
     MODULE_STATUSES,
     ContractValidationError,
@@ -48,6 +51,7 @@ class ModuleDecisionFactsV1:
     provenance: Tuple[ModuleProvenanceV1, ...]
     hypotheses: Tuple[ModuleHypothesisV1, ...] = ()
     lifecycle_outcome: GoalLifecycleOutcomeV1 | None = None
+    campaign_creation_outcome: CampaignCreationOutcomeV1 | None = None
 
     def as_dict(self) -> Dict[str, Any]:
         value = {
@@ -59,6 +63,10 @@ class ModuleDecisionFactsV1:
         }
         if self.lifecycle_outcome is not None:
             value["lifecycle_outcome"] = self.lifecycle_outcome.as_dict()
+        if self.campaign_creation_outcome is not None:
+            value["campaign_creation_outcome"] = (
+                self.campaign_creation_outcome.as_dict()
+            )
         return value
 
 

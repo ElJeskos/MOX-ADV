@@ -6,6 +6,16 @@ from mox_adv.module_api.v1.adapters import (
     InProcessModuleAdapterV1,
     ModuleV1,
 )
+from mox_adv.module_api.v1.campaign_creation_contracts import (
+    CAMPAIGN_CREATION_COMMAND_SCHEMA_VERSION,
+    CAMPAIGN_CREATION_STATUSES,
+    CAMPAIGN_SAGA_STATUSES,
+    CAMPAIGN_SAGA_STEPS,
+    CampaignCreatedObjectV1,
+    CampaignCreationOutcomeV1,
+    CampaignReadbackV1,
+    CreateCampaignCommandV1,
+)
 from mox_adv.module_api.v1.contracts import (
     EXTERNAL_EVIDENCE_SCHEMA_VERSION,
     MODULE_REQUEST_SCHEMA_VERSION,
@@ -65,6 +75,10 @@ from mox_adv.module_api.v1.goal_lifecycle_contracts import (
 
 __all__ = [
     "EXTERNAL_EVIDENCE_SCHEMA_VERSION",
+    "CAMPAIGN_CREATION_COMMAND_SCHEMA_VERSION",
+    "CAMPAIGN_CREATION_STATUSES",
+    "CAMPAIGN_SAGA_STATUSES",
+    "CAMPAIGN_SAGA_STEPS",
     "DIRECT_ACTION_COMMAND_SCHEMA_VERSION",
     "GOAL_CANDIDATE_INPUT_SCHEMA_VERSION",
     "GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION",
@@ -72,10 +86,14 @@ __all__ = [
     "MODULE_RESULT_SCHEMA_VERSION",
     "OPERATION_TYPES_BY_KIND",
     "ClosedPeriodV1",
+    "CampaignCreatedObjectV1",
+    "CampaignCreationOutcomeV1",
+    "CampaignReadbackV1",
     "CandidateGoalLifecycleCommandV1",
     "CleanupRejectedGoalCommandV1",
     "ContractValidationError",
     "CreateGoalCandidateCommandV1",
+    "CreateCampaignCommandV1",
     "DecideGoalSemanticsCommandV1",
     "EvaluateGoalEligibilityCommandV1",
     "ExternalEvidenceV1",

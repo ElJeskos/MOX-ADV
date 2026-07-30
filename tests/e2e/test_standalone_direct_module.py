@@ -20,8 +20,11 @@ from mox_adv.contracts import (
 )
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.module_api.v1 import (
+    ContractValidationError,
     HttpJsonModuleAdapterV1,
     InMemoryDecisionRecordStoreV1,
+    ModuleRequestV1,
+    ModuleResultV1,
 )
 from mox_adv.modules.direct import (
     BoundDirectReadProviderV1,
@@ -139,6 +142,95 @@ def direct_action_plan_request() -> dict[str, Any]:
         "relative_step_percent": 10,
     }
     request["idempotency_key"] = "direct-action-plan-17"
+    return request
+
+
+def campaign_draft_payload() -> dict[str, Any]:
+    return {
+        "schema_version": "campaign-draft-v1",
+        "draft_id": "draft-headless-direct-1",
+        "business_goal": {
+            "event": "lead_submitted",
+            "meaning": "A visitor submitted the lead form.",
+        },
+        "primary_conversion": {"event": "lead_submitted"},
+        "campaign_type": "UNIFIED_CAMPAIGN",
+        "strategy": {
+            "placement": "SEARCH",
+            "search": "HIGHEST_POSITION",
+            "network": "SERVING_OFF",
+        },
+        "geography": ["RU"],
+        "schedule": {
+            "timezone": "Europe/Moscow",
+            "days": ["MONDAY", "TUESDAY"],
+            "start": "09:00",
+            "end": "18:00",
+        },
+        "budget": {"currency": "RUB", "weekly_micros": 500_000_000},
+        "limits": {
+            "maximum_weekly_micros": 500_000_000,
+            "maximum_bid_micros": 100_000_000,
+        },
+        "groups": [
+            {
+                "name": "Lead service",
+                "keywords": ["lead service"],
+                "negative_keywords": ["free"],
+                "audiences": [],
+                "ads": [
+                    {
+                        "variant_id": "A",
+                        "title": "Lead service",
+                        "text": "Submit a request",
+                        "landing_page": "https://allowlisted.example/lead",
+                        "utm": "utm_source=yandex&utm_content=a",
+                        "media_reference": "prepared-media-1",
+                    },
+                    {
+                        "variant_id": "B",
+                        "title": "Lead service alternative",
+                        "text": "Request a consultation",
+                        "landing_page": "https://allowlisted.example/lead",
+                        "utm": "utm_source=yandex&utm_content=b",
+                        "media_reference": "prepared-media-2",
+                    },
+                ],
+            }
+        ],
+        "landing_page": "https://allowlisted.example/lead",
+        "media_references": ["prepared-media-1", "prepared-media-2"],
+    }
+
+
+def campaign_creation_module_request(
+    *,
+    environment: str = "TEST",
+    execution_key: str = "execution-headless-create-1",
+) -> dict[str, Any]:
+    request = customer_evidence_request()
+    request["connection_ref"] = {"connection_id": "stored-test-direct"}
+    request["environment"] = environment
+    request["scope"] = {
+        "organization_id": "sim-organization",
+        "account_id": "sim-direct-account",
+    }
+    request.pop("external_evidence")
+    request["operation"] = {
+        "kind": "EXECUTE",
+        "operation_type": "CREATE_CAMPAIGN",
+    }
+    request["idempotency_key"] = execution_key
+    request["campaign_creation_command"] = {
+        "schema_version": "campaign-creation-command-v1",
+        "command": "CREATE_CAMPAIGN",
+        "run_id": "run-headless-create-1",
+        "execution_key": execution_key,
+        "proposal_id": "proposal-headless-create-1",
+        "approval_id": "approval-headless-create-1",
+        "reservation_id": "reservation-headless-create-1",
+        "draft": campaign_draft_payload(),
+    }
     return request
 
 
@@ -264,10 +356,7 @@ class RecordingAuthorizedDirectReader:
         connection_id: str,
         author: str,
     ) -> bool:
-        return (
-            connection_id == "customer-direct-primary"
-            and author == "customer-42"
-        )
+        return connection_id == "customer-direct-primary" and author == "customer-42"
 
 
 class FailingAuthorizedDirectReader(RecordingAuthorizedDirectReader):
@@ -470,6 +559,339 @@ class RecordingDirectStateReader:
 
 
 class StandaloneDirectCustomerE2ETests(unittest.TestCase):
+    def _campaign_creation_http(
+        self,
+        temporary: str,
+        *,
+        adapter_options: dict[str, Any] | None = None,
+        adapter_environment: ExecutionEnvironment = ExecutionEnvironment.TEST,
+    ) -> tuple[
+        HttpJsonModuleAdapterV1,
+        Any,
+        Any,
+    ]:
+        from mox_adv.campaign_lifecycle import (
+            CampaignApproval,
+            CampaignCreationRequest,
+            CampaignDraftSafetyBindings,
+            CampaignSagaStore,
+            CreationReservation,
+            CreationReservationStatus,
+        )
+        from mox_adv.direct_campaign_creation import (
+            DirectCampaignCreationRuntimeV1,
+        )
+        from mox_adv.direct_management import FakeDirectManagementAdapter
+        from mox_adv.recommend_contracts import CampaignDraftV1
+
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        policy = json.loads(
+            (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
+        )
+        store = CampaignSagaStore(Path(temporary) / "campaign.sqlite3")
+        adapter = FakeDirectManagementAdapter(**(adapter_options or {}))
+        draft = CampaignDraftV1.from_mapping(campaign_draft_payload())
+        legacy_request = CampaignCreationRequest(
+            run_id="run-headless-create-1",
+            execution_key="execution-headless-create-1",
+            proposal_id="proposal-headless-create-1",
+            approval_id="approval-headless-create-1",
+            account="sim-direct-account",
+            credential_profile="DIRECT_PILOT_WRITE",
+            reservation_id="reservation-headless-create-1",
+            draft=draft,
+        )
+        store.register_creation_reservation(
+            CreationReservation(
+                reservation_id=legacy_request.reservation_id,
+                status=CreationReservationStatus.AVAILABLE,
+                scope_binding=legacy_request.account,
+                object_type=draft.campaign_type,
+                proposal_id=legacy_request.proposal_id,
+                credential_profile=legacy_request.credential_profile,
+                expires_at=now + timedelta(minutes=30),
+            ),
+            now,
+        )
+        approver = policy["principals"]["approver"]
+        store.register_campaign_approval(
+            CampaignApproval(
+                approval_id=legacy_request.approval_id,
+                proposal_id=legacy_request.proposal_id,
+                binding_hash=legacy_request.approval_binding(policy["policy_id"]),
+                approver=approver["identity"],
+                authentication=approver["authentication"],
+                expires_at=now + timedelta(minutes=15),
+            )
+        )
+        runtime = DirectCampaignCreationRuntimeV1(
+            connection_id="stored-test-direct",
+            account_id="sim-direct-account",
+            policy=policy,
+            store=store,
+            safety_bindings=CampaignDraftSafetyBindings(
+                allowed_landing_hosts=("allowlisted.example",),
+                prohibited_phrases=("guaranteed results",),
+                prepared_media_references=(
+                    "prepared-media-1",
+                    "prepared-media-2",
+                ),
+            ),
+            test_adapter=adapter,
+            environment=ExecutionEnvironment.TEST,
+        )
+        module = DirectModuleV1(
+            clock=lambda: now,
+            campaign_creation_runtime=runtime,
+        )
+        return (
+            HttpJsonModuleAdapterV1(
+                module,
+                environment=adapter_environment,
+            ),
+            adapter,
+            module,
+        )
+
+    def test_customer_creates_one_campaign_and_duplicate_is_no_change(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            http, adapter, module = self._campaign_creation_http(temporary)
+            request = campaign_creation_module_request()
+
+            applied = http.handle(request)
+            duplicate = http.handle(request)
+
+            self.assertEqual(200, applied.status_code)
+            self.assertEqual("SUCCEEDED", applied.body["status"])
+            self.assertEqual("APPLIED", applied.body["execution_result"]["status"])
+            outcome = applied.body["campaign_creation_outcome"]
+            self.assertEqual("APPLIED", outcome["status"])
+            self.assertEqual("APPLIED", outcome["saga_status"])
+            self.assertEqual(
+                [
+                    "CAMPAIGN_ADD",
+                    "AD_GROUP_ADD",
+                    "ADS_ADD",
+                    "KEYWORD_ADD",
+                    "MODERATION_SUBMIT",
+                    "MODERATION_READBACK",
+                    "CAMPAIGN_LAUNCH",
+                    "FULL_READBACK",
+                ],
+                outcome["completed_steps"],
+            )
+            self.assertEqual(
+                [
+                    "Campaigns",
+                    "AdGroups",
+                    "Ads",
+                    "Ads",
+                    "Keywords",
+                ],
+                [item["service"] for item in outcome["created_objects"]],
+            )
+            self.assertEqual(
+                [
+                    "UNIFIED_CAMPAIGN",
+                    "UNIFIED_AD_GROUP",
+                    "TEXT_AD",
+                    "TEXT_AD",
+                    "KEYWORD",
+                ],
+                [item["actual_type"] for item in outcome["created_objects"]],
+            )
+            self.assertTrue(
+                all(not item["compensated"] for item in outcome["created_objects"])
+            )
+            self.assertEqual(
+                [outcome["created_objects"][0]["object_id"]],
+                outcome["readback"]["campaign_ids"],
+            )
+            self.assertRegex(outcome["evidence_digest"], r"^[0-9a-f]{64}$")
+            self.assertEqual("NO_CHANGE", duplicate.body["execution_result"]["status"])
+            self.assertEqual(
+                "ALREADY_PROCESSED",
+                duplicate.body["campaign_creation_outcome"]["saga_status"],
+            )
+            self.assertEqual(
+                1,
+                adapter.operation_count("Campaigns", "add"),
+            )
+            record = module.decision_records.read(applied.body["decision_record_ref"])
+            self.assertEqual(
+                outcome,
+                record["facts"]["campaign_creation_outcome"],
+            )
+
+    def test_campaign_creation_is_blocked_before_test_adapter_in_production(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            http, adapter, _module = self._campaign_creation_http(
+                temporary,
+                adapter_environment=ExecutionEnvironment.PRODUCTION,
+            )
+            request = campaign_creation_module_request(environment="PRODUCTION")
+
+            response = http.handle(request)
+
+            self.assertEqual(422, response.status_code)
+            self.assertEqual("BLOCKED", response.body["status"])
+            self.assertEqual(
+                "PRODUCTION_WRITE_FORBIDDEN",
+                response.body["errors"][0]["code"],
+            )
+            self.assertEqual([], adapter.calls)
+
+    def test_campaign_creation_preserves_uncertain_and_compensation_evidence(
+        self,
+    ) -> None:
+        cases = (
+            (
+                {"timeout_after": ("Campaigns", "add")},
+                "UNKNOWN_RESULT",
+                False,
+            ),
+            (
+                {"fail_on": ("Ads", "moderate")},
+                "PARTIALLY_APPLIED",
+                True,
+            ),
+            (
+                {
+                    "fail_on": ("Ads", "moderate"),
+                    "fail_compensation_on": ("AdGroups", "delete"),
+                },
+                "COMPENSATION_REQUIRED",
+                True,
+            ),
+        )
+        for adapter_options, expected_status, has_compensated in cases:
+            with (
+                self.subTest(status=expected_status),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                http, adapter, _module = self._campaign_creation_http(
+                    temporary,
+                    adapter_options=adapter_options,
+                )
+
+                response = http.handle(campaign_creation_module_request())
+
+                self.assertEqual(500, response.status_code)
+                self.assertEqual("FAILED", response.body["status"])
+                self.assertEqual(
+                    expected_status,
+                    response.body["execution_result"]["status"],
+                )
+                outcome = response.body["campaign_creation_outcome"]
+                self.assertEqual(expected_status, outcome["status"])
+                self.assertIsNotNone(outcome["detail"])
+                self.assertEqual(
+                    has_compensated,
+                    any(item["compensated"] for item in outcome["created_objects"]),
+                )
+                self.assertEqual(
+                    1,
+                    adapter.operation_count("Campaigns", "add"),
+                )
+
+    def test_campaign_creation_contract_is_closed_and_draft_is_immutable(
+        self,
+    ) -> None:
+        raw_payload = campaign_creation_module_request()
+        command = raw_payload["campaign_creation_command"]
+        assert isinstance(command, dict)
+        command["yandex_http_payload"] = {
+            "method": "POST",
+            "url": "https://api.direct.yandex.com/json/v5/campaigns",
+        }
+        with self.assertRaisesRegex(
+            ContractValidationError,
+            "unexpected field",
+        ):
+            ModuleRequestV1.from_dict(raw_payload)
+
+        parsed = ModuleRequestV1.from_dict(campaign_creation_module_request())
+        assert parsed.campaign_creation_command is not None
+        with self.assertRaises(TypeError):
+            cast(
+                dict[str, Any],
+                parsed.campaign_creation_command.draft.business_goal,
+            )["event"] = "tampered"
+
+        mismatched_key = campaign_creation_module_request()
+        mismatched_key["idempotency_key"] = "different-execution-key"
+        with self.assertRaisesRegex(
+            ContractValidationError,
+            "idempotency_key must equal",
+        ):
+            ModuleRequestV1.from_dict(mismatched_key)
+
+    def test_campaign_creation_evidence_rejects_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            http, _adapter, _module = self._campaign_creation_http(temporary)
+            response = http.handle(campaign_creation_module_request())
+            tampered = response.body
+            tampered["campaign_creation_outcome"]["created_objects"][0][
+                "actual_type"
+            ] = "TEXT_AD"
+
+            with self.assertRaisesRegex(
+                ContractValidationError,
+                "evidence digest",
+            ):
+                ModuleResultV1.from_dict(tampered)
+
+    def test_campaign_runtime_rejects_non_test_or_unsealed_adapter(
+        self,
+    ) -> None:
+        from mox_adv.campaign_lifecycle import (
+            CampaignDraftSafetyBindings,
+            CampaignSagaStore,
+        )
+        from mox_adv.direct_campaign_creation import (
+            DirectCampaignCreationRuntimeV1,
+        )
+        from mox_adv.direct_management import FakeDirectManagementAdapter
+
+        class UnsafeAdapter(FakeDirectManagementAdapter):
+            pass
+
+        policy = json.loads(
+            (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
+        )
+        bindings = CampaignDraftSafetyBindings(
+            allowed_landing_hosts=("allowlisted.example",),
+            prohibited_phrases=(),
+            prepared_media_references=(
+                "prepared-media-1",
+                "prepared-media-2",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = CampaignSagaStore(Path(temporary) / "campaign.sqlite3")
+            cases = (
+                (FakeDirectManagementAdapter(), ExecutionEnvironment.PRODUCTION),
+                (UnsafeAdapter(), ExecutionEnvironment.TEST),
+            )
+            for adapter, environment in cases:
+                with (
+                    self.subTest(environment=environment),
+                    self.assertRaises(ValueError),
+                ):
+                    DirectCampaignCreationRuntimeV1(
+                        connection_id="stored-test-direct",
+                        account_id="sim-direct-account",
+                        policy=policy,
+                        store=store,
+                        safety_bindings=bindings,
+                        test_adapter=adapter,
+                        environment=environment,
+                    )
+
     def test_customer_typed_action_is_blocked_before_direct_reads_in_production(
         self,
     ) -> None:
@@ -536,9 +958,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             )
             runtime = DirectActionRuntimeV1(
                 policy=json.loads(
-                    (ROOT / "config" / "gate0-policy.json").read_text(
-                        encoding="utf-8"
-                    )
+                    (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
                 ),
                 state=state,
                 proposal_store=ImmutableProposalStore(root / "proposals"),
@@ -633,9 +1053,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             )
             runtime = DirectActionRuntimeV1(
                 policy=json.loads(
-                    (ROOT / "config" / "gate0-policy.json").read_text(
-                        encoding="utf-8"
-                    )
+                    (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
                 ),
                 state=state,
                 proposal_store=ImmutableProposalStore(root / "proposals"),
@@ -772,9 +1190,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 policy = json.loads(
-                    (ROOT / "config" / "gate0-policy.json").read_text(
-                        encoding="utf-8"
-                    )
+                    (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
                 )
                 if case == "quota":
                     policy["timing"]["cooldown_hours"] = 1
@@ -815,9 +1231,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                     environment=ExecutionEnvironment.TEST,
                 )
                 plan_request = direct_action_plan_request()
-                plan_request["idempotency_key"] = (
-                    "operational-safety-" + case
-                )
+                plan_request["idempotency_key"] = "operational-safety-" + case
                 planned = http.handle(plan_request)
                 proposal_id = planned.body["proposal"]["proposal_id"]
                 principal = AuthenticatedPrincipal(
@@ -903,9 +1317,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
             )
             runtime = DirectActionRuntimeV1(
                 policy=json.loads(
-                    (ROOT / "config" / "gate0-policy.json").read_text(
-                        encoding="utf-8"
-                    )
+                    (ROOT / "config" / "gate0-policy.json").read_text(encoding="utf-8")
                 ),
                 state=state,
                 proposal_store=ImmutableProposalStore(root / "proposals"),
@@ -1048,9 +1460,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         self.assertEqual("PARTIAL", response.body["status"])
-        metrics = {
-            item["name"]: item["value"] for item in response.body["metrics"]
-        }
+        metrics = {item["name"]: item["value"] for item in response.body["metrics"]}
         self.assertEqual(10000, metrics["impressions"])
         self.assertEqual(200, metrics["clicks"])
         self.assertEqual(5000000000, metrics["cost_micros"])
@@ -1111,9 +1521,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         assert isinstance(evidence, dict)
         metrics = evidence["metrics"]
         assert isinstance(metrics, list)
-        metrics.append(
-            {"name": "conversions", "value": 5, "unit": "COUNT"}
-        )
+        metrics.append({"name": "conversions", "value": 5, "unit": "COUNT"})
         module = DirectModuleV1(
             clock=lambda: datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
         )
@@ -1125,9 +1533,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         self.assertEqual("SUCCEEDED", response.body["status"])
-        values = {
-            item["name"]: item["value"] for item in response.body["metrics"]
-        }
+        values = {item["name"]: item["value"] for item in response.body["metrics"]}
         self.assertEqual(5, values["conversions"])
         self.assertEqual("1000", values["cpa_rub"])
         self.assertEqual([], response.body["warnings"])
@@ -1150,9 +1556,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         by_name["impressions"]["value"] = 100000
         by_name["clicks"]["value"] = 100
         by_name["cost_micros"]["value"] = 12000000000
-        metrics.append(
-            {"name": "conversions", "value": 3, "unit": "COUNT"}
-        )
+        metrics.append({"name": "conversions", "value": 3, "unit": "COUNT"})
 
         response = HttpJsonModuleAdapterV1(
             DirectModuleV1(
@@ -1205,9 +1609,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         assert isinstance(evidence, dict)
         metrics = evidence["metrics"]
         assert isinstance(metrics, list)
-        metrics.append(
-            {"name": "provider_http_body", "value": "opaque", "unit": "RAW"}
-        )
+        metrics.append({"name": "provider_http_body", "value": "opaque", "unit": "RAW"})
 
         response = HttpJsonModuleAdapterV1(
             DirectModuleV1(
@@ -1236,9 +1638,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         assert isinstance(evidence, dict)
         metrics = evidence["metrics"]
         assert isinstance(metrics, list)
-        metrics.append(
-            {"name": "conversions", "value": 201, "unit": "COUNT"}
-        )
+        metrics.append({"name": "conversions", "value": 201, "unit": "COUNT"})
 
         response = HttpJsonModuleAdapterV1(
             DirectModuleV1(
@@ -1274,9 +1674,7 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         assert isinstance(metrics, list)
         by_name = {item["name"]: item for item in metrics}
         by_name["current_weekly_budget_micros"]["value"] = 0
-        metrics.append(
-            {"name": "conversions", "value": 5, "unit": "COUNT"}
-        )
+        metrics.append({"name": "conversions", "value": 5, "unit": "COUNT"})
 
         response = HttpJsonModuleAdapterV1(
             DirectModuleV1(
@@ -1311,13 +1709,9 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
         metrics = evidence["metrics"]
         assert isinstance(metrics, list)
         by_name = {item["name"]: item for item in metrics}
-        by_name["budget_period_start"]["value"] = (
-            "2026-07-31T12:00:00+00:00"
-        )
+        by_name["budget_period_start"]["value"] = "2026-07-31T12:00:00+00:00"
         by_name["budget_period_end"]["value"] = "2026-08-07T12:00:00+00:00"
-        metrics.append(
-            {"name": "conversions", "value": 5, "unit": "COUNT"}
-        )
+        metrics.append({"name": "conversions", "value": 5, "unit": "COUNT"})
 
         response = HttpJsonModuleAdapterV1(
             DirectModuleV1(

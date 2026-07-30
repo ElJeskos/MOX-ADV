@@ -696,6 +696,61 @@
           }
         ]
       },
+      "CreateCampaignCommandV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "command",
+          "run_id",
+          "execution_key",
+          "proposal_id",
+          "approval_id",
+          "reservation_id",
+          "draft"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "campaign-creation-command-v1"
+          },
+          "command": {
+            "const": "CREATE_CAMPAIGN"
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "execution_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "proposal_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "approval_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "reservation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "draft": {
+            "$ref": "../schemas/campaign-draft-v1.schema.json"
+          }
+        }
+      },
       "ModuleOperationV1": {
         "type": "object",
         "additionalProperties": false,
@@ -814,6 +869,9 @@
           "direct_action_command": {
             "$ref": "#/components/schemas/DirectActionCommandV1"
           },
+          "campaign_creation_command": {
+            "$ref": "#/components/schemas/CreateCampaignCommandV1"
+          },
           "operation": {
             "$ref": "#/components/schemas/ModuleOperationV1"
           },
@@ -873,6 +931,74 @@
               },
               "required": [
                 "operation"
+              ],
+              "not": {
+                "required": [
+                  "external_evidence"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "operation": {
+                  "properties": {
+                    "kind": {
+                      "const": "EXECUTE"
+                    },
+                    "operation_type": {
+                      "const": "CREATE_CAMPAIGN"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "operation_type"
+                  ]
+                }
+              },
+              "required": [
+                "operation"
+              ]
+            },
+            "then": {
+              "required": [
+                "campaign_creation_command"
+              ]
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "campaign_creation_command"
+              ]
+            },
+            "then": {
+              "properties": {
+                "operation": {
+                  "properties": {
+                    "kind": {
+                      "const": "EXECUTE"
+                    },
+                    "operation_type": {
+                      "const": "CREATE_CAMPAIGN"
+                    }
+                  }
+                },
+                "scope": {
+                  "required": [
+                    "account_id"
+                  ],
+                  "not": {
+                    "required": [
+                      "campaign_id"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "operation",
+                "scope"
               ],
               "not": {
                 "required": [
@@ -1054,7 +1180,9 @@
               "BLOCKED",
               "ALREADY_PROCESSED",
               "UNKNOWN_RESULT",
-              "FAILED"
+              "FAILED",
+              "PARTIALLY_APPLIED",
+              "COMPENSATION_REQUIRED"
             ]
           },
           "applied": {
@@ -1305,6 +1433,177 @@
           }
         }
       },
+      "CampaignCreatedObjectV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "service",
+          "object_id",
+          "actual_type",
+          "compensated"
+        ],
+        "properties": {
+          "service": {
+            "type": "string",
+            "enum": [
+              "Campaigns",
+              "AdGroups",
+              "Ads",
+              "Keywords"
+            ]
+          },
+          "object_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "actual_type": {
+            "type": "string",
+            "enum": [
+              "UNIFIED_CAMPAIGN",
+              "UNIFIED_AD_GROUP",
+              "TEXT_AD",
+              "KEYWORD"
+            ]
+          },
+          "compensated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CampaignReadbackV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "campaign_ids",
+          "ad_group_ids",
+          "ad_ids",
+          "keyword_ids"
+        ],
+        "properties": {
+          "campaign_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "type": "string"
+            }
+          },
+          "ad_group_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "type": "string"
+            }
+          },
+          "ad_ids": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "string"
+            }
+          },
+          "keyword_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CampaignCreationOutcomeV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "execution_key",
+          "status",
+          "saga_status",
+          "completed_steps",
+          "created_objects",
+          "readback",
+          "detail",
+          "evidence_digest"
+        ],
+        "properties": {
+          "execution_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "APPLIED",
+              "NO_CHANGE",
+              "UNKNOWN_RESULT",
+              "PARTIALLY_APPLIED",
+              "COMPENSATION_REQUIRED",
+              "FAILED"
+            ]
+          },
+          "saga_status": {
+            "type": "string",
+            "enum": [
+              "APPLIED",
+              "ALREADY_PROCESSED",
+              "UNKNOWN_RESULT",
+              "PARTIALLY_APPLIED",
+              "COMPENSATION_REQUIRED",
+              "FAILED"
+            ]
+          },
+          "completed_steps": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "enum": [
+                "CAMPAIGN_ADD",
+                "AD_GROUP_ADD",
+                "ADS_ADD",
+                "KEYWORD_ADD",
+                "MODERATION_SUBMIT",
+                "MODERATION_READBACK",
+                "CAMPAIGN_LAUNCH",
+                "FULL_READBACK"
+              ]
+            }
+          },
+          "created_objects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CampaignCreatedObjectV1"
+            }
+          },
+          "readback": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CampaignReadbackV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 2000
+          },
+          "evidence_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
       "ModuleResultV1": {
         "type": "object",
         "additionalProperties": false,
@@ -1395,6 +1694,9 @@
           },
           "lifecycle_outcome": {
             "$ref": "#/components/schemas/GoalLifecycleOutcomeV1"
+          },
+          "campaign_creation_outcome": {
+            "$ref": "#/components/schemas/CampaignCreationOutcomeV1"
           },
           "provenance": {
             "type": "array",

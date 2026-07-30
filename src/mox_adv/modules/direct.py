@@ -28,6 +28,7 @@ from mox_adv.modules._bound import BoundProviderModuleV1
 
 if TYPE_CHECKING:
     from mox_adv.direct_action import DirectActionRuntimeV1
+    from mox_adv.direct_campaign_creation import DirectCampaignCreationRuntimeV1
 
 
 class DirectModuleV1(BoundProviderModuleV1):
@@ -41,9 +42,12 @@ class DirectModuleV1(BoundProviderModuleV1):
         decision_records: Optional[ModuleDecisionRecordStoreV1] = None,
         provider_reader: Optional[AuthorizedDirectReadProviderV1] = None,
         action_runtime: Optional["DirectActionRuntimeV1"] = None,
+        campaign_creation_runtime: Optional["DirectCampaignCreationRuntimeV1"] = None,
     ) -> None:
         if implementation is not None and (
-            provider_reader is not None or action_runtime is not None
+            provider_reader is not None
+            or action_runtime is not None
+            or campaign_creation_runtime is not None
         ):
             raise ContractValidationError(
                 "Direct cannot combine a legacy implementation "
@@ -69,13 +73,25 @@ class DirectModuleV1(BoundProviderModuleV1):
                     action_runtime,
                 )
             )
+            campaign_creation = (
+                None
+                if campaign_creation_runtime is None
+                else self._campaign_creation_service(
+                    clock,
+                    campaign_creation_runtime,
+                )
+            )
 
             def invoke(request: ModuleRequestV1) -> ModuleResultV1:
                 if (
-                    action is not None
-                    and request.operation.operation_type
-                    in {"PLAN_OPTIMIZATION", "APPLY_OPTIMIZATION"}
+                    campaign_creation is not None
+                    and request.operation.operation_type == "CREATE_CAMPAIGN"
                 ):
+                    return campaign_creation(request)
+                if action is not None and request.operation.operation_type in {
+                    "PLAN_OPTIMIZATION",
+                    "APPLY_OPTIMIZATION",
+                }:
                     return action(request)
                 return analysis.invoke(request)
 
@@ -98,6 +114,21 @@ class DirectModuleV1(BoundProviderModuleV1):
             decision_records=self.decision_records,
             provider_reader=provider_reader,
             runtime=action_runtime,
+        ).invoke
+
+    def _campaign_creation_service(
+        self,
+        clock: Callable[[], datetime],
+        runtime: "DirectCampaignCreationRuntimeV1",
+    ) -> Callable[[ModuleRequestV1], ModuleResultV1]:
+        from mox_adv.direct_campaign_creation import (
+            StandaloneDirectCampaignCreationV1,
+        )
+
+        return StandaloneDirectCampaignCreationV1(
+            clock=clock,
+            decision_records=self.decision_records,
+            runtime=runtime,
         ).invoke
 
 
