@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Callable, Mapping, Optional, Tuple
+from typing import Any, Callable, Mapping, Optional, Protocol, Tuple
 
 from mox_adv.audit import AuditWriteBlocked
 from mox_adv.commands import (
@@ -25,8 +25,8 @@ from mox_adv.control_state import (
 from mox_adv.egress import EgressDenied, HttpEgressGuard
 from mox_adv.environment import (
     PRODUCTION_WRITE_FORBIDDEN,
-    ExecutionEnvironment,
     EnvironmentWriteDenied,
+    ExecutionEnvironment,
     parse_execution_environment,
     require_test_write_environment,
 )
@@ -46,6 +46,7 @@ __all__ = [
     "ExecutionRequest",
     "PreparedChange",
     "TrustedScope",
+    "deterministic_action_is_eligible",
 ]
 
 
@@ -74,6 +75,83 @@ class ExecutionFacts:
     cumulative_daily_change_percent: int
     monetary_exposure_rub: int
     kill_switch_available: bool
+
+
+class DirectActionEligibilityFacts(Protocol):
+    @property
+    def campaign_state(self) -> str: ...
+
+    @property
+    def campaign_strategy(self) -> str: ...
+
+    @property
+    def clicks(self) -> int: ...
+
+    @property
+    def conversions(self) -> int: ...
+
+    @property
+    def impressions(self) -> int: ...
+
+    @property
+    def spend_rub(self) -> int: ...
+
+    @property
+    def cpa_rub(self) -> str: ...
+
+    @property
+    def budget_utilization_percent(self) -> str: ...
+
+    @property
+    def ctr_percent(self) -> str: ...
+
+
+def deterministic_action_is_eligible(
+    action: OptimizationAction,
+    facts: DirectActionEligibilityFacts,
+) -> bool:
+    """Apply the shared deterministic evidence rule for one Direct action."""
+
+    state_on = facts.campaign_state == "ON"
+    sufficient = facts.clicks >= 50 and facts.conversions >= 3
+    cpa = Decimal(facts.cpa_rub)
+    utilization = Decimal(facts.budget_utilization_percent)
+    ctr = Decimal(facts.ctr_percent)
+    checks = {
+        OptimizationAction.INCREASE_WEEKLY_BUDGET: (
+            state_on and sufficient and cpa <= 1000 and utilization >= 90
+        ),
+        OptimizationAction.DECREASE_WEEKLY_BUDGET: (
+            state_on and sufficient and cpa > 1000 and utilization >= 90
+        ),
+        OptimizationAction.INCREASE_SEARCH_BID: (
+            state_on
+            and facts.campaign_strategy == "HIGHEST_POSITION"
+            and sufficient
+            and cpa <= 1000
+            and utilization < 90
+            and 50 <= facts.clicks <= 99
+        ),
+        OptimizationAction.DECREASE_SEARCH_BID: (
+            state_on
+            and facts.campaign_strategy == "HIGHEST_POSITION"
+            and sufficient
+            and cpa > 1000
+            and utilization < 90
+        ),
+        OptimizationAction.SET_AD_VARIANT: (
+            state_on and sufficient and ctr < 1 and facts.impressions >= 5000
+        ),
+        OptimizationAction.SUSPEND_CAMPAIGN: (
+            state_on and facts.conversions == 0 and facts.spend_rub >= 2000
+        ),
+        OptimizationAction.RESUME_CAMPAIGN: (
+            facts.campaign_state == "SUSPENDED"
+            and facts.conversions >= 3
+            and cpa <= 1000
+        ),
+    }
+    return checks[action]
 
 
 @dataclass(frozen=True)
@@ -183,7 +261,10 @@ class ApprovalRequiredPolicy:
                 self._api_method_allowed(prepared.action),
                 "API_METHOD_NOT_ALLOWLISTED",
             ),
-            (self._action_is_safe(prepared, facts), "ACTION_POLICY_REJECTED"),
+            (
+                deterministic_action_is_eligible(prepared.action, facts),
+                "ACTION_POLICY_REJECTED",
+            ),
         )
         for passed, reason in checks:
             if not passed:
@@ -227,53 +308,6 @@ class ApprovalRequiredPolicy:
             and item.get("http_verb") == "POST"
             for item in self.policy["api_matrix"]
         )
-
-    def _action_is_safe(
-        self,
-        prepared: PreparedChange,
-        facts: ExecutionFacts,
-    ) -> bool:
-        state_on = facts.campaign_state == "ON"
-        sufficient = facts.clicks >= 50 and facts.conversions >= 3
-        cpa = Decimal(facts.cpa_rub)
-        utilization = Decimal(facts.budget_utilization_percent)
-        ctr = Decimal(facts.ctr_percent)
-        checks = {
-            OptimizationAction.INCREASE_WEEKLY_BUDGET: (
-                state_on and sufficient and cpa <= 1000 and utilization >= 90
-            ),
-            OptimizationAction.DECREASE_WEEKLY_BUDGET: (
-                state_on and sufficient and cpa > 1000 and utilization >= 90
-            ),
-            OptimizationAction.INCREASE_SEARCH_BID: (
-                state_on
-                and facts.campaign_strategy == "HIGHEST_POSITION"
-                and sufficient
-                and cpa <= 1000
-                and utilization < 90
-                and 50 <= facts.clicks <= 99
-            ),
-            OptimizationAction.DECREASE_SEARCH_BID: (
-                state_on
-                and facts.campaign_strategy == "HIGHEST_POSITION"
-                and sufficient
-                and cpa > 1000
-                and utilization < 90
-            ),
-            OptimizationAction.SET_AD_VARIANT: (
-                state_on and sufficient and ctr < 1 and facts.impressions >= 5000
-            ),
-            OptimizationAction.SUSPEND_CAMPAIGN: (
-                state_on and facts.conversions == 0 and facts.spend_rub >= 2000
-            ),
-            OptimizationAction.RESUME_CAMPAIGN: (
-                facts.campaign_state == "SUSPENDED"
-                and facts.conversions >= 3
-                and cpa <= 1000
-            ),
-        }
-        return checks[prepared.action]
-
 
 class ApprovalExecutionService:
     """Consume one exact approval and execute one fake-adapter command."""

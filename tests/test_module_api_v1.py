@@ -241,7 +241,7 @@ class ModuleRequestContractTests(unittest.TestCase):
         command["proposal_id"] = "POST /campaigns with caller payload"
         with self.assertRaisesRegex(
             ContractValidationError,
-            "proposal_id is invalid",
+            "proposal_id must match",
         ):
             ModuleRequestV1.from_dict(payload)
 

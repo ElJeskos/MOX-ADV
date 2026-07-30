@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 from contextlib import suppress
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple
@@ -363,6 +363,16 @@ class ExecutionRecord:
     detail: Optional[str]
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class OperationalExecutionFacts:
+    """Current durable limits and interrupt availability for a write decision."""
+
+    cooldown_active: bool
+    actions_in_last_24h: int
+    cumulative_daily_change_percent: int
+    kill_switch_available: bool
 
 
 class DurableControlState:
@@ -1085,6 +1095,76 @@ class DurableControlState:
         if row is None:
             raise ControlRejected("EXECUTION_NOT_FOUND", "execution does not exist.")
         return self._execution_from_row(row)
+
+    def load_operational_execution_facts(
+        self,
+        scope: TrustedScope,
+        now: datetime,
+        *,
+        cooldown_hours: int,
+    ) -> OperationalExecutionFacts:
+        """Read current ledger limits and prove kill-switch storage is available."""
+
+        if (
+            isinstance(cooldown_hours, bool)
+            or not isinstance(cooldown_hours, int)
+            or cooldown_hours < 1
+        ):
+            raise ControlRejected(
+                "INVALID_INPUT",
+                "cooldown hours must be a positive integer.",
+            )
+        now_utc = now.astimezone(timezone.utc)
+        self.any_kill_switch_active(scope)
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT e.status, e.updated_at, p.canonical_json "
+                    "FROM executions e "
+                    "JOIN prepared_changes p "
+                    "ON p.proposal_id = e.proposal_id "
+                    "WHERE e.status = 'APPLIED'"
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise ControlRejected(
+                "CONTROL_STATE_UNAVAILABLE",
+                "durable execution ledger is unavailable.",
+            ) from error
+
+        last_24_hours = now_utc - timedelta(hours=24)
+        day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        cooldown_start = now_utc - timedelta(hours=cooldown_hours)
+        action_count = 0
+        cumulative_change = 0
+        cooldown_active = False
+        try:
+            for row in rows:
+                updated_at = _parse_utc(str(row["updated_at"]))
+                if updated_at >= last_24_hours:
+                    action_count += 1
+                if updated_at >= cooldown_start:
+                    cooldown_active = True
+                if updated_at < day_start:
+                    continue
+                prepared = json.loads(str(row["canonical_json"]))
+                expected_diff = prepared.get("expected_diff", {})
+                if not isinstance(expected_diff, Mapping):
+                    raise ValueError("prepared diff is invalid")
+                step = expected_diff.get("relative_step_percent", 0)
+                if isinstance(step, bool) or not isinstance(step, int):
+                    raise ValueError("prepared step is invalid")
+                cumulative_change += abs(step)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ControlRejected(
+                "CONTROL_STATE_UNAVAILABLE",
+                "durable execution ledger contains invalid facts.",
+            ) from error
+        return OperationalExecutionFacts(
+            cooldown_active=cooldown_active,
+            actions_in_last_24h=action_count,
+            cumulative_daily_change_percent=cumulative_change,
+            kill_switch_available=True,
+        )
 
     def engage_kill_switch(
         self,

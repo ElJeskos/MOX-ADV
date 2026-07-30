@@ -34,6 +34,7 @@ PACKAGE_MODULES = {
         "contract_validation",
         "contracts",
         "decision_records",
+        "direct_action_contracts",
         "goal_lifecycle_contracts",
     },
     "mox_adv.modules": {"__init__", "_bound", "metrika"},

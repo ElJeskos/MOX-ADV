@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, Optional, Tuple
 
@@ -28,6 +29,51 @@ from mox_adv.module_api.v1 import (
 
 SUPPORTED_ACTION = OptimizationAction.INCREASE_WEEKLY_BUDGET
 ACTION_OPERATION_TYPE = "APPLY_OPTIMIZATION"
+
+
+@dataclass(frozen=True)
+class DirectActionContext:
+    """One validated request paired with its evidence and trusted reread."""
+
+    request: ModuleRequestV1
+    now: datetime
+    evidence: DirectObservationV1
+    current: DirectObservationV1
+    metrics: Mapping[str, DirectMetric]
+
+
+@dataclass(frozen=True)
+class DirectActionEligibilitySnapshot:
+    """The provider/evidence facts consumed by the shared policy rule."""
+
+    campaign_state: str
+    campaign_strategy: str
+    clicks: int
+    conversions: int
+    impressions: int
+    spend_rub: int
+    cpa_rub: str
+    budget_utilization_percent: str
+    ctr_percent: str
+
+
+def eligibility_snapshot(
+    context: DirectActionContext,
+) -> DirectActionEligibilitySnapshot:
+    assert context.evidence.conversions is not None
+    return DirectActionEligibilitySnapshot(
+        campaign_state=context.current.state.campaign_state,
+        campaign_strategy=context.current.state.strategy,
+        clicks=context.evidence.clicks,
+        conversions=context.evidence.conversions,
+        impressions=context.evidence.impressions,
+        spend_rub=context.evidence.cost_micros // 1_000_000,
+        cpa_rub=str(context.metrics["cpa_rub"]),
+        budget_utilization_percent=str(
+            context.metrics["budget_utilization_percent"]
+        ),
+        ctr_percent=str(context.metrics["ctr_percent"]),
+    )
 
 
 def calculated_metrics(

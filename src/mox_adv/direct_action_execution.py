@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Mapping
-
 from mox_adv.approval_execution import (
     ApprovalExecutionService,
     ExecutionFacts,
@@ -12,12 +9,12 @@ from mox_adv.approval_execution import (
 )
 from mox_adv.control_state import (
     ControlRejected,
-    ExecutionStatus,
     PreparedChange,
     canonical_hash,
 )
 from mox_adv.direct_action_common import (
     ACTION_OPERATION_TYPE,
+    DirectActionContext,
     age_minutes,
     decision_summary,
     proposal_projection,
@@ -28,8 +25,6 @@ from mox_adv.direct_action_common import (
 )
 from mox_adv.direct_action_runtime import DirectActionRuntimeV1
 from mox_adv.direct_analysis import DIRECT_IDENTITY
-from mox_adv.direct_metrics import DirectMetric
-from mox_adv.direct_provider import DirectObservationV1
 from mox_adv.module_analysis import terminal_module_result
 from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
@@ -57,12 +52,13 @@ class DirectActionExecutionV1:
 
     def execute(
         self,
-        request: ModuleRequestV1,
-        now: datetime,
-        evidence: DirectObservationV1,
-        current: DirectObservationV1,
-        metrics: Mapping[str, DirectMetric],
+        context: DirectActionContext,
     ) -> ModuleResultV1:
+        request = context.request
+        now = context.now
+        evidence = context.evidence
+        current = context.current
+        metrics = context.metrics
         command = request.direct_action_command
         assert isinstance(command, ExecuteDirectActionCommandV1)
         proposal = self._runtime.proposal_store.load_active(
@@ -86,19 +82,6 @@ class DirectActionExecutionV1:
                 "IMMUTABLE_PROPOSAL_CONFLICT",
                 "The prepared change does not match the stored proposal.",
             )
-        execution_request = ExecutionRequest(
-            proposal_id=proposal.proposal_id,
-            execution_key=prepared.execution_key(),
-            scope=prepared.scope,
-            facts=self._facts(
-                now,
-                evidence,
-                current,
-                metrics,
-                prepared,
-                state_fingerprint(request, current),
-            ),
-        )
         adapter = self._runtime.test_adapter
         if adapter is None:
             return self._blocked(
@@ -121,13 +104,21 @@ class DirectActionExecutionV1:
             if error.reason_code != "EXECUTION_NOT_FOUND":
                 raise
             existing = None
-        if existing is not None and existing.status in {
-            ExecutionStatus.IN_FLIGHT,
-            ExecutionStatus.UNKNOWN_RESULT,
-        }:
+        if existing is not None:
             outcome = executor.reconcile(prepared.execution_key())
         else:
-            outcome = executor.execute(execution_request)
+            outcome = executor.execute(
+                ExecutionRequest(
+                    proposal_id=proposal.proposal_id,
+                    execution_key=prepared.execution_key(),
+                    scope=prepared.scope,
+                    facts=self._facts(
+                        context,
+                        prepared,
+                        state_fingerprint(request, current),
+                    ),
+                )
+            )
         status, execution_status, reason_code = public_execution_status(
             outcome.status,
             outcome.reason_code,
@@ -194,16 +185,24 @@ class DirectActionExecutionV1:
             decision_record_ref=receipt.reference,
         )
 
-    @staticmethod
     def _facts(
-        now: datetime,
-        evidence: DirectObservationV1,
-        current: DirectObservationV1,
-        metrics: Mapping[str, DirectMetric],
+        self,
+        context: DirectActionContext,
         prepared: PreparedChange,
         fingerprint: str,
     ) -> ExecutionFacts:
+        now = context.now
+        evidence = context.evidence
+        current = context.current
+        metrics = context.metrics
         assert evidence.conversions is not None
+        operational = self._runtime.state.load_operational_execution_facts(
+            prepared.scope,
+            now,
+            cooldown_hours=int(
+                self._runtime.policy["timing"]["cooldown_hours"]
+            ),
+        )
         return ExecutionFacts(
             mode="APPROVAL_REQUIRED",
             automation_enabled=True,
@@ -228,14 +227,16 @@ class DirectActionExecutionV1:
             campaign_state=current.state.campaign_state,
             campaign_strategy=current.state.strategy,
             current_fingerprint=fingerprint,
-            cooldown_active=False,
-            actions_in_last_24h=0,
-            cumulative_daily_change_percent=0,
+            cooldown_active=operational.cooldown_active,
+            actions_in_last_24h=operational.actions_in_last_24h,
+            cumulative_daily_change_percent=(
+                operational.cumulative_daily_change_percent
+            ),
             monetary_exposure_rub=(
                 abs(prepared.target_value - prepared.current_value)
                 // 1_000_000
             ),
-            kill_switch_available=True,
+            kill_switch_available=operational.kill_switch_available,
         )
 
     @staticmethod

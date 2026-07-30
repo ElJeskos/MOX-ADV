@@ -9,6 +9,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
+from unittest import mock
 
 from mox_adv.contracts import (
     DirectCampaignStateBlock,
@@ -139,6 +140,66 @@ def direct_action_plan_request() -> dict[str, Any]:
     }
     request["idempotency_key"] = "direct-action-plan-17"
     return request
+
+
+def record_prior_applied_action(
+    state: Any,
+    policy: dict[str, Any],
+    occurred_at: datetime,
+    proposal_id: str,
+) -> None:
+    from mox_adv.commands import OptimizationAction
+    from mox_adv.control_state import (
+        AuthenticatedPrincipal,
+        ExecutionStatus,
+        PreparedChange,
+        TrustedScope,
+    )
+
+    prepared = PreparedChange(
+        proposal_id=proposal_id,
+        proposal_hash="sha256:" + "1" * 64,
+        scope=TrustedScope(
+            organization="sim-organization",
+            connection="sim-connection",
+            account="sim-direct-account",
+            campaign="campaign-7",
+            writer="sim-executor",
+        ),
+        action=OptimizationAction.INCREASE_WEEKLY_BUDGET,
+        current_value=1_000_000_000,
+        target_value=1_100_000_000,
+        expected_diff={
+            "operation": "INCREASE_WEEKLY_BUDGET",
+            "relative_step_percent": 10,
+        },
+        snapshot_id="snapshot-prior",
+        snapshot_generated_at=occurred_at.isoformat(),
+        direct_watermark=occurred_at.isoformat(),
+        metrika_watermark=occurred_at.isoformat(),
+        policy_version=str(policy["policy_id"]),
+        expected_fingerprint="sha256:" + "2" * 64,
+        risk="WEEKLY_BUDGET_INCREASE",
+    )
+    state.register_prepared_change(prepared)
+    approval = state.grant_approval(
+        proposal_id=prepared.proposal_id,
+        expires_at=occurred_at + timedelta(minutes=15),
+        reason="Seed one prior durable Direct execution.",
+        principal=AuthenticatedPrincipal(
+            identity="sviridov",
+            authentication="authenticated_macos_user",
+        ),
+        now=occurred_at,
+    )
+    state.reserve_execution(prepared, occurred_at)
+    state.begin_execution(prepared, approval, occurred_at)
+    state.finish_execution(
+        prepared.execution_key(),
+        ExecutionStatus.APPLIED,
+        None,
+        occurred_at,
+    )
 
 
 class RecordingAuthorizedDirectReader:
@@ -622,6 +683,198 @@ class StandaloneDirectCustomerE2ETests(unittest.TestCase):
                 response.body["errors"][0]["code"],
             )
             self.assertEqual(0, adapter.write_calls)
+
+    def test_unsafe_evidence_never_creates_a_direct_proposal(self) -> None:
+        from mox_adv.control_state import DurableControlState
+        from mox_adv.direct_action import DirectActionRuntimeV1
+        from mox_adv.fake_write_adapter import FakeWriteAdapter
+        from mox_adv.proposal_store import ImmutableProposalStore
+
+        cases = {
+            "low_utilization": {
+                "cost_micros": 1_000_000_000,
+            },
+            "insufficient_sample": {
+                "clicks": 40,
+                "conversions": 2,
+            },
+            "high_cpa": {
+                "cost_micros": 5_000_000_000,
+                "conversions": 4,
+            },
+        }
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        for case, overrides in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                adapter = FakeWriteAdapter()
+                runtime = DirectActionRuntimeV1(
+                    policy=json.loads(
+                        (ROOT / "config" / "gate0-policy.json").read_text(
+                            encoding="utf-8"
+                        )
+                    ),
+                    state=DurableControlState(root / "control.sqlite3"),
+                    proposal_store=ImmutableProposalStore(root / "proposals"),
+                    test_adapter=adapter,
+                    environment=ExecutionEnvironment.TEST,
+                )
+                http = HttpJsonModuleAdapterV1(
+                    DirectModuleV1(
+                        clock=lambda: now,
+                        provider_reader=ActionAuthorizedDirectReader(),
+                        action_runtime=runtime,
+                    ),
+                    environment=ExecutionEnvironment.TEST,
+                )
+                request = direct_action_plan_request()
+                evidence = request["external_evidence"]
+                assert isinstance(evidence, dict)
+                metrics = evidence["metrics"]
+                assert isinstance(metrics, list)
+                for metric in metrics:
+                    assert isinstance(metric, dict)
+                    if metric["name"] in overrides:
+                        metric["value"] = overrides[metric["name"]]
+
+                response = http.handle(request)
+
+                self.assertEqual(422, response.status_code)
+                self.assertEqual("BLOCKED", response.body["status"])
+                self.assertEqual(
+                    "ACTION_POLICY_REJECTED",
+                    response.body["errors"][0]["code"],
+                )
+                self.assertIsNone(response.body["proposal"])
+                self.assertEqual([], list((root / "proposals").glob("*.json")))
+                self.assertEqual(0, adapter.write_calls)
+
+    def test_current_operational_safety_facts_fail_closed_before_write(
+        self,
+    ) -> None:
+        from mox_adv.control_state import (
+            AuthenticatedPrincipal,
+            ControlRejected,
+            DurableControlState,
+        )
+        from mox_adv.direct_action import DirectActionRuntimeV1
+        from mox_adv.fake_write_adapter import FakeWriteAdapter
+        from mox_adv.proposal_store import ImmutableProposalStore
+
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+        cases = (
+            ("cooldown", "COOLDOWN_ACTIVE"),
+            ("quota", "ACTION_QUOTA_REACHED"),
+            ("kill_switch", "KILL_SWITCH_ACTIVE"),
+            ("unavailable", "CONTROL_STATE_UNAVAILABLE"),
+        )
+        for case, expected_code in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                policy = json.loads(
+                    (ROOT / "config" / "gate0-policy.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                if case == "quota":
+                    policy["timing"]["cooldown_hours"] = 1
+                state = DurableControlState(root / "control.sqlite3")
+                if case in {"cooldown", "quota"}:
+                    record_prior_applied_action(
+                        state,
+                        policy,
+                        (
+                            now - timedelta(minutes=30)
+                            if case == "cooldown"
+                            else now - timedelta(hours=2)
+                        ),
+                        "prior-" + case,
+                    )
+                adapter = FakeWriteAdapter(
+                    initial_state={
+                        (
+                            "sim-organization:sim-connection:"
+                            "sim-direct-account:campaign-7:"
+                            "INCREASE_WEEKLY_BUDGET"
+                        ): 2_000_000_000
+                    }
+                )
+                runtime = DirectActionRuntimeV1(
+                    policy=policy,
+                    state=state,
+                    proposal_store=ImmutableProposalStore(root / "proposals"),
+                    test_adapter=adapter,
+                    environment=ExecutionEnvironment.TEST,
+                )
+                http = HttpJsonModuleAdapterV1(
+                    DirectModuleV1(
+                        clock=lambda: now,
+                        provider_reader=ActionAuthorizedDirectReader(),
+                        action_runtime=runtime,
+                    ),
+                    environment=ExecutionEnvironment.TEST,
+                )
+                plan_request = direct_action_plan_request()
+                plan_request["idempotency_key"] = (
+                    "operational-safety-" + case
+                )
+                planned = http.handle(plan_request)
+                proposal_id = planned.body["proposal"]["proposal_id"]
+                principal = AuthenticatedPrincipal(
+                    identity="sviridov",
+                    authentication="authenticated_macos_user",
+                )
+                state.grant_approval(
+                    proposal_id=proposal_id,
+                    expires_at=now + timedelta(minutes=15),
+                    reason="Approve the operational safety scenario.",
+                    principal=principal,
+                    now=now,
+                )
+                if case == "kill_switch":
+                    state.engage_kill_switch(
+                        "global",
+                        "Exercise the public Direct kill switch.",
+                        principal,
+                        now,
+                    )
+                execute_request = dict(plan_request)
+                execute_request["operation"] = {
+                    "kind": "EXECUTE",
+                    "operation_type": "APPLY_OPTIMIZATION",
+                }
+                execute_request["direct_action_command"] = {
+                    "schema_version": "direct-action-command-v1",
+                    "command": "EXECUTE_PROPOSAL",
+                    "proposal_id": proposal_id,
+                }
+                unavailable = (
+                    mock.patch.object(
+                        state,
+                        "load_operational_execution_facts",
+                        side_effect=ControlRejected(
+                            "CONTROL_STATE_UNAVAILABLE",
+                            "durable facts are unavailable.",
+                        ),
+                    )
+                    if case == "unavailable"
+                    else mock.patch.object(
+                        state,
+                        "load_operational_execution_facts",
+                        wraps=state.load_operational_execution_facts,
+                    )
+                )
+
+                with unavailable:
+                    response = http.handle(execute_request)
+
+                self.assertEqual(422, response.status_code)
+                self.assertEqual("BLOCKED", response.body["status"])
+                self.assertEqual(
+                    expected_code,
+                    response.body["errors"][0]["code"],
+                )
+                self.assertEqual(0, adapter.write_calls)
 
     def test_timeout_unknown_result_retries_only_reconcile_without_second_write(
         self,

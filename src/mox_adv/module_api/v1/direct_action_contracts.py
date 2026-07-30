@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any, Dict, Literal, Mapping, Union, cast
 
 from mox_adv.module_api.v1.contract_validation import (
     ContractValidationError,
     exact_fields,
+    identifier,
     object_value,
     one_of,
     text,
@@ -16,7 +16,6 @@ from mox_adv.module_api.v1.contract_validation import (
 
 DIRECT_ACTION_COMMAND_SCHEMA_VERSION = "direct-action-command-v1"
 DirectActionCommandKind = Literal["PLAN_INTENT", "EXECUTE_PROPOSAL"]
-_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -113,15 +112,10 @@ class ExecuteDirectActionCommandV1:
             field="direct_action_command",
             required=("schema_version", "command", "proposal_id"),
         )
-        proposal_id = text(
+        proposal_id = identifier(
             value["proposal_id"],
             "direct_action_command.proposal_id",
-            maximum=128,
         )
-        if _SAFE_IDENTIFIER.fullmatch(proposal_id) is None:
-            raise ContractValidationError(
-                "direct_action_command.proposal_id is invalid"
-            )
         return cls(
             schema_version=one_of(
                 text(

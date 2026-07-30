@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Callable, Optional, Tuple
 
 from mox_adv.control_state import ControlRejected
-from mox_adv.direct_action_common import calculated_metrics
+from mox_adv.direct_action_common import DirectActionContext, calculated_metrics
 from mox_adv.direct_action_execution import DirectActionExecutionV1
 from mox_adv.direct_action_planning import DirectActionPlanningV1
 from mox_adv.direct_action_runtime import DirectActionRuntimeV1
@@ -71,29 +71,23 @@ class StandaloneDirectActionV1:
                 request,
                 now,
             )
-            metrics = calculated_metrics(evidence, current, now)
+            context = DirectActionContext(
+                request=request,
+                now=now,
+                evidence=evidence,
+                current=current,
+                metrics=calculated_metrics(evidence, current, now),
+            )
             if isinstance(
                 request.direct_action_command,
                 PlanDirectActionCommandV1,
             ):
-                return self._planning.plan(
-                    request,
-                    now,
-                    evidence,
-                    current,
-                    metrics,
-                )
+                return self._planning.plan(context)
             assert isinstance(
                 request.direct_action_command,
                 ExecuteDirectActionCommandV1,
             )
-            return self._execution.execute(
-                request,
-                now,
-                evidence,
-                current,
-                metrics,
-            )
+            return self._execution.execute(context)
         except DirectReadAuthorizationError as error:
             return self._rejected(
                 request,

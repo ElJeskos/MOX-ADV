@@ -41,8 +41,8 @@ from mox_adv.egress import (
     EgressDenied,
     HttpEgressGuard,
 )
-from mox_adv.fake_write_adapter import FakeWriteAdapter
 from mox_adv.environment import ExecutionEnvironment
+from mox_adv.fake_write_adapter import FakeWriteAdapter
 from mox_adv.monitoring import DurableWriteWindowGate
 from mox_adv.trust_boundary import (
     DurablePreWriteAudit,
@@ -709,6 +709,24 @@ class ApprovalExecutionTests(unittest.TestCase):
             self.state.load_execution(self.prepared.execution_key()).status,
         )
 
+    def test_operational_policy_facts_come_from_the_durable_ledger(self) -> None:
+        adapter = FakeWriteAdapter(
+            initial_state={self.prepared.target_key(): self.prepared.current_value}
+        )
+        applied = self.service(adapter).execute(make_request(self.prepared))
+
+        facts = self.state.load_operational_execution_facts(
+            self.prepared.scope,
+            NOW,
+            cooldown_hours=72,
+        )
+
+        self.assertEqual("APPLIED", applied.status)
+        self.assertTrue(facts.cooldown_active)
+        self.assertEqual(1, facts.actions_in_last_24h)
+        self.assertEqual(10, facts.cumulative_daily_change_percent)
+        self.assertTrue(facts.kill_switch_available)
+
     def test_kill_switch_storage_failure_blocks_before_adapter_send(self) -> None:
         adapter = FakeWriteAdapter(
             initial_state={self.prepared.target_key(): self.prepared.current_value}
@@ -992,7 +1010,15 @@ class EgressGuardTests(unittest.TestCase):
                 "pilot-site-zone",
             ),
         )
-        for profile, verb, url, version, service, operation, target in rejected_profiles:
+        for (
+            profile,
+            verb,
+            url,
+            version,
+            service,
+            operation,
+            target,
+        ) in rejected_profiles:
             with (
                 self.subTest(profile=profile),
                 self.assertRaises(EgressDenied),

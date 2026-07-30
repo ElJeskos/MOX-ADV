@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Mapping
 
+from mox_adv.approval_execution import deterministic_action_is_eligible
 from mox_adv.commands import calculate_relative_target
 from mox_adv.control_state import (
     ControlRejected,
@@ -14,7 +15,9 @@ from mox_adv.control_state import (
 from mox_adv.direct_action_common import (
     ACTION_OPERATION_TYPE,
     SUPPORTED_ACTION,
+    DirectActionContext,
     decision_summary,
+    eligibility_snapshot,
     proposal_id,
     proposal_projection,
     result_metrics,
@@ -23,16 +26,16 @@ from mox_adv.direct_action_common import (
 )
 from mox_adv.direct_action_runtime import DirectActionRuntimeV1
 from mox_adv.direct_analysis import DIRECT_IDENTITY
-from mox_adv.direct_metrics import DirectMetric
-from mox_adv.direct_provider import DirectObservationV1
 from mox_adv.environment import ExecutionEnvironment
 from mox_adv.module_api.v1 import (
     MODULE_RESULT_SCHEMA_VERSION,
+    ModuleAssessmentV1,
     ModuleDecisionFactsV1,
     ModuleDecisionRecordStoreV1,
     ModuleDecisionV1,
+    ModuleErrorV1,
     ModuleProposalV1,
-    ModuleRequestV1,
+    ModuleRecommendationV1,
     ModuleResultV1,
     PlanDirectActionCommandV1,
 )
@@ -55,14 +58,20 @@ class DirectActionPlanningV1:
 
     def plan(
         self,
-        request: ModuleRequestV1,
-        now: datetime,
-        evidence: DirectObservationV1,
-        current: DirectObservationV1,
-        metrics: Mapping[str, DirectMetric],
+        context: DirectActionContext,
     ) -> ModuleResultV1:
+        request = context.request
+        now = context.now
+        evidence = context.evidence
+        current = context.current
+        metrics = context.metrics
         command = request.direct_action_command
         assert isinstance(command, PlanDirectActionCommandV1)
+        if not deterministic_action_is_eligible(
+            SUPPORTED_ACTION,
+            eligibility_snapshot(context),
+        ):
+            return self._policy_rejected(context)
         fingerprint = state_fingerprint(request, current)
         projection = proposal_projection(self._runtime, metrics)
         identifier = proposal_id(request, command)
@@ -168,6 +177,81 @@ class DirectActionPlanningV1:
             provenance=provenance,
             warnings=(),
             errors=(),
+            decision_record_ref=receipt.reference,
+        )
+
+    def _policy_rejected(
+        self,
+        context: DirectActionContext,
+    ) -> ModuleResultV1:
+        current = context.current
+        metrics = context.metrics
+        command = context.request.direct_action_command
+        assert isinstance(command, PlanDirectActionCommandV1)
+        target = calculate_relative_target(
+            current.state.current_weekly_budget_micros,
+            command.relative_step_percent,
+        )
+        public_metrics = result_metrics(metrics, current, target)
+        assessment = ModuleAssessmentV1(
+            summary=(
+                "Validated evidence does not satisfy the deterministic "
+                "budget-increase policy."
+            ),
+            data_quality_status="READY",
+            confidence_status="READY",
+        )
+        recommendations = (
+            ModuleRecommendationV1(
+                code="KEEP_CURRENT_BUDGET",
+                summary="Keep the current weekly budget.",
+                rationale=(
+                    "The shared deterministic policy rejected the requested "
+                    "increase."
+                ),
+                executable=False,
+            ),
+        )
+        provenance = (
+            context.evidence.provenance + context.current.provenance
+        )
+        receipt = self._decision_records.record_module_decision(
+            DIRECT_IDENTITY,
+            context.request,
+            ModuleDecisionV1(
+                outcome="BLOCKED",
+                reason_codes=("ACTION_POLICY_REJECTED",),
+                facts=ModuleDecisionFactsV1(
+                    metrics=public_metrics,
+                    assessment=assessment,
+                    recommendations=recommendations,
+                    provenance=provenance,
+                ),
+            ),
+        )
+        return ModuleResultV1(
+            schema_version=MODULE_RESULT_SCHEMA_VERSION,
+            run_id="direct-plan-" + receipt.decision_id[:24],
+            module=DIRECT_IDENTITY,
+            status="BLOCKED",
+            metrics=public_metrics,
+            assessment=assessment,
+            recommendations=recommendations,
+            proposal=None,
+            execution_result=None,
+            provenance=provenance,
+            warnings=(),
+            errors=(
+                ModuleErrorV1(
+                    code="ACTION_POLICY_REJECTED",
+                    message=(
+                        "Validated evidence does not authorize the requested "
+                        "Direct action."
+                    ),
+                    field="direct_action_command",
+                    retryable=False,
+                ),
+            ),
             decision_record_ref=receipt.reference,
         )
 
