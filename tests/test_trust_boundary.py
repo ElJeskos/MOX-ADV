@@ -138,6 +138,7 @@ class InjectionBoundaryTests(unittest.TestCase):
             service = RecommendationService(
                 provider,
                 ImmutableProposalStore(Path(directory)),
+                policy,
             )
             for path in paths:
                 fixture = load_json(path)

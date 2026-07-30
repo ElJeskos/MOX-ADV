@@ -33,6 +33,7 @@ def sample_artifacts() -> dict[str, dict[str, Any]]:
         "proposal.json": {
             "schema_version": "proposal-v1",
             "proposal_id": "simulated-proposal",
+            "snapshot_id": "snapshot-1",
         },
         "approval.json": {
             "schema_version": "approval-v1",
@@ -43,18 +44,32 @@ def sample_artifacts() -> dict[str, dict[str, Any]]:
         "change_diff.json": {
             "approval_required": {
                 "proposal_id": "simulated-proposal",
+                "execution_key": "execution-1",
+                "campaign": "campaign-1",
                 "before": 100,
                 "after": 90,
                 "readback": 90,
+                "status": "APPLIED",
             },
         },
         "impact_report.json": {
             "schema_version": "impact-report-v1",
             "status": "OBSERVED_POST_CHANGE",
+            "change_id": "execution-1",
+            "baseline": {
+                "snapshot_id": "snapshot-1",
+                "campaign": "campaign-1",
+            },
+            "post_change": {
+                "snapshot_id": "snapshot-2",
+                "campaign": "campaign-1",
+            },
+            "next_decision": "KEEP_CHANGE",
         },
         "observe-evidence.json": {
             "source": "LOCAL_FIXTURE",
             "snapshot_id": "snapshot-1",
+            "campaign": "campaign-1",
         },
         "monitoring-evidence.json": {
             "status": "POLLED",
@@ -62,6 +77,20 @@ def sample_artifacts() -> dict[str, dict[str, Any]]:
         "lifecycle-evidence.json": {
             "campaign_status": "APPLIED",
             "goal_technical_status": "VERIFIED",
+        },
+        "closed-loop-envelope.json": {
+            "schema_version": "closed-loop-run-envelope-v1",
+            "campaign": "campaign-1",
+            "snapshot_id": "snapshot-1",
+            "proposal_id": "simulated-proposal",
+            "execution_key": "execution-1",
+            "readback_status": "APPLIED",
+            "change_id": "execution-1",
+            "impact_campaign": "campaign-1",
+            "post_snapshot_id": "snapshot-2",
+            "next_decision": "KEEP_CHANGE",
+            "evidence_type": "SIMULATED",
+            "capability_status": "NOT_PROVEN",
         },
     }
 
@@ -79,6 +108,22 @@ def sample_run_summary() -> dict[str, Any]:
         "input_tokens": 10,
         "output_tokens": 5,
         "cost_rub": "0",
+        "model_cost": {
+            "provider": "deterministic-fake",
+            "model_id": "fixture-model-v1",
+            "currency": "RUB",
+            "exchange_rate_rub_per_usd": "90",
+            "input_usd_per_million": "0",
+            "output_usd_per_million": "0",
+            "limit_rub": "2000",
+            "warning_percent": "80",
+            "charged_cost_rub": "0",
+            "reserved_cost_rub": "0",
+            "call_count": 1,
+            "warning": False,
+            "exhausted": False,
+            "configuration_hash": "sha256:" + "4" * 64,
+        },
         "duration_ms": 12,
         "stage_durations_ms": {"observe": 7, "recommend": 5},
         "proposal_id": "simulated-proposal",
@@ -306,7 +351,7 @@ class FinalEvidenceTests(unittest.TestCase):
         self.assertNotIn("PROVEN", {item.status for item in evidence})
         self.assertNotIn("CONTROLLED_PILOT", {item.evidence_type for item in evidence})
         self.assertEqual(
-            "NOT_TESTED",
+            "NOT_PROVEN",
             next(
                 item.status
                 for item in evidence
@@ -364,6 +409,7 @@ class FinalEvidenceTests(unittest.TestCase):
                 "observe-evidence.json",
                 "monitoring-evidence.json",
                 "lifecycle-evidence.json",
+                "closed-loop-envelope.json",
                 "artifact-manifest.json",
             }
             self.assertTrue(required.issubset({path.name for path in first.iterdir()}))

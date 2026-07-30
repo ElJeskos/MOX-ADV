@@ -336,6 +336,17 @@ class IntegratedSnapshotNormalizerV1:
         if generated_at < budget_period_start:
             gaps.append("BUDGET_PERIOD_MISMATCH")
             incompatible = True
+        report_period_start = _parse_date(direct.period_start, "period start")
+        report_period_closed_at = datetime.combine(
+            _parse_date(direct.period_end, "period end") + timedelta(days=1),
+            time.min,
+            tzinfo=timezone.utc,
+        )
+        if (
+            report_period_start != budget_period_start.date()
+            or report_period_closed_at != budget_period_end
+        ):
+            gaps.append("PACING_BUDGET_PERIOD_MISMATCH")
 
         timestamps = {
             "direct_report": (
@@ -378,12 +389,7 @@ class IntegratedSnapshotNormalizerV1:
         if max(watermarks) - min(watermarks) > maximum_skew:
             gaps.append("WATERMARK_SKEW_EXCEEDED")
             incompatible = True
-        period_end = _parse_date(direct.period_end, "period end")
-        closed_at = datetime.combine(
-            period_end + timedelta(days=1),
-            time.min,
-            tzinfo=timezone.utc,
-        )
+        closed_at = report_period_closed_at
         if generated_at < closed_at:
             gaps.append("PERIOD_NOT_CLOSED")
             incompatible = True

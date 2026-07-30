@@ -385,6 +385,18 @@
       "expected_next_decision": "KEEP_CHANGE"
     }
   },
+  "llm_cost": {
+    "currency": "RUB",
+    "exchange_rate_rub_per_usd": "90.00",
+    "tariffs": [
+      {
+        "provider": "deterministic-fake",
+        "model_id": "gate0-fixtures-v1",
+        "input_usd_per_million": "0",
+        "output_usd_per_million": "0"
+      }
+    ]
+  },
   "llm": {
     "allowed_projection_fields": [
       "schema_version",

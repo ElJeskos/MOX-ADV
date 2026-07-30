@@ -313,6 +313,11 @@ class ModelResponse:
 class ModelProvider(Protocol):
     """A model boundary that receives only a sanitized projection."""
 
+    provider_id: str
+    model_id: str
+    maximum_input_tokens: int
+    maximum_output_tokens: int
+
     def generate(self, projection: Mapping[str, Any]) -> ModelResponse: ...
 
 

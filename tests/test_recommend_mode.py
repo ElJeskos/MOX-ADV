@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import tempfile
 import unittest
@@ -215,18 +216,24 @@ class ReliabilityFixtureTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             store = ImmutableProposalStore(Path(temporary_directory))
-            service = RecommendationService(provider, store)
-            hashes: dict[str, set[str]] = {name: set() for name in cases}
+            service = RecommendationService(provider, store, policy)
+            proposal_ids: dict[str, set[str]] = {name: set() for name in cases}
             for fixture_name, (expected_status, expected_action) in cases.items():
-                for _ in range(5):
+                for attempt in range(5):
                     projection = build_sanitized_projection(
                         load_fixture(fixture_name),
                         policy,
                     )
+                    snapshot_id = (
+                        "sha256:"
+                        + hashlib.sha256(
+                            f"{fixture_name}:{attempt}".encode("utf-8")
+                        ).hexdigest()
+                    )
                     outcome = service.recommend(
                         projection=projection,
                         run_id="run-" + fixture_name.lower(),
-                        snapshot_id="sha256:" + "a" * 64,
+                        snapshot_id=snapshot_id,
                         expected_fingerprint="sha256:" + "b" * 64,
                         created_at=created_at,
                         expires_at=expires_at,
@@ -245,11 +252,13 @@ class ReliabilityFixtureTests(unittest.TestCase):
                     )
                     self.assertEqual("deterministic-fake", outcome.provider.provider)
                     self.assertEqual("gate0-fixtures-v1", outcome.provider.model_id)
-                    hashes[fixture_name].add(outcome.canonical_hash)
+                    proposal_ids[fixture_name].add(proposal.proposal_id)
 
             self.assertEqual(20, provider.invocation_count)
-            self.assertTrue(all(len(values) == 1 for values in hashes.values()))
-            self.assertEqual(4, len(list(Path(temporary_directory).glob("*.json"))))
+            self.assertTrue(
+                all(len(values) == 5 for values in proposal_ids.values())
+            )
+            self.assertEqual(20, len(list(Path(temporary_directory).glob("*.json"))))
 
 
 class ClosedSchemaTests(unittest.TestCase):
@@ -491,6 +500,11 @@ class ClosedSchemaTests(unittest.TestCase):
 
 
 class InvalidProvider:
+    provider_id = "deterministic-fake"
+    model_id = "gate0-fixtures-v1"
+    maximum_input_tokens = 1
+    maximum_output_tokens = 1
+
     def __init__(self) -> None:
         self.invocation_count = 0
 
@@ -499,8 +513,8 @@ class InvalidProvider:
         self.invocation_count += 1
         return ModelResponse(
             payload={"status": "EFFECTIVE", "arbitrary_http_payload": {}},
-            provider="invalid-provider",
-            model_id="invalid-model",
+            provider=self.provider_id,
+            model_id=self.model_id,
             input_tokens=1,
             output_tokens=1,
             cost_rub="0",
@@ -531,6 +545,7 @@ class FailClosedRecommendationTests(unittest.TestCase):
             service = RecommendationService(
                 provider,
                 ImmutableProposalStore(Path(temporary_directory)),
+                load_policy(),
             )
 
             outcome = service.recommend(
@@ -546,7 +561,10 @@ class FailClosedRecommendationTests(unittest.TestCase):
             self.assertEqual("INVALID_INPUT", outcome.reason_code)
             self.assertEqual(0, provider.invocation_count)
             self.assertEqual("not-invoked", outcome.provider.provider)
-            self.assertEqual([], list(Path(temporary_directory).iterdir()))
+            self.assertEqual(
+                [],
+                list(Path(temporary_directory).glob("*.json")),
+            )
 
     def test_valid_looking_untrusted_mapping_is_blocked_before_provider(self) -> None:
         projection = dict(load_projection("LLM_EFFECTIVE_BUDGET_PRESSURE"))
@@ -559,6 +577,7 @@ class FailClosedRecommendationTests(unittest.TestCase):
             service = RecommendationService(
                 provider,
                 ImmutableProposalStore(Path(temporary_directory)),
+                load_policy(),
             )
 
             outcome = service.recommend(
@@ -584,6 +603,7 @@ class FailClosedRecommendationTests(unittest.TestCase):
             service = RecommendationService(
                 provider,
                 ImmutableProposalStore(Path(temporary_directory)),
+                policy,
             )
 
             outcome = service.recommend(
@@ -599,14 +619,19 @@ class FailClosedRecommendationTests(unittest.TestCase):
             self.assertEqual("BLOCKED", outcome.execution_status)
             self.assertEqual("INVALID_INPUT", outcome.reason_code)
             self.assertIsNone(outcome.proposal)
-            self.assertEqual([], list(Path(temporary_directory).iterdir()))
+            self.assertEqual(
+                [],
+                list(Path(temporary_directory).glob("*.json")),
+            )
 
     def test_invalid_provider_metadata_is_blocked_without_persistence(self) -> None:
+        policy = load_policy()
         projection = load_projection("LLM_EFFECTIVE_BUDGET_PRESSURE")
         with tempfile.TemporaryDirectory() as temporary_directory:
             service = RecommendationService(
                 InvalidMetadataProvider(),
                 ImmutableProposalStore(Path(temporary_directory)),
+                policy,
             )
 
             outcome = service.recommend(
@@ -619,12 +644,15 @@ class FailClosedRecommendationTests(unittest.TestCase):
             )
 
             self.assertEqual("BLOCKED", outcome.status)
-            self.assertEqual("INVALID_INPUT", outcome.reason_code)
+            self.assertEqual("MODEL_USAGE_METADATA_INVALID", outcome.reason_code)
             self.assertEqual(
-                "invalid-provider-response",
+                "deterministic-fake",
                 outcome.provider.provider,
             )
-            self.assertEqual([], list(Path(temporary_directory).iterdir()))
+            self.assertEqual(
+                [],
+                list(Path(temporary_directory).glob("*.json")),
+            )
 
 
 class ImmutableProposalStoreTests(unittest.TestCase):
@@ -633,7 +661,7 @@ class ImmutableProposalStoreTests(unittest.TestCase):
         provider = DeterministicFakeModelProvider()
         with tempfile.TemporaryDirectory() as temporary_directory:
             store = ImmutableProposalStore(Path(temporary_directory))
-            service = RecommendationService(provider, store)
+            service = RecommendationService(provider, store, load_policy())
             first = service.recommend(
                 projection=projection,
                 run_id="run-store",
@@ -667,7 +695,7 @@ class ImmutableProposalStoreTests(unittest.TestCase):
         provider = DeterministicFakeModelProvider()
         with tempfile.TemporaryDirectory() as temporary_directory:
             store = ImmutableProposalStore(Path(temporary_directory))
-            service = RecommendationService(provider, store)
+            service = RecommendationService(provider, store, load_policy())
             outcome = service.recommend(
                 projection=projection,
                 run_id="run-expired",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Dict, Mapping, Union
 
@@ -230,14 +230,23 @@ class IntegratedAnalyticsEngineV1:
         period_end = datetime.fromisoformat(
             snapshot.campaign.budget_period_end.replace("Z", "+00:00")
         ).astimezone(timezone.utc)
-        generated_at = datetime.fromisoformat(
-            snapshot.generated_at.replace("Z", "+00:00")
-        ).astimezone(timezone.utc)
+        report_start = datetime.combine(
+            datetime.fromisoformat(snapshot.period_start).date(),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+        report_closed_at = datetime.combine(
+            datetime.fromisoformat(snapshot.period_end).date(),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ) + timedelta(days=1)
+        if report_start != period_start or report_closed_at != period_end:
+            return Decimal(0)
         total_seconds = Decimal(str((period_end - period_start).total_seconds()))
         elapsed_seconds = Decimal(
             str(
                 min(
-                    max((generated_at - period_start).total_seconds(), 0),
+                    max((report_closed_at - period_start).total_seconds(), 0),
                     (period_end - period_start).total_seconds(),
                 )
             )

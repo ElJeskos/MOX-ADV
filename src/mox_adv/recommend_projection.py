@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterator, Mapping, Optional
 
@@ -18,7 +18,10 @@ from mox_adv.recommend_contracts import (
     _integer,
     _parse_utc,
     _text,
+    _canonical_hash,
 )
+from mox_adv.contracts import IntegratedPerformanceSnapshot
+from mox_adv.normalization import IntegratedSnapshotNormalizerV1
 
 _URL = re.compile(r"(?:https?://|www\.)", re.IGNORECASE)
 _PROHIBITED_TEXT = re.compile(
@@ -376,3 +379,147 @@ def build_sanitized_projection(
     projection["observed_facts"] = list(supported_facts(projection))
     validate_projection(projection)
     return SanitizedProjection(projection, _PROJECTION_CONSTRUCTION_TOKEN)
+
+
+def campaign_fingerprint(snapshot: IntegratedPerformanceSnapshot) -> str:
+    """Seal the exact trusted campaign state used by executor readback."""
+
+    if (
+        type(snapshot) is not IntegratedPerformanceSnapshot
+        or not IntegratedSnapshotNormalizerV1.verify_fingerprint(snapshot.as_dict())
+    ):
+        raise SchemaValidationError("Trusted snapshot fingerprint is invalid.")
+    return campaign_fingerprint_mapping(snapshot.as_dict())
+
+
+def campaign_fingerprint_mapping(snapshot: Mapping[str, Any]) -> str:
+    """Verify and fingerprint a persisted integrated snapshot mapping."""
+
+    if not IntegratedSnapshotNormalizerV1.verify_fingerprint(snapshot):
+        raise SchemaValidationError("Trusted snapshot fingerprint is invalid.")
+    try:
+        scope = snapshot["scope"]
+        campaign = snapshot["campaign"]
+        policy_version = snapshot["policy_version"]
+    except (KeyError, TypeError) as error:
+        raise SchemaValidationError("Trusted snapshot campaign is invalid.") from error
+    return _canonical_hash(
+        {
+            "policy_version": policy_version,
+            "scope": {
+                "organization": scope["organization"],
+                "connection": scope["connection"],
+                "account": scope["account"],
+                "campaign": scope["campaign"],
+            },
+            "campaign": {
+                "state": campaign["state"],
+                "strategy": campaign["strategy"],
+                "current_weekly_budget_micros": (
+                    campaign["current_weekly_budget_micros"]
+                ),
+                "current_search_bid_micros": (
+                    campaign["current_search_bid_micros"]
+                ),
+                "current_ad_variant": campaign["current_ad_variant"],
+                "object_config_version": campaign["object_config_version"],
+            },
+        }
+    )
+
+
+def projection_from_integrated_snapshot(
+    snapshot: IntegratedPerformanceSnapshot,
+    policy: Mapping[str, Any],
+    evaluated_at: datetime,
+) -> SanitizedProjection:
+    """Derive the model projection only from one verified integrated snapshot."""
+
+    campaign_fingerprint(snapshot)
+    if evaluated_at.tzinfo is None:
+        raise SchemaValidationError("Projection evaluation time must be aware.")
+    evaluated = evaluated_at.astimezone(timezone.utc)
+
+    def parsed(value: str) -> datetime:
+        try:
+            result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (AttributeError, ValueError) as error:
+            raise SchemaValidationError(
+                "Trusted snapshot timestamp is invalid."
+            ) from error
+        if result.tzinfo is None:
+            raise SchemaValidationError(
+                "Trusted snapshot timestamp must be timezone-aware."
+            )
+        return result.astimezone(timezone.utc)
+
+    generated_at = parsed(snapshot.generated_at)
+    direct_times = (
+        parsed(snapshot.provenance.direct_report.retrieved_at),
+        parsed(snapshot.provenance.direct_state.retrieved_at),
+    )
+    metrika_time = parsed(snapshot.provenance.metrika_report.retrieved_at)
+    watermarks = (
+        parsed(snapshot.provenance.direct_report.watermark),
+        parsed(snapshot.provenance.direct_state.watermark),
+        parsed(snapshot.provenance.metrika_report.watermark),
+    )
+    if evaluated < generated_at or any(
+        value > evaluated
+        for value in (*direct_times, metrika_time, *watermarks)
+    ):
+        raise SchemaValidationError(
+            "Projection evaluation cannot precede trusted snapshot evidence."
+        )
+
+    def age_minutes(value: datetime) -> int:
+        return max(0, int((evaluated - value).total_seconds() // 60))
+
+    metrics = snapshot.metrics
+    seed = {
+        "schema_version": "llm-projection-v1",
+        "period_start": snapshot.period_start,
+        "period_end": snapshot.period_end,
+        "timezone": snapshot.timezone,
+        "attribution": {
+            "direct": snapshot.attribution.direct,
+            "metrika": snapshot.attribution.metrika,
+        },
+        "campaign_state": snapshot.campaign.state,
+        "campaign_strategy": snapshot.campaign.strategy,
+        "current_budget": snapshot.campaign.current_weekly_budget_micros,
+        "current_bid": snapshot.campaign.current_search_bid_micros,
+        "current_ad_variant": snapshot.campaign.current_ad_variant,
+        "impressions": metrics["impressions"],
+        "clicks": metrics["clicks"],
+        "cost_micros": metrics["cost_micros"],
+        "visits": metrics["visits"],
+        "goal_visits": metrics["goal_visits"],
+        "ctr": metrics["ctr_percent"],
+        "cpc": metrics["cpc_rub"],
+        "conversion_rate": metrics["conversion_rate_percent"],
+        "cpa": metrics["cpa_rub"],
+        "budget_utilization": metrics["budget_utilization_percent"],
+        "freshness": {
+            "direct_minutes": max(age_minutes(value) for value in direct_times),
+            "metrika_minutes": age_minutes(metrika_time),
+            "watermark_skew_minutes": int(
+                (max(watermarks) - min(watermarks)).total_seconds() // 60
+            ),
+        },
+        "comparability": {
+            "status": snapshot.comparability_status,
+            "confidence": snapshot.confidence_status,
+            "financial_recommendations_allowed": (
+                snapshot.financial_recommendations_allowed
+            ),
+        },
+        "observed_facts": [],
+        "business_goal": {
+            "event": snapshot.business_goal.event,
+            "meaning": snapshot.business_goal.meaning,
+        },
+        "allowed_change_history": [],
+        "policy_limits": {},
+    }
+    return build_sanitized_projection(seed, policy)

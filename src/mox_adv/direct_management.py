@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
+from mox_adv.control_state import DurableControlState, TrustedScope
+
 
 class DirectStateTransitionRejected(RuntimeError):
     """A management request failed before reaching the adapter."""
@@ -122,11 +124,28 @@ class DirectManagementConnectorV1:
         adapter: DirectManagementAdapter,
         registry: RunObjectRegistry,
         authority: Optional[ProductionPilotAuthority] = None,
+        control_state: Optional[DurableControlState] = None,
+        trusted_scope: Optional[TrustedScope] = None,
     ) -> None:
+        if type(control_state) is not DurableControlState:
+            raise DirectStateTransitionRejected(
+                "DURABLE_DISPATCH_GUARD_REQUIRED"
+            )
+        if trusted_scope is None and type(adapter) is FakeDirectManagementAdapter:
+            simulation = policy["bindings"]["simulation"]
+            trusted_scope = TrustedScope(
+                organization=str(simulation["organization"]),
+                connection=str(simulation["connection"]),
+                account=str(simulation["direct_account"]),
+                campaign="direct-management",
+                writer=str(simulation["single_writer"]),
+            )
         self._policy = policy
         self._adapter = adapter
         self._registry = registry
         self._authority = authority
+        self._control_state = control_state
+        self._trusted_scope = trusted_scope
         self._allowed = {
             (str(item["service"]), str(item["method"]))
             for item in policy["api_matrix"]
@@ -166,25 +185,26 @@ class DirectManagementConnectorV1:
         return self._single_write(run_id, "Campaigns", "update", object_id, changes)
 
     def campaigns_suspend(self, run_id: str, object_id: str) -> Mapping[str, Any]:
-        self._require_state("Campaigns", object_id, {"ON"}, "suspend")
+        self._require_state(run_id, "Campaigns", object_id, {"ON"}, "suspend")
         return self._single_write(run_id, "Campaigns", "suspend", object_id, {})
 
     def campaigns_resume(self, run_id: str, object_id: str) -> Mapping[str, Any]:
-        self._require_state("Campaigns", object_id, {"SUSPENDED"}, "resume")
+        self._require_state(run_id, "Campaigns", object_id, {"SUSPENDED"}, "resume")
         return self._single_write(run_id, "Campaigns", "resume", object_id, {})
 
     def campaigns_archive(self, run_id: str, object_id: str) -> Mapping[str, Any]:
         self._require_owned(run_id, "Campaigns", object_id, "archive")
-        self._require_state("Campaigns", object_id, {"SUSPENDED"}, "archive")
+        self._require_state(run_id, "Campaigns", object_id, {"SUSPENDED"}, "archive")
         return self._single_write(run_id, "Campaigns", "archive", object_id, {})
 
     def campaigns_unarchive(self, run_id: str, object_id: str) -> Mapping[str, Any]:
-        self._require_state("Campaigns", object_id, {"ARCHIVED"}, "unarchive")
+        self._require_state(run_id, "Campaigns", object_id, {"ARCHIVED"}, "unarchive")
         return self._single_write(run_id, "Campaigns", "unarchive", object_id, {})
 
     def campaigns_delete(self, run_id: str, object_id: str) -> Mapping[str, Any]:
         self._require_owned(run_id, "Campaigns", object_id, "delete")
         self._require_state(
+            run_id,
             "Campaigns",
             object_id,
             {"SUSPENDED", "ARCHIVED"},
@@ -249,20 +269,26 @@ class DirectManagementConnectorV1:
         return self._single_write(run_id, "Ads", "update", object_id, changes)
 
     def ads_suspend(self, run_id: str, object_id: str) -> Mapping[str, Any]:
-        self._require_state("Ads", object_id, {"ON"}, "suspend")
+        self._require_state(run_id, "Ads", object_id, {"ON"}, "suspend")
         return self._single_write(run_id, "Ads", "suspend", object_id, {})
 
     def ads_resume(self, run_id: str, object_id: str) -> Mapping[str, Any]:
-        self._require_state("Ads", object_id, {"SUSPENDED", "MODERATION"}, "resume")
+        self._require_state(
+            run_id,
+            "Ads",
+            object_id,
+            {"SUSPENDED", "MODERATION"},
+            "resume",
+        )
         return self._single_write(run_id, "Ads", "resume", object_id, {})
 
     def ads_archive(self, run_id: str, object_id: str) -> Mapping[str, Any]:
         self._require_owned(run_id, "Ads", object_id, "archive")
-        self._require_state("Ads", object_id, {"SUSPENDED"}, "archive")
+        self._require_state(run_id, "Ads", object_id, {"SUSPENDED"}, "archive")
         return self._single_write(run_id, "Ads", "archive", object_id, {})
 
     def ads_unarchive(self, run_id: str, object_id: str) -> Mapping[str, Any]:
-        self._require_state("Ads", object_id, {"ARCHIVED"}, "unarchive")
+        self._require_state(run_id, "Ads", object_id, {"ARCHIVED"}, "unarchive")
         return self._single_write(run_id, "Ads", "unarchive", object_id, {})
 
     def ads_moderate(
@@ -272,7 +298,7 @@ class DirectManagementConnectorV1:
     ) -> Tuple[Mapping[str, Any], ...]:
         ids = self._normalize_ids(object_ids)
         for object_id in ids:
-            self._require_state("Ads", object_id, {"DRAFT"}, "moderate")
+            self._require_state(run_id, "Ads", object_id, {"DRAFT"}, "moderate")
         result = self._invoke(
             run_id,
             self._operation_key(run_id, "Ads", "moderate", ids),
@@ -285,6 +311,7 @@ class DirectManagementConnectorV1:
     def ads_delete(self, run_id: str, object_id: str) -> Mapping[str, Any]:
         self._require_owned(run_id, "Ads", object_id, "delete")
         self._require_state(
+            run_id,
             "Ads",
             object_id,
             {"DRAFT", "MODERATION", "SUSPENDED", "ARCHIVED"},
@@ -322,16 +349,16 @@ class DirectManagementConnectorV1:
         return self._single_write(run_id, "Keywords", "update", object_id, changes)
 
     def keywords_suspend(self, run_id: str, object_id: str) -> Mapping[str, Any]:
-        self._require_state("Keywords", object_id, {"ON"}, "suspend")
+        self._require_state(run_id, "Keywords", object_id, {"ON"}, "suspend")
         return self._single_write(run_id, "Keywords", "suspend", object_id, {})
 
     def keywords_resume(self, run_id: str, object_id: str) -> Mapping[str, Any]:
-        self._require_state("Keywords", object_id, {"SUSPENDED"}, "resume")
+        self._require_state(run_id, "Keywords", object_id, {"SUSPENDED"}, "resume")
         return self._single_write(run_id, "Keywords", "resume", object_id, {})
 
     def keywords_delete(self, run_id: str, object_id: str) -> Mapping[str, Any]:
         self._require_owned(run_id, "Keywords", object_id, "delete")
-        self._require_state("Keywords", object_id, {"SUSPENDED"}, "delete")
+        self._require_state(run_id, "Keywords", object_id, {"SUSPENDED"}, "delete")
         return self._single_write(run_id, "Keywords", "delete", object_id, {})
 
     def keyword_bids_get(
@@ -407,7 +434,35 @@ class DirectManagementConnectorV1:
                 + "."
                 + typed_method.value
             )
+        object_ids = self._request_object_ids(typed_method, payload)
+        if typed_method != DirectMethod.ADD:
+            ownership_service = (
+                DirectService.KEYWORDS.value
+                if typed_service == DirectService.KEYWORD_BIDS
+                else typed_service.value
+            )
+            for object_id in object_ids:
+                self._require_owned(
+                    run_id,
+                    ownership_service,
+                    object_id,
+                    typed_method.value,
+                )
+            expected_key = self._operation_key(
+                run_id,
+                typed_service.value,
+                typed_method.value,
+                object_ids,
+            )
+            if operation_key != expected_key:
+                raise DirectStateTransitionRejected(
+                    "DIRECT_OPERATION_PLAN_MISMATCH"
+                )
+        elif not operation_key:
+            raise DirectStateTransitionRejected("DIRECT_OPERATION_PLAN_MISMATCH")
         self._require_adapter_authority()
+        if typed_method != DirectMethod.GET:
+            self._require_dispatch_allowed()
         result = self._adapter.invoke(
             DirectMethodRequest(
                 run_id=run_id,
@@ -422,7 +477,7 @@ class DirectManagementConnectorV1:
         return result
 
     def _require_adapter_authority(self) -> None:
-        if getattr(self._adapter, "is_fake", False) is True:
+        if type(self._adapter) is FakeDirectManagementAdapter:
             return
         pilot = self._policy["bindings"]["pilot"]
         record = self._policy["record"]
@@ -443,6 +498,29 @@ class DirectManagementConnectorV1:
             raise DirectStateTransitionRejected(
                 "PRODUCTION_CONNECTOR_DISABLED: validated pilot authority is absent."
             )
+        if (
+            self._control_state is None
+            or self._trusted_scope is None
+            or self._trusted_scope.account != authority.account
+        ):
+            raise DirectStateTransitionRejected(
+                "DURABLE_DISPATCH_GUARD_REQUIRED"
+            )
+
+    def _require_dispatch_allowed(self) -> None:
+        if type(self._adapter) is FakeDirectManagementAdapter:
+            if self._control_state is None or self._trusted_scope is None:
+                raise DirectStateTransitionRejected(
+                    "DURABLE_DISPATCH_GUARD_REQUIRED"
+                )
+            self._control_state.require_dispatch_allowed(self._trusted_scope)
+            return
+        assert self._control_state is not None
+        assert self._trusted_scope is not None
+        try:
+            self._control_state.require_dispatch_allowed(self._trusted_scope)
+        except RuntimeError as error:
+            raise DirectStateTransitionRejected(str(error)) from error
 
     def _require_owned(
         self,
@@ -462,11 +540,16 @@ class DirectManagementConnectorV1:
 
     def _require_state(
         self,
+        run_id: str,
         service: str,
         object_id: str,
         allowed_states: set[DirectState],
         operation: str,
     ) -> None:
+        ownership_service = (
+            "Keywords" if service == "KeywordBids" else service
+        )
+        self._require_owned(run_id, ownership_service, object_id, operation)
         self._require_adapter_authority()
         state = self._adapter.inspect(service, object_id).get("state")
         if DirectState(state) not in allowed_states:
@@ -479,12 +562,49 @@ class DirectManagementConnectorV1:
                 + str(state)
             )
 
+    def preflight_add(
+        self,
+        run_id: str,
+        operation_key: str,
+        service: str,
+    ) -> None:
+        typed_service = DirectService(service)
+        if (typed_service.value, DirectMethod.ADD.value) not in self._allowed:
+            raise DirectStateTransitionRejected(
+                "DIRECT_METHOD_NOT_ALLOWLISTED: "
+                + typed_service.value
+                + ".add"
+            )
+        if not run_id or not operation_key:
+            raise DirectStateTransitionRejected("DIRECT_OPERATION_PLAN_MISMATCH")
+        self._require_adapter_authority()
+        self._require_dispatch_allowed()
+
+    @staticmethod
+    def _request_object_ids(
+        method: DirectMethod,
+        payload: Mapping[str, Any],
+    ) -> Tuple[str, ...]:
+        if method == DirectMethod.ADD:
+            return ()
+        raw = (
+            payload.get("ids")
+            if method in {DirectMethod.GET, DirectMethod.MODERATE}
+            else payload.get("id")
+        )
+        return DirectManagementConnectorV1._normalize_ids(raw)
+
     @staticmethod
     def _normalize_ids(value: Any) -> Tuple[str, ...]:
         if isinstance(value, str):
             ids = (value,)
         else:
-            ids = tuple(value)
+            try:
+                ids = tuple(value)
+            except TypeError as error:
+                raise DirectStateTransitionRejected(
+                    "DIRECT_OBJECT_IDS_INVALID"
+                ) from error
         if not ids or any(not isinstance(item, str) or not item for item in ids):
             raise DirectStateTransitionRejected("DIRECT_OBJECT_IDS_INVALID")
         return ids

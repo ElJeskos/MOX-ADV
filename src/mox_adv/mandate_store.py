@@ -380,6 +380,10 @@ class DurableMandateAuthority:
             raise ControlRejected("MANDATE_NOT_FOUND", "Mandate does not exist.")
         return self._record_from_row(row)
 
+    def load_active(self, mandate_id: str, now: datetime) -> MandateRecord:
+        with self._connect() as connection:
+            return self._load_active_in_connection(connection, mandate_id, now)
+
     def list_records(self) -> tuple[MandateRecord, ...]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -592,7 +596,7 @@ class DurableMandateAuthority:
             connection.close()
         if before_dispatch is not None:
             before_dispatch()
-        self._require_dispatch_allowed(mandate_id, prepared.scope, now)
+        self.require_dispatch_allowed(mandate_id, prepared.scope, now)
         if at_dispatch_boundary is not None:
             at_dispatch_boundary()
         sender()
@@ -1029,7 +1033,7 @@ class DurableMandateAuthority:
         self._require_no_mandate_interrupt(mandate_id)
         return record
 
-    def _require_dispatch_allowed(
+    def require_dispatch_allowed(
         self,
         mandate_id: str,
         scope: TrustedScope,

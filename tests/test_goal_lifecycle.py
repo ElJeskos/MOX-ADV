@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mox_adv.control_state import AuthenticatedPrincipal
+from mox_adv.control_state import AuthenticatedPrincipal, DurableControlState
 from mox_adv.goal_lifecycle import (
     AuthorityKind,
     CreationReservation,
@@ -23,6 +23,8 @@ from mox_adv.goal_lifecycle import (
     site_publish_binding,
     site_publish_diff,
 )
+from mox_adv.lifecycle_authority import LifecycleAuthorityService
+from mox_adv.mandate_signing import HMACMandateSigner
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc)
@@ -66,8 +68,17 @@ class GoalLifecycleTests(unittest.TestCase):
         self.policy = load_policy()
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
+        self.authority_service = LifecycleAuthorityService(
+            self.policy,
+            FakeSemanticAuthenticator(),
+            HMACMandateSigner(b"goal-lifecycle-authority-tests"),
+        )
         self.store = GoalLifecycleStore(
-            Path(self.temporary_directory.name) / "goals.sqlite3"
+            Path(self.temporary_directory.name) / "goals.sqlite3",
+            self.authority_service,
+        )
+        self.control_state = DurableControlState(
+            Path(self.temporary_directory.name) / "control.sqlite3"
         )
         simulation = self.policy["bindings"]["simulation"]
         self.goal_adapter = FakeMetrikaGoalAdapter(
@@ -85,6 +96,7 @@ class GoalLifecycleTests(unittest.TestCase):
             self.goal_adapter,
             self.site_adapter,
             FakeSemanticAuthenticator(),
+            self.control_state,
         )
 
     def create_test_candidate(
@@ -124,7 +136,7 @@ class GoalLifecycleTests(unittest.TestCase):
             ),
         )
         self.store.register_reservation(reservation)
-        self.store.register_authority(authority)
+        self.store.register_authority(authority, NOW)
         return self.service.create_candidate(
             run_id=run_id,
             proposal_id=proposal_id,
@@ -159,7 +171,7 @@ class GoalLifecycleTests(unittest.TestCase):
                 ),
             ),
         )
-        self.store.register_authority(publish_authority)
+        self.store.register_authority(publish_authority, NOW)
         self.service.publish_candidate_event(
             candidate.candidate_id,
             authority_id=publish_authority.authority_id,
@@ -204,7 +216,7 @@ class GoalLifecycleTests(unittest.TestCase):
             ),
         )
         self.store.register_reservation(reservation)
-        self.store.register_authority(authority)
+        self.store.register_authority(authority, NOW)
 
         candidate = self.service.create_candidate(
             run_id="goal-run-1",
@@ -264,7 +276,7 @@ class GoalLifecycleTests(unittest.TestCase):
             ),
         )
         self.store.register_reservation(reservation)
-        self.store.register_authority(authority)
+        self.store.register_authority(authority, NOW)
 
         candidate = self.service.create_candidate(
             run_id="goal-run-pilot",
@@ -323,7 +335,7 @@ class GoalLifecycleTests(unittest.TestCase):
             ),
         )
         self.store.register_reservation(reservation)
-        self.store.register_authority(authority)
+        self.store.register_authority(authority, NOW)
 
         with self.assertRaisesRegex(
             RuntimeError,
@@ -404,7 +416,7 @@ class GoalLifecycleTests(unittest.TestCase):
                 ),
             ),
         )
-        self.store.register_authority(publish_authority)
+        self.store.register_authority(publish_authority, NOW)
 
         publication = self.service.publish_candidate_event(
             candidate.candidate_id,
@@ -457,7 +469,7 @@ class GoalLifecycleTests(unittest.TestCase):
                 ),
             ),
         )
-        self.store.register_authority(publish_authority)
+        self.store.register_authority(publish_authority, NOW)
 
         with self.assertRaisesRegex(
             RuntimeError,
@@ -511,6 +523,7 @@ class GoalLifecycleTests(unittest.TestCase):
             self.goal_adapter,
             self.site_adapter,
             FakeSemanticAuthenticator(authentication="caller_supplied_string"),
+            self.control_state,
         )
         with self.assertRaisesRegex(RuntimeError, "SEMANTIC_REVIEWER_INVALID"):
             spoofed_service.decide_business_semantics(

@@ -24,8 +24,10 @@ class FakeWriteAdapter:
         write_delay_seconds: float = 0,
         timeout_after_write: bool = False,
         timeout_readback: Any = "__USE_STATE__",
+        current_fingerprints: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._state: Dict[str, Any] = dict(initial_state or {})
+        self._fingerprints = dict(current_fingerprints or {})
         self._lock = threading.Lock()
         self.write_calls = 0
         self.write_delay_seconds = write_delay_seconds
@@ -51,3 +53,16 @@ class FakeWriteAdapter:
             return self.timeout_readback
         with self._lock:
             return self._state.get(target_key)
+
+    def current_fingerprint(self, target_key: str) -> str:
+        with self._lock:
+            try:
+                return self._fingerprints[target_key]
+            except KeyError as error:
+                raise ValueError(
+                    "Trusted current fingerprint is unavailable."
+                ) from error
+
+    def set_current_fingerprint(self, target_key: str, fingerprint: str) -> None:
+        with self._lock:
+            self._fingerprints[target_key] = fingerprint

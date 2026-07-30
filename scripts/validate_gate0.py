@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import json
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Optional
 
@@ -78,7 +79,7 @@ TOP_FIELDS = {
     "schema_version", "policy_id", "record", "environment", "conversion",
     "attribution", "campaign", "principals", "commands", "credentials", "bindings",
     "limits", "timing", "monitoring", "actions", "mandate", "kill_switch", "impact",
-    "llm", "governance", "api_matrix",
+    "llm", "llm_cost", "governance", "api_matrix",
 }
 CREDENTIAL_PROFILES = {
     "DIRECT_PROD_READ", "METRIKA_TEST_WRITE", "TEST_SITE_PUBLISH",
@@ -125,7 +126,7 @@ API_FIELDS = {
     "http_verb", "access_class", "verification_status",
 }
 APPROVED_POLICY_SHA256 = (
-    "ef4756f0d4d843eb0bd4bfbf56ec18f65868e108133552e21dac83c6625e2cc5"
+    "e7f35cebc4d978db5f2f4b4d37d6ce67bdb3d8d3b0aad134a914f6ee6a359ffc"
 )
 
 
@@ -214,6 +215,55 @@ def _validate_structure(policy: dict[str, Any], errors: list[str]) -> None:
         )
     for index, item in enumerate(policy.get("api_matrix", [])):
         _exact_fields(item, API_FIELDS, f"api_matrix[{index}]", errors)
+    llm_cost = policy.get("llm_cost")
+    if _exact_fields(
+        llm_cost,
+        {"currency", "exchange_rate_rub_per_usd", "tariffs"},
+        "llm_cost",
+        errors,
+    ):
+        if llm_cost["currency"] != "RUB":
+            errors.append("llm_cost.currency: unsupported currency")
+        try:
+            exchange_rate = Decimal(
+                str(llm_cost["exchange_rate_rub_per_usd"])
+            )
+        except (InvalidOperation, ValueError):
+            exchange_rate = Decimal(0)
+        if not exchange_rate.is_finite() or exchange_rate <= 0:
+            errors.append("llm_cost.exchange_rate_rub_per_usd: invalid rate")
+        seen_tariffs = set()
+        for index, item in enumerate(llm_cost["tariffs"]):
+            path = f"llm_cost.tariffs[{index}]"
+            if not _exact_fields(
+                item,
+                {
+                    "provider",
+                    "model_id",
+                    "input_usd_per_million",
+                    "output_usd_per_million",
+                },
+                path,
+                errors,
+            ):
+                continue
+            key = (item["provider"], item["model_id"])
+            if (
+                not all(isinstance(value, str) and value for value in key)
+                or key in seen_tariffs
+            ):
+                errors.append(path + ": invalid or duplicate model tariff")
+            seen_tariffs.add(key)
+            for name in (
+                "input_usd_per_million",
+                "output_usd_per_million",
+            ):
+                try:
+                    rate = Decimal(str(item[name]))
+                except (InvalidOperation, ValueError):
+                    rate = Decimal(-1)
+                if not rate.is_finite() or rate < 0:
+                    errors.append(path + "." + name + ": invalid tariff")
 
 
 def _validate_record_and_authority(

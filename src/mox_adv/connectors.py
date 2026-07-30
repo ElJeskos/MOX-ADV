@@ -215,7 +215,7 @@ def _reject_read_response(connector: str) -> RunRejectedError:
 
 def _reject_fixture(message: str) -> RunRejectedError:
     return RunRejectedError(
-        "ANALYTICS_FIXTURE_REJECTED",
+        "INVALID_INPUT",
         "connectors",
         message,
     )
@@ -514,6 +514,9 @@ class FixtureAnalyticsConnectorV1:
             goal=_require_string(scope_value["goal"], "scope goal"),
         )
         baseline = self._read_baseline(value["baseline"])
+        direct_report = self.read_report(value["direct_report"])
+        direct_state = self.read_campaign_state(value["direct_state"])
+        metrika_report = self.read_metrika_report(value["metrika_report"])
         return ConnectedAnalytics(
             observation_id=_require_string(
                 value["fixture_id"],
@@ -522,18 +525,12 @@ class FixtureAnalyticsConnectorV1:
             generated_at=_require_string(value["generated_at"], "generation time"),
             scope=scope,
             requested_period=AnalyticsPeriod(
-                period_start=_require_string(
-                    value["direct_report"]["period_start"],
-                    "requested period start",
-                ),
-                period_end=_require_string(
-                    value["direct_report"]["period_end"],
-                    "requested period end",
-                ),
+                period_start=direct_report.period_start,
+                period_end=direct_report.period_end,
             ),
-            direct_report=self.read_report(value["direct_report"]),
-            direct_state=self.read_campaign_state(value["direct_state"]),
-            metrika_report=self.read_metrika_report(value["metrika_report"]),
+            direct_report=direct_report,
+            direct_state=direct_state,
+            metrika_report=metrika_report,
             baseline=baseline,
         )
 

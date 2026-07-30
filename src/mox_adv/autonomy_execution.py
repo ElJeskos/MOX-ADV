@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import datetime
 from decimal import InvalidOperation
 from typing import Any, Callable, Mapping, Optional
@@ -285,7 +286,21 @@ class BoundedAutonomyService:
 
     def _prepare(self, request: BoundedAutonomyRequest) -> PreparedChange:
         prepared = self.control_state.load_prepared_change(request.proposal_id)
-        decision = self.policy.evaluate(prepared, request)
+        evaluated_at = self.clock()
+        mandate = self.mandate_authority.load_active(
+            request.mandate_id,
+            evaluated_at,
+        )
+        effective_request = self._trusted_request(
+            prepared,
+            request,
+            evaluated_at,
+        )
+        decision = self.policy.evaluate(
+            prepared,
+            effective_request,
+            mandate.canonical["minimum_sample"],
+        )
         if not decision.allowed:
             raise ControlRejected(
                 decision.reason_code or "ACTION_POLICY_REJECTED",
@@ -297,6 +312,51 @@ class BoundedAutonomyService:
             raise EgressDenied("Only the sealed fake adapter is permitted.")
         self.egress_guard.enforce_adapter(self.adapter, command)
         return prepared
+
+    def _trusted_request(
+        self,
+        prepared: PreparedChange,
+        request: BoundedAutonomyRequest,
+        evaluated_at: datetime,
+    ) -> BoundedAutonomyRequest:
+        if self.control_state.prepared_source(prepared.proposal_id) == "FIXTURE":
+            return request
+        snapshot = self.control_state.trusted_snapshot_facts(
+            prepared.proposal_id,
+            evaluated_at,
+        )
+        try:
+            current_fingerprint = self.adapter.current_fingerprint(
+                prepared.target_key()
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ControlRejected(
+                "FINGERPRINT_READBACK_UNAVAILABLE",
+                "executor could not read the current trusted fingerprint.",
+            ) from error
+        return replace(
+            request,
+            mode="BOUNDED_AUTONOMY",
+            automation_enabled=True,
+            comparability_status=str(snapshot["comparability_status"]),
+            confidence_status=str(snapshot["confidence_status"]),
+            financial_recommendations_allowed=bool(
+                snapshot["financial_recommendations_allowed"]
+            ),
+            direct_age_minutes=int(snapshot["direct_age_minutes"]),
+            metrika_age_minutes=int(snapshot["metrika_age_minutes"]),
+            watermark_skew_minutes=int(snapshot["watermark_skew_minutes"]),
+            clicks=int(snapshot["clicks"]),
+            conversions=int(snapshot["conversions"]),
+            spend_rub=int(snapshot["spend_rub"]),
+            cpa_rub=str(snapshot["cpa_rub"]),
+            budget_utilization_percent=str(
+                snapshot["budget_utilization_percent"]
+            ),
+            campaign_state=str(snapshot["campaign_state"]),
+            campaign_strategy=str(snapshot["campaign_strategy"]),
+            current_fingerprint=str(current_fingerprint),
+        )
 
     def _dispatch(
         self,
@@ -314,6 +374,11 @@ class BoundedAutonomyService:
             at_dispatch_boundary=lambda: self.dispatch_boundary.authorize(
                 prepared.execution_key(),
                 prepared.target_key(),
+                final_check=lambda: self.mandate_authority.require_dispatch_allowed(
+                    mandate_id,
+                    prepared.scope,
+                    self.clock(),
+                ),
             ),
         )
         if send_status != ExecutionStatus.IN_FLIGHT:

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Union
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DECISIONS = (
@@ -20,6 +20,8 @@ _DECISIONS = (
     "ADJUST_CHANGE",
     "ESCALATE_TO_HUMAN",
 )
+NOT_APPLICABLE = "NOT_APPLICABLE"
+ImpactMetric = Union[Decimal, str]
 
 
 class ImpactRejected(ValueError):
@@ -153,10 +155,10 @@ class ImpactObservation:
             confidence_status=str(confidence),
         )
 
-    def cpa_rub(self) -> Decimal:
+    def cpa_rub(self) -> ImpactMetric:
         conversions = self.metrics["goal_visits"]
         if conversions == 0:
-            raise ImpactRejected("Impact CPA is NOT_APPLICABLE.")
+            return NOT_APPLICABLE
         return (
             Decimal(self.metrics["cost_micros"])
             / Decimal(conversions)
@@ -351,11 +353,23 @@ class ImpactEvaluator:
 
         baseline_cpa = request.baseline.cpa_rub()
         post_cpa = request.post_change.cpa_rub()
-        improvement = baseline_cpa - post_cpa
-        improvement_percent = (
+        metrics_applicable = (
+            isinstance(baseline_cpa, Decimal)
+            and isinstance(post_cpa, Decimal)
+        )
+        improvement: ImpactMetric = (
+            baseline_cpa - post_cpa
+            if metrics_applicable
+            else NOT_APPLICABLE
+        )
+        improvement_percent: ImpactMetric = (
             improvement / baseline_cpa * Decimal(100)
-            if baseline_cpa != 0
-            else Decimal(0)
+            if (
+                isinstance(improvement, Decimal)
+                and isinstance(baseline_cpa, Decimal)
+                and baseline_cpa != 0
+            )
+            else NOT_APPLICABLE
         )
         confidence = self._confidence(request)
         target = _decimal(
@@ -364,7 +378,13 @@ class ImpactEvaluator:
         )
         next_decision = (
             "KEEP_CHANGE"
-            if confidence == "READY" and post_cpa < baseline_cpa and post_cpa <= target
+            if (
+                confidence == "READY"
+                and isinstance(post_cpa, Decimal)
+                and isinstance(baseline_cpa, Decimal)
+                and post_cpa < baseline_cpa
+                and post_cpa <= target
+            )
             else "ESCALATE_TO_HUMAN"
         )
         expected_fixture_decision = self.policy["impact"]["fixture"][
@@ -385,15 +405,17 @@ class ImpactEvaluator:
             effect_classification="OBSERVED_ASSOCIATION",
             baseline={
                 "snapshot_id": request.baseline.snapshot_id,
+                "campaign": request.baseline.campaign,
                 "period_start": request.baseline.period_start,
                 "period_end": request.baseline.period_end,
-                "cpa_rub": _decimal_text(baseline_cpa),
+                "cpa_rub": self._metric_text(baseline_cpa),
             },
             post_change={
                 "snapshot_id": request.post_change.snapshot_id,
+                "campaign": request.post_change.campaign,
                 "period_start": request.post_change.period_start,
                 "period_end": request.post_change.period_end,
-                "cpa_rub": _decimal_text(post_cpa),
+                "cpa_rub": self._metric_text(post_cpa),
             },
             watermarks={
                 "baseline": dict(request.baseline.watermarks),
@@ -406,16 +428,20 @@ class ImpactEvaluator:
             confounders=request.confounders,
             metric_changes={
                 "cpa_rub": {
-                    "baseline": _decimal_text(baseline_cpa),
-                    "post_change": _decimal_text(post_cpa),
-                    "improvement": _decimal_text(improvement),
-                    "improvement_percent": _decimal_text(improvement_percent),
+                    "baseline": self._metric_text(baseline_cpa),
+                    "post_change": self._metric_text(post_cpa),
+                    "improvement": self._metric_text(improvement),
+                    "improvement_percent": self._metric_text(improvement_percent),
                 }
             },
             confidence=confidence,
             evidence=request.evidence,
             next_decision=next_decision,
         )
+
+    @staticmethod
+    def _metric_text(value: ImpactMetric) -> str:
+        return value if isinstance(value, str) else _decimal_text(value)
 
     def _confidence(self, request: ImpactEvaluationRequest) -> str:
         if not request.evidence:

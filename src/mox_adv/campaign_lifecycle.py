@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
+from mox_adv.control_state import (
+    CampaignApprovalRepository,
+    ControlRejected,
+    DurableControlState,
+)
 from mox_adv.direct_management import (
     CreatedDirectObject,
     DirectAdapterFailure,
@@ -20,10 +25,9 @@ from mox_adv.direct_management import (
     DirectService,
     ProductionPilotAuthority,
 )
-from mox_adv.control_state import (
-    CampaignApprovalRepository,
-    ControlRejected,
-    DurableControlState,
+from mox_adv.lifecycle_authority import (
+    LifecycleAuthorityService,
+    VerifiedLifecycleAuthority,
 )
 from mox_adv.recommend_contracts import CampaignDraftV1, SchemaValidationError
 
@@ -307,8 +311,18 @@ def _time_parts(value: str) -> Tuple[int, int]:
 class CampaignSagaStore:
     """SQLite state for reservations, ordered steps, and created object ownership."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        authority_service: Optional[LifecycleAuthorityService] = None,
+    ) -> None:
+        if (
+            authority_service is not None
+            and type(authority_service) is not LifecycleAuthorityService
+        ):
+            raise LifecycleRejected("AUTHORITY_SERVICE_REQUIRED")
         self.path = path
+        self.authority_service = authority_service
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -430,6 +444,33 @@ class CampaignSagaStore:
             ).fetchone()
         return None if row is None else CampaignSagaStep(row["step_name"])
 
+    def cancel_step_before_dispatch(
+        self,
+        execution_key: str,
+        step_name: CampaignSagaStep,
+    ) -> None:
+        step = CampaignSagaStep(step_name)
+        with self._connect() as connection:
+            removed = connection.execute(
+                "DELETE FROM campaign_saga_dispatches "
+                "WHERE execution_key = ? AND step_name = ? "
+                "AND completed_at IS NULL "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM campaign_created_objects "
+                "WHERE execution_key = ? AND created_step = ?"
+                ")",
+                (
+                    execution_key,
+                    step.value,
+                    execution_key,
+                    step.value,
+                ),
+            ).rowcount
+            if removed != 1:
+                raise LifecycleRejected(
+                    "SAGA_STEP_OUTCOME_REQUIRES_RECONCILIATION"
+                )
+
     def register_creation_reservation(
         self,
         reservation: CreationReservation,
@@ -479,15 +520,31 @@ class CampaignSagaStore:
                 (reservation.reservation_id,) + values,
             )
 
-    def register_campaign_approval(self, approval: CampaignApproval) -> None:
+    def register_campaign_approval(
+        self,
+        approval: CampaignApproval | VerifiedLifecycleAuthority,
+        now: datetime,
+    ) -> None:
+        if self.authority_service is None:
+            raise LifecycleRejected("AUTHORITY_SERVICE_REQUIRED")
         try:
+            verified = (
+                approval
+                if type(approval) is VerifiedLifecycleAuthority
+                else self.authority_service.issue_campaign(approval, now)
+            )
+            checked = self.authority_service.verify(
+                verified,
+                "CAMPAIGN_APPROVAL",
+            )
+            if type(checked) is not CampaignApproval:
+                raise ControlRejected(
+                    "AUTHORITY_INVALID",
+                    "campaign authority type is invalid.",
+                )
             DurableControlState(self.path).register_campaign_approval_authority(
-                approval_id=approval.approval_id,
-                proposal_id=approval.proposal_id,
-                binding_hash=approval.binding_hash,
-                approver=approval.approver,
-                authentication=approval.authentication,
-                expires_at=approval.expires_at,
+                authority_service=self.authority_service,
+                verified=verified,
             )
         except ControlRejected as error:
             raise LifecycleRejected(
@@ -536,6 +593,7 @@ class CampaignSagaStore:
                     authentication=expected_authentication,
                     execution_key=request.execution_key,
                     now_text=now_text,
+                    proof_verifier=self._verify_campaign_approval_row,
                 )
             except ControlRejected as error:
                 raise LifecycleRejected(error.reason_code) from error
@@ -564,6 +622,31 @@ class CampaignSagaStore:
                 ),
             )
         return CampaignSagaState.IN_FLIGHT
+
+    def _verify_campaign_approval_row(self, row: sqlite3.Row) -> None:
+        if self.authority_service is None:
+            raise ControlRejected(
+                "AUTHORITY_SERVICE_REQUIRED",
+                "campaign approval verification service is unavailable.",
+            )
+        authority = self.authority_service.verify_persisted_proof(
+            authority_type="CAMPAIGN_APPROVAL",
+            canonical_json=str(row["authority_json"] or ""),
+            canonical_hash=str(row["authority_hash"] or ""),
+            signature=str(row["signature"] or ""),
+        )
+        if dict(authority) != {
+            "approval_id": row["approval_id"],
+            "proposal_id": row["proposal_id"],
+            "binding_hash": row["binding_hash"],
+            "approver": row["approver"],
+            "authentication": row["authentication"],
+            "expires_at": row["expires_at"],
+        }:
+            raise ControlRejected(
+                "AUTHORITY_INTEGRITY_FAILURE",
+                "campaign approval fields do not match the signed authority.",
+            )
 
     @staticmethod
     def _validate_reservation(
@@ -967,6 +1050,13 @@ class CampaignLifecycleService:
         step_name: CampaignSagaStep,
         now: datetime,
     ) -> None:
+        operation_key = request.execution_key + ":" + step_name
+        if step_name == CampaignSagaStep.CAMPAIGN_ADD:
+            self.connector.preflight_add(
+                request.run_id,
+                operation_key,
+                DirectService.CAMPAIGNS.value,
+            )
         self.store.begin_step(request.execution_key, step_name, now)
         objects = self.store.created_objects(request.run_id)
         by_service: Dict[str, Tuple[CreatedDirectObject, ...]] = {}
@@ -974,7 +1064,6 @@ class CampaignLifecycleService:
             by_service[service] = tuple(
                 item for item in objects if item.service == DirectService(service)
             )
-        operation_key = request.execution_key + ":" + step_name
         group = request.draft.groups[0]
         handlers = {
             CampaignSagaStep.CAMPAIGN_ADD: self._step_campaign_add,
@@ -986,7 +1075,14 @@ class CampaignLifecycleService:
             CampaignSagaStep.CAMPAIGN_LAUNCH: self._step_campaign_launch,
             CampaignSagaStep.FULL_READBACK: self._step_full_readback,
         }
-        handlers[step_name](request, now, by_service, group, operation_key)
+        try:
+            handlers[step_name](request, now, by_service, group, operation_key)
+        except ControlRejected:
+            self.store.cancel_step_before_dispatch(
+                request.execution_key,
+                step_name,
+            )
+            raise
 
     def _complete_add_step(
         self,
@@ -1014,7 +1110,6 @@ class CampaignLifecycleService:
         operation_key: str,
     ) -> None:
         del by_service, group
-        self.store.consume_first_write_authority(request, now)
         created = self.connector.campaigns_add(
             request.run_id,
             operation_key,
@@ -1027,6 +1122,12 @@ class CampaignLifecycleService:
                 "WeeklySpendLimit": request.draft.budget["weekly_micros"],
             },
         )
+        try:
+            self.store.consume_first_write_authority(request, now)
+        except (ControlRejected, LifecycleRejected, sqlite3.Error) as error:
+            raise DirectOutcomeUnknown(
+                "FIRST_WRITE_AUTHORITY_COMMIT_REQUIRES_RECONCILIATION"
+            ) from error
         self._complete_add_step(
             request,
             CampaignSagaStep.CAMPAIGN_ADD,

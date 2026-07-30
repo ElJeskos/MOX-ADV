@@ -7,7 +7,9 @@ import sqlite3
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Optional
 
+from mox_adv.control_state import ControlRejected
 from mox_adv.goal_contracts import (
     AuthorityKind,
     BeginExecution,
@@ -24,13 +26,27 @@ from mox_adv.goal_contracts import (
     parse_utc,
     utc_text,
 )
+from mox_adv.lifecycle_authority import (
+    LifecycleAuthorityService,
+    VerifiedLifecycleAuthority,
+)
 
 
 class GoalLifecycleStore:
     """Own transactional reservations, execution state, and created targets."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        authority_service: Optional[LifecycleAuthorityService] = None,
+    ) -> None:
+        if (
+            authority_service is not None
+            and type(authority_service) is not LifecycleAuthorityService
+        ):
+            raise GoalLifecycleRejected("AUTHORITY_SERVICE_REQUIRED")
         self.path = path
+        self.authority_service = authority_service
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -70,7 +86,11 @@ class GoalLifecycleStore:
                     action_quota INTEGER NOT NULL,
                     actions_used INTEGER NOT NULL DEFAULT 0,
                     expires_at TEXT NOT NULL,
-                    execution_key TEXT
+                    execution_key TEXT,
+                    authority_hash TEXT,
+                    signature TEXT,
+                    issued_at TEXT,
+                    authority_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS goal_executions (
                     execution_key TEXT PRIMARY KEY,
@@ -124,7 +144,39 @@ class GoalLifecycleStore:
                     author TEXT NOT NULL,
                     exact_diff_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS goal_cleanup_progress (
+                    candidate_id TEXT PRIMARY KEY,
+                    publication_rolled_back INTEGER NOT NULL DEFAULT 0,
+                    goal_deleted INTEGER NOT NULL DEFAULT 0,
+                    completed_at TEXT
+                );
                 """
+            )
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(goal_authorities)"
+                ).fetchall()
+            }
+            for name in (
+                "authority_hash",
+                "signature",
+                "issued_at",
+                "authority_json",
+            ):
+                if name not in columns:
+                    connection.execute(
+                        "ALTER TABLE goal_authorities ADD COLUMN "
+                        + name
+                        + " TEXT"
+                    )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS goal_authorities_immutable_fields "
+                "BEFORE UPDATE OF authority_id, kind, principal, authentication, "
+                "proposal_id, counter_id, site_zone, allowed_actions, policy_id, "
+                "binding_hash, action_quota, expires_at, authority_hash, "
+                "signature, issued_at, authority_json ON goal_authorities "
+                "BEGIN SELECT RAISE(ABORT, 'immutable goal authority fields'); END"
             )
 
     def register_reservation(self, reservation: CreationReservation) -> None:
@@ -153,7 +205,32 @@ class GoalLifecycleStore:
                 (reservation.reservation_id, "AVAILABLE") + immutable,
             )
 
-    def register_authority(self, authority: GoalAuthority) -> None:
+    def register_authority(
+        self,
+        authority: GoalAuthority | VerifiedLifecycleAuthority,
+        now: datetime,
+    ) -> None:
+        if self.authority_service is None:
+            raise GoalLifecycleRejected("AUTHORITY_SERVICE_REQUIRED")
+        try:
+            verified = (
+                authority
+                if type(authority) is VerifiedLifecycleAuthority
+                else self.authority_service.issue_goal(authority, now)
+            )
+            checked = self.authority_service.verify(
+                verified,
+                "GOAL_AUTHORITY",
+            )
+            proof = self.authority_service.proof(
+                verified,
+                "GOAL_AUTHORITY",
+            )
+        except ControlRejected as error:
+            raise GoalLifecycleRejected(error.reason_code) from error
+        if type(checked) is not GoalAuthority:
+            raise GoalLifecycleRejected("AUTHORITY_INVALID")
+        authority = checked
         kind = AuthorityKind(authority.kind)
         if (
             not authority.policy_id
@@ -176,12 +253,17 @@ class GoalLifecycleStore:
             authority.binding_hash,
             authority.action_quota,
             utc_text(authority.expires_at),
+            proof["canonical_hash"],
+            proof["signature"],
+            proof["issued_at"],
+            proof["canonical_json"],
         )
         with self._connect() as connection:
             existing = connection.execute(
                 "SELECT kind, principal, authentication, proposal_id, counter_id, "
                 "site_zone, allowed_actions, policy_id, binding_hash, "
-                "action_quota, expires_at "
+                "action_quota, expires_at, authority_hash, signature, issued_at, "
+                "authority_json "
                 "FROM goal_authorities WHERE authority_id = ?",
                 (authority.authority_id,),
             ).fetchone()
@@ -193,8 +275,9 @@ class GoalLifecycleStore:
                 "INSERT INTO goal_authorities "
                 "(authority_id, kind, status, principal, authentication, proposal_id, "
                 "counter_id, site_zone, allowed_actions, policy_id, binding_hash, "
-                "action_quota, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "action_quota, expires_at, authority_hash, signature, issued_at, "
+                "authority_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (authority.authority_id, kind.value, status) + values[1:],
             )
 
@@ -334,7 +417,6 @@ class GoalLifecycleStore:
                 expected_approval_principal=expected_approval_principal,
                 expected_mandate_principal=expected_mandate_principal,
                 now=now,
-                required_kind=AuthorityKind.APPROVAL,
             )
             now_text = utc_text(now)
             connection.execute(
@@ -546,6 +628,22 @@ class GoalLifecycleStore:
             raise GoalLifecycleRejected("SITE_EVENT_NOT_PUBLISHED")
         return self._publication_from_row(row)
 
+    def reserved_authority_principal(
+        self,
+        authority_id: str,
+        execution_key: str,
+    ) -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT principal FROM goal_authorities "
+                "WHERE authority_id = ? AND status = 'RESERVED' "
+                "AND execution_key = ?",
+                (authority_id, execution_key),
+            ).fetchone()
+        if row is None:
+            raise GoalLifecycleRejected("AUTHORITY_INVALID")
+        return str(row["principal"])
+
     def set_technical_status(
         self,
         candidate_id: str,
@@ -593,7 +691,12 @@ class GoalLifecycleStore:
                 raise GoalLifecycleRejected("OPTIMIZATION_GATE_NOT_APPLICABLE")
         return self.load_candidate(candidate_id)
 
-    def finish_cleanup(self, candidate_id: str, execution_key: str) -> None:
+    def finish_cleanup(
+        self,
+        candidate_id: str,
+        execution_key: str,
+        now: datetime,
+    ) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             candidate = connection.execute(
@@ -602,9 +705,65 @@ class GoalLifecycleStore:
             ).fetchone()
             if candidate is None or candidate["status"] != "REJECTED":
                 raise GoalLifecycleRejected("ONLY_REJECTED_CANDIDATE_CAN_BE_CLEANED")
+            progress = connection.execute(
+                "SELECT publication_rolled_back, goal_deleted, completed_at "
+                "FROM goal_cleanup_progress WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if (
+                progress is None
+                or not bool(progress["publication_rolled_back"])
+                or not bool(progress["goal_deleted"])
+            ):
+                raise GoalLifecycleRejected("CLEANUP_INCOMPLETE")
             connection.execute(
                 "DELETE FROM goal_signature_claims WHERE execution_key = ?",
                 (execution_key,),
+            )
+            connection.execute(
+                "DELETE FROM goal_site_publications WHERE candidate_id = ?",
+                (candidate_id,),
+            )
+            if progress["completed_at"] is None:
+                connection.execute(
+                    "UPDATE goal_cleanup_progress SET completed_at = ? "
+                    "WHERE candidate_id = ?",
+                    (utc_text(now), candidate_id),
+                )
+
+    def begin_cleanup(self, candidate_id: str) -> tuple[bool, bool, bool]:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO goal_cleanup_progress(candidate_id) VALUES (?) "
+                "ON CONFLICT(candidate_id) DO NOTHING",
+                (candidate_id,),
+            )
+            row = connection.execute(
+                "SELECT publication_rolled_back, goal_deleted, completed_at "
+                "FROM goal_cleanup_progress WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+        assert row is not None
+        return (
+            bool(row["publication_rolled_back"]),
+            bool(row["goal_deleted"]),
+            row["completed_at"] is not None,
+        )
+
+    def mark_cleanup_publication_rolled_back(self, candidate_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE goal_cleanup_progress "
+                "SET publication_rolled_back = 1 WHERE candidate_id = ?",
+                (candidate_id,),
+            )
+
+    def mark_cleanup_goal_deleted(self, candidate_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE goal_cleanup_progress SET goal_deleted = 1 "
+                "WHERE candidate_id = ?",
+                (candidate_id,),
             )
 
     def reservation_status(self, reservation_id: str) -> str:
@@ -629,8 +788,8 @@ class GoalLifecycleStore:
             raise GoalLifecycleRejected("STATE_NOT_FOUND")
         return str(row["status"])
 
-    @staticmethod
     def _reserve_authority(
+        self,
         *,
         connection: sqlite3.Connection,
         authority_id: str,
@@ -652,6 +811,7 @@ class GoalLifecycleStore:
         ).fetchone()
         if row is None:
             raise GoalLifecycleRejected("AUTHORITY_INVALID")
+        self._verify_goal_authority_row(row)
         kind = AuthorityKind(row["kind"])
         expected_principal = (
             expected_approval_principal
@@ -681,6 +841,41 @@ class GoalLifecycleStore:
         )
         if updated.rowcount != 1:
             raise GoalLifecycleRejected("AUTHORITY_INVALID")
+
+    def _verify_goal_authority_row(self, row: sqlite3.Row) -> None:
+        if self.authority_service is None:
+            raise GoalLifecycleRejected("AUTHORITY_SERVICE_REQUIRED")
+        try:
+            authority = self.authority_service.verify_persisted_proof(
+                authority_type="GOAL_AUTHORITY",
+                canonical_json=str(row["authority_json"] or ""),
+                canonical_hash=str(row["authority_hash"] or ""),
+                signature=str(row["signature"] or ""),
+            )
+        except ControlRejected as error:
+            raise GoalLifecycleRejected(error.reason_code) from error
+        try:
+            signed_actions = ",".join(
+                sorted(set(str(item) for item in authority["allowed_actions"]))
+            )
+            matches = (
+                authority["authority_id"] == row["authority_id"]
+                and authority["kind"] == row["kind"]
+                and authority["principal"] == row["principal"]
+                and authority["authentication"] == row["authentication"]
+                and authority["proposal_id"] == row["proposal_id"]
+                and authority["counter_id"] == row["counter_id"]
+                and authority["site_zone"] == row["site_zone"]
+                and signed_actions == row["allowed_actions"]
+                and authority["policy_id"] == row["policy_id"]
+                and authority["binding_hash"] == row["binding_hash"]
+                and int(authority["action_quota"]) == int(row["action_quota"])
+                and authority["expires_at"] == row["expires_at"]
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise GoalLifecycleRejected("AUTHORITY_INTEGRITY_FAILURE") from error
+        if not matches:
+            raise GoalLifecycleRejected("AUTHORITY_INTEGRITY_FAILURE")
 
     @staticmethod
     def _finish_authority(

@@ -19,17 +19,36 @@ from mox_adv.campaign_lifecycle import (
     LifecycleRejected,
     validate_campaign_draft,
 )
+from mox_adv.control_state import AuthenticatedPrincipal, DurableControlState
 from mox_adv.direct_management import (
     DirectManagementConnectorV1,
     DirectStateTransitionRejected,
     FakeDirectManagementAdapter,
     ProductionPilotAuthority,
 )
+from mox_adv.lifecycle_authority import LifecycleAuthorityService
+from mox_adv.mandate_signing import HMACMandateSigner
 from mox_adv.recommend_contracts import CampaignDraftV1
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "config" / "gate0-policy.json"
 NOW = datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc)
+
+
+class FixedAuthenticator:
+    def authenticate(self) -> AuthenticatedPrincipal:
+        return AuthenticatedPrincipal(
+            identity="sviridov",
+            authentication="authenticated_macos_user",
+        )
+
+
+def authority_service(policy) -> LifecycleAuthorityService:
+    return LifecycleAuthorityService(
+        policy,
+        FixedAuthenticator(),
+        HMACMandateSigner(b"campaign-lifecycle-authority-tests"),
+    )
 
 
 def load_policy() -> dict[str, object]:
@@ -187,8 +206,10 @@ class CampaignLifecycleTests(unittest.TestCase):
         self.addCleanup(self.temporary_directory.cleanup)
         self.database = Path(self.temporary_directory.name) / "campaign.sqlite3"
         self.policy = load_policy()
+        self.authority_service = authority_service(self.policy)
         self.adapter = FakeDirectManagementAdapter()
-        self.store = CampaignSagaStore(self.database)
+        self.store = CampaignSagaStore(self.database, self.authority_service)
+        self.control_state = DurableControlState(self.database)
         self.store.register_creation_reservation(make_reservation(), NOW)
         self.draft = validate_campaign_draft(
             draft_payload(),
@@ -206,17 +227,19 @@ class CampaignLifecycleTests(unittest.TestCase):
                 approver="sviridov",
                 authentication="authenticated_macos_user",
                 expires_at=NOW + timedelta(minutes=15),
-            )
+            ),
+            NOW,
         )
 
     def service(self) -> CampaignLifecycleService:
         return CampaignLifecycleService(
             policy=self.policy,
-            store=CampaignSagaStore(self.database),
+            store=CampaignSagaStore(self.database, self.authority_service),
             connector=DirectManagementConnectorV1(
                 self.policy,
                 self.adapter,
-                CampaignSagaStore(self.database),
+                CampaignSagaStore(self.database, self.authority_service),
+                control_state=self.control_state,
             ),
             safety_bindings=safety_bindings(),
         )
@@ -311,6 +334,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 expired_store,
+                control_state=DurableControlState(expired_database),
             ),
             safety_bindings=safety_bindings(),
         )
@@ -323,7 +347,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                control_state=self.control_state,
+            ),
             safety_bindings(),
         )
 
@@ -336,7 +365,7 @@ class CampaignLifecycleTests(unittest.TestCase):
         self.assertEqual(calls_after_unknown, tuple(adapter.calls))
         self.assertEqual(1, adapter.operation_count("Campaigns", "add"))
         self.assertEqual(
-            "USED",
+            "RESERVED",
             self.store.campaign_approval_status(self.request.approval_id),
         )
 
@@ -363,7 +392,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                control_state=self.control_state,
+            ),
             safety_bindings(),
         )
 
@@ -388,7 +422,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                control_state=self.control_state,
+            ),
             safety_bindings(),
         )
 
@@ -404,7 +443,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             store,
-            DirectManagementConnectorV1(self.policy, self.adapter, store),
+            DirectManagementConnectorV1(
+                self.policy,
+                self.adapter,
+                store,
+                control_state=DurableControlState(other_database),
+            ),
             safety_bindings(),
         )
 
@@ -414,7 +458,10 @@ class CampaignLifecycleTests(unittest.TestCase):
         self.assertEqual([], self.adapter.calls)
 
         unbound_database = Path(self.temporary_directory.name) / "unbound.sqlite3"
-        unbound_store = CampaignSagaStore(unbound_database)
+        unbound_store = CampaignSagaStore(
+            unbound_database,
+            self.authority_service,
+        )
         unbound_store.register_creation_reservation(make_reservation(), NOW)
         unbound_store.register_campaign_approval(
             CampaignApproval(
@@ -424,7 +471,8 @@ class CampaignLifecycleTests(unittest.TestCase):
                 approver="sviridov",
                 authentication="authenticated_macos_user",
                 expires_at=NOW + timedelta(minutes=15),
-            )
+            ),
+            NOW,
         )
         unbound_service = CampaignLifecycleService(
             self.policy,
@@ -433,6 +481,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 unbound_store,
+                control_state=DurableControlState(unbound_database),
             ),
             safety_bindings(),
         )
@@ -465,7 +514,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                control_state=self.control_state,
+            ),
             safety_bindings(),
         )
 
@@ -488,10 +542,12 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
             Path(self.temporary_directory.name) / "matrix.sqlite3"
         )
         self.adapter = FakeDirectManagementAdapter()
+        self.control_state = DurableControlState(self.store.path)
         self.connector = DirectManagementConnectorV1(
             self.policy,
             self.adapter,
             self.store,
+            control_state=self.control_state,
         )
         self.run_id = "matrix-run-1"
 
@@ -733,6 +789,7 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
                 binding_hash="sha256:" + "1" * 64,
                 armed=True,
             ),
+            control_state=self.control_state,
         )
 
         with self.assertRaises(DirectStateTransitionRejected):

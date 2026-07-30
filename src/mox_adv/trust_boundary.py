@@ -231,6 +231,8 @@ class PreWriteAudit(Protocol):
 class WriteWindow(Protocol):
     def reserve(self, execution_key: str) -> None: ...
 
+    def release(self, execution_key: str) -> None: ...
+
 
 class GuardedDispatchBoundary:
     """Order durable pre-write evidence before write-window reservation."""
@@ -245,13 +247,24 @@ class GuardedDispatchBoundary:
         self.write_window = write_window
         self.clock = clock
 
-    def authorize(self, execution_key: str, target_key: str) -> None:
+    def authorize(
+        self,
+        execution_key: str,
+        target_key: str,
+        final_check: Callable[[], None] | None = None,
+    ) -> None:
         self.pre_write_audit.authorize(
             execution_key,
             target_key,
             self.clock(),
         )
         self.write_window.reserve(execution_key)
+        try:
+            if final_check is not None:
+                final_check()
+        except BaseException:
+            self.write_window.release(execution_key)
+            raise
 
 
 class SimulationAuditAnchorSigner:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
@@ -53,8 +55,10 @@ from mox_adv.direct_management import (
 from mox_adv.e2e_browser import exercise_goal_event
 from mox_adv.e2e_evidence import (
     ReadOnlyEgressRecorder,
+    write_failed_e2e_artifacts,
     write_final_e2e_artifacts,
 )
+from mox_adv.artifacts import RUN_ID_PATTERN, RunWorkspace
 from mox_adv.fake_write_adapter import FakeWriteAdapter
 from mox_adv.goal_lifecycle import (
     AuthorityKind,
@@ -70,7 +74,12 @@ from mox_adv.goal_lifecycle import (
 from mox_adv.goal_lifecycle import (
     CreationReservation as GoalCreationReservation,
 )
-from mox_adv.impact import ImpactEvaluator, load_impact_fixture
+from mox_adv.impact import (
+    ImpactEvaluationRequest,
+    ImpactEvaluator,
+    ImpactObservation,
+)
+from mox_adv.lifecycle_authority import LifecycleAuthorityService
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.monitoring import MonitoringRead, MonitoringScheduler, MonitoringStore
 from mox_adv.observe import (
@@ -82,7 +91,10 @@ from mox_adv.observe import (
 )
 from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_contracts import CampaignDraftV1
-from mox_adv.recommend_projection import build_sanitized_projection
+from mox_adv.recommend_projection import (
+    campaign_fingerprint,
+    projection_from_integrated_snapshot,
+)
 from mox_adv.recommend_service import RecommendationService
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -188,7 +200,10 @@ def _autonomy_prepared(proposal_id: str) -> PreparedChange:
     )
 
 
-def _mandate_payload(policy: Mapping[str, Any]) -> Mapping[str, Any]:
+def _mandate_payload(
+    policy: Mapping[str, Any],
+    issued_at: datetime = NOW,
+) -> Mapping[str, Any]:
     return {
         "organization": "sim-organization",
         "connection": "sim-connection",
@@ -218,8 +233,8 @@ def _mandate_payload(policy: Mapping[str, Any]) -> Mapping[str, Any]:
             "authentication": "authenticated_macos_user",
         },
         "policy_version": "mox-adv-gate0-2026-07-29",
-        "issued_at": NOW.isoformat(),
-        "expiry": (NOW + timedelta(hours=24)).isoformat(),
+        "issued_at": issued_at.isoformat(),
+        "expiry": (issued_at + timedelta(hours=24)).isoformat(),
     }
 
 
@@ -356,7 +371,8 @@ def _register_campaign_authority(
             approver="sviridov",
             authentication="authenticated_macos_user",
             expires_at=CAMPAIGN_NOW + timedelta(minutes=15),
-        )
+        ),
+        CAMPAIGN_NOW,
     )
 
 
@@ -373,9 +389,9 @@ def _goal_payload() -> Mapping[str, Any]:
     }
 
 
-def _build_snapshot():
+def _build_snapshot(fixture_path: Path = OBSERVE_FIXTURE):
     observe_policy = load_observe_policy(POLICY_PATH)
-    fixture = load_linked_fixture(OBSERVE_FIXTURE)
+    fixture = load_linked_fixture(fixture_path)
     connected = FixtureAnalyticsConnectorV1().read_linked(fixture)
     trusted_scope = trusted_fixture_scope(
         observe_policy,
@@ -394,6 +410,127 @@ def _build_snapshot():
         metrika_report=reads,
         baseline=connected.baseline,
     )
+
+
+def _impact_observation(snapshot, label: str) -> ImpactObservation:
+    return ImpactObservation.from_mapping(
+        {
+            "snapshot_id": snapshot.snapshot_id,
+            "campaign": snapshot.scope.campaign,
+            "period_start": snapshot.period_start,
+            "period_end": snapshot.period_end,
+            "watermarks": {
+                "direct_report": snapshot.provenance.direct_report.watermark,
+                "direct_state": snapshot.provenance.direct_state.watermark,
+                "metrika_report": snapshot.provenance.metrika_report.watermark,
+            },
+            "metrics": {
+                "impressions": int(snapshot.metrics["impressions"]),
+                "clicks": int(snapshot.metrics["clicks"]),
+                "cost_micros": int(snapshot.metrics["cost_micros"]),
+                "visits": int(snapshot.metrics["visits"]),
+                "goal_visits": int(snapshot.metrics["goal_visits"]),
+            },
+            "comparability_status": snapshot.comparability_status,
+            "confidence_status": snapshot.confidence_status,
+        },
+        label,
+    )
+
+
+def _build_post_change_snapshot(
+    working: Path,
+    fixture: Mapping[str, Any],
+    observed_budget: object,
+    changed_at: datetime,
+):
+    post_fixture = copy.deepcopy(fixture)
+    dates = (
+        "2026-07-29",
+        "2026-07-30",
+        "2026-07-31",
+        "2026-08-01",
+        "2026-08-02",
+        "2026-08-03",
+        "2026-08-04",
+    )
+    direct_values = (
+        (1_500, 30, 300_000_000),
+        (1_500, 30, 300_000_000),
+        (1_600, 32, 360_000_000),
+        (1_600, 32, 360_000_000),
+        (1_600, 32, 360_000_000),
+        (1_600, 32, 360_000_000),
+        (1_600, 32, 360_000_000),
+    )
+    metrika_values = (
+        (25, 1),
+        (25, 1),
+        (26, 1),
+        (26, 1),
+        (26, 1),
+        (26, 1),
+        (26, 0),
+    )
+    post_fixture["generated_at"] = "2026-08-05T00:15:00+00:00"
+    direct_report = post_fixture["direct_report"]
+    direct_report.update(
+        {
+            "period_start": dates[0],
+            "period_end": dates[-1],
+            "retrieved_at": "2026-08-05T00:10:00+00:00",
+            "watermark": "2026-08-04T23:59:00+00:00",
+        }
+    )
+    for index, row in enumerate(direct_report["rows"]):
+        impressions, clicks, cost_micros = direct_values[index]
+        row.update(
+            {
+                "date": dates[index],
+                "impressions": impressions,
+                "clicks": clicks,
+                "cost_micros": cost_micros,
+            }
+        )
+    direct_state = post_fixture["direct_state"]
+    direct_state.update(
+        {
+            "budget_period_start": "2026-07-29T00:00:00+00:00",
+            "budget_period_end": "2026-08-05T00:00:00+00:00",
+            "current_weekly_budget_micros": int(observed_budget),
+            "object_config_version": "sim-campaign-config-v2",
+            "retrieved_at": "2026-08-05T00:09:00+00:00",
+            "watermark": "2026-08-04T23:58:00+00:00",
+            "last_change": {
+                "author": "sviridov",
+                "occurred_at": changed_at.isoformat(),
+            },
+        }
+    )
+    metrika_report = post_fixture["metrika_report"]
+    metrika_report.update(
+        {
+            "period_start": dates[0],
+            "period_end": dates[-1],
+            "retrieved_at": "2026-08-05T00:12:00+00:00",
+            "watermark": "2026-08-04T23:57:00+00:00",
+        }
+    )
+    for index, row in enumerate(metrika_report["rows"]):
+        visits, goal_visits = metrika_values[index]
+        row.update(
+            {
+                "date": dates[index],
+                "visits": visits,
+                "goal_visits": goal_visits,
+            }
+        )
+    post_fixture_path = working / "linked-post-change.json"
+    post_fixture_path.write_text(
+        json.dumps(post_fixture, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return _build_snapshot(post_fixture_path)
 
 
 class _FixedAuthenticator:
@@ -421,11 +558,20 @@ def _analytics_optimization_workflow(
     working: Path,
     policy: Mapping[str, Any],
 ) -> tuple[Mapping[str, Mapping[str, Any]], Mapping[str, Any]]:
+    linked_fixture = json.loads(OBSERVE_FIXTURE.read_text(encoding="utf-8"))
+    linked_fixture["direct_state"]["current_weekly_budget_micros"] = 2_700_000_000
+    for row in linked_fixture["direct_report"]["rows"]:
+        row["cost_micros"] = int(row["cost_micros"]) // 2
+    linked_fixture_path = working / "linked-closed-loop.json"
+    linked_fixture_path.write_text(
+        json.dumps(linked_fixture, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     components = working / "components"
     outcome = run_observe_fixture(
         run_id="observe",
         runs_root=components,
-        fixture_path=OBSERVE_FIXTURE,
+        fixture_path=linked_fixture_path,
         policy_path=POLICY_PATH,
     )
     if outcome.status != "SUCCEEDED":
@@ -436,43 +582,71 @@ def _analytics_optimization_workflow(
     if observe_result["external_write_sent"] is not False:
         raise AssertionError("OBSERVE reported external write egress.")
 
+    snapshot = _build_snapshot(linked_fixture_path)
+    if snapshot.snapshot_id != observe_result["snapshot_id"]:
+        raise AssertionError("OBSERVE snapshot linkage changed.")
+    execution_now = datetime.fromisoformat(snapshot.generated_at)
+    projection = projection_from_integrated_snapshot(
+        snapshot,
+        policy,
+        execution_now,
+    )
     provider = DeterministicFakeModelProvider()
-    recommendation = RecommendationService(
+    proposal_store = ImmutableProposalStore(working / "proposals")
+    recommendation_service = RecommendationService(
         provider,
-        ImmutableProposalStore(working / "proposals"),
-    ).recommend(
-        projection=build_sanitized_projection(
-            json.loads(LLM_FIXTURE.read_text(encoding="utf-8")),
-            policy,
-        ),
+        proposal_store,
+        policy,
+    )
+    recommendation = recommendation_service.recommend(
+        projection=projection,
         run_id="recommend",
-        snapshot_id=str(observe_result["snapshot_id"]),
-        expected_fingerprint="sha256:" + "2" * 64,
-        created_at="2026-07-30T12:00:00+00:00",
-        expires_at="2026-07-30T12:30:00+00:00",
+        snapshot_id=snapshot.snapshot_id,
+        expected_fingerprint=campaign_fingerprint(snapshot),
+        created_at=execution_now.isoformat(),
+        expires_at=(execution_now + timedelta(minutes=30)).isoformat(),
     )
     if recommendation.status != "READY" or recommendation.proposal is None:
         raise AssertionError("RECOMMEND did not produce a valid proposal.")
+    if recommendation_service.cost_ledger is None:
+        raise AssertionError("RECOMMEND cost ledger was not configured.")
+    cost_usage = recommendation_service.cost_ledger.usage()
+    tariff = next(
+        item
+        for item in policy["llm_cost"]["tariffs"]
+        if item["provider"] == recommendation.provider.provider
+        and item["model_id"] == recommendation.provider.model_id
+    )
 
     principal = _FixedAuthenticator().authenticate()
-    approval_state = DurableControlState(working / "approval.sqlite3")
-    prepared = _approval_prepared(recommendation.proposal.proposal_id)
-    approval_state.register_prepared_change(prepared)
-    approval = approval_state.grant_approval(
+    control_state = DurableControlState(working / "control.sqlite3")
+    prepared = control_state.register_optimization_proposal(
+        proposal_store=proposal_store,
+        proposal_id=recommendation.proposal.proposal_id,
+        snapshot=snapshot,
+        policy=policy,
+        writer=str(policy["bindings"]["simulation"]["single_writer"]),
+        at=execution_now,
+    )
+    linked_clock = lambda: execution_now
+    approval = control_state.grant_approval(
         prepared.proposal_id,
-        tests_now() + timedelta(minutes=15),
+        execution_now + timedelta(minutes=15),
         "Approve the exact simulated E2E change.",
         principal,
-        tests_now(),
+        execution_now,
     )
     approval_adapter = FakeWriteAdapter(
-        initial_state={prepared.target_key(): prepared.current_value}
+        initial_state={prepared.target_key(): prepared.current_value},
+        current_fingerprints={
+            prepared.target_key(): prepared.expected_fingerprint,
+        },
     )
     approval_service = ApprovalExecutionService(
         policy,
-        approval_state,
+        control_state,
         approval_adapter,
-        clock=tests_now,
+        clock=linked_clock,
     )
     first = approval_service.execute(_approval_request(prepared))
     repeated = approval_service.execute(_approval_request(prepared))
@@ -480,24 +654,24 @@ def _analytics_optimization_workflow(
         raise AssertionError("Approval fake execution was not idempotent.")
     if approval_adapter.write_calls != 1:
         raise AssertionError("Approval fake execution wrote more than once.")
-    used_approval = approval_state.load_approval(approval.approval_id)
+    used_approval = control_state.load_approval(approval.approval_id)
     if used_approval.used_at is None:
         raise AssertionError("The exact approval was not consumed.")
 
     blocked_prepared = _approval_prepared("proposal-e2e-kill-switch")
-    approval_state.register_prepared_change(blocked_prepared)
-    approval_state.grant_approval(
+    control_state.register_prepared_change(blocked_prepared)
+    control_state.grant_approval(
         blocked_prepared.proposal_id,
-        tests_now() + timedelta(minutes=15),
+        execution_now + timedelta(minutes=15),
         "Approve only if the kill switch remains inactive.",
         principal,
-        tests_now(),
+        execution_now,
     )
-    approval_state.engage_kill_switch(
+    control_state.engage_kill_switch(
         "global",
         "E2E verifies the next unsent command is blocked.",
         principal,
-        tests_now(),
+        execution_now,
     )
     blocked_adapter = FakeWriteAdapter(
         initial_state={
@@ -506,24 +680,34 @@ def _analytics_optimization_workflow(
     )
     blocked = ApprovalExecutionService(
         policy,
-        approval_state,
+        control_state,
         blocked_adapter,
-        clock=tests_now,
+        clock=linked_clock,
     ).execute(_approval_request(blocked_prepared))
     if blocked.status != "BLOCKED" or blocked_adapter.write_calls != 0:
         raise AssertionError("Kill switch did not block before fake dispatch.")
+    control_state.release_kill_switch(
+        "global",
+        "E2E resumes local fake-only validation.",
+        principal,
+        execution_now,
+    )
 
-    autonomy_state = DurableControlState(working / "autonomy.sqlite3")
+    autonomy_now = execution_now + timedelta(hours=73)
     signer = HMACMandateSigner(b"issue-33-local-e2e-mandate-key")
     authority = DurableMandateAuthority(
-        autonomy_state.path,
+        control_state.path,
         policy,
         signer,
     )
-    issued = authority.issue(_mandate_payload(policy), principal, tests_now())
-    mandate = authority.activate(issued.mandate_id, principal, tests_now())
+    issued = authority.issue(
+        _mandate_payload(policy, autonomy_now),
+        principal,
+        autonomy_now,
+    )
+    mandate = authority.activate(issued.mandate_id, principal, autonomy_now)
     autonomy_prepared = _autonomy_prepared("proposal-e2e-autonomy")
-    autonomy_state.register_prepared_change(autonomy_prepared)
+    control_state.register_prepared_change(autonomy_prepared)
     autonomy_adapter = FakeWriteAdapter(
         initial_state={
             autonomy_prepared.target_key(): autonomy_prepared.current_value,
@@ -531,15 +715,14 @@ def _analytics_optimization_workflow(
     )
     autonomy_result = BoundedAutonomyService(
         policy,
-        autonomy_state,
+        control_state,
         authority,
         autonomy_adapter,
-        clock=tests_now,
+        clock=lambda: autonomy_now,
     ).execute(_autonomy_request(autonomy_prepared, mandate))
     if autonomy_result.status != "APPLIED" or autonomy_adapter.write_calls != 1:
         raise AssertionError("Bounded autonomy fake readback failed.")
 
-    snapshot = _build_snapshot()
     scheduler = MonitoringScheduler(
         policy=policy,
         source=_FixtureReadSource(MonitoringRead(snapshot=snapshot)),
@@ -550,8 +733,31 @@ def _analytics_optimization_workflow(
     if monitoring.status != "POLLED":
         raise AssertionError("Monitoring did not produce a new snapshot.")
 
+    impact_evaluated_at = datetime(2026, 8, 8, 0, 0, tzinfo=timezone.utc)
+    post_snapshot = _build_post_change_snapshot(
+        working,
+        linked_fixture,
+        first.observed_value,
+        execution_now,
+    )
     impact = ImpactEvaluator(policy).evaluate(
-        load_impact_fixture(IMPACT_FIXTURE, policy)
+        ImpactEvaluationRequest(
+            fixture_name=str(policy["impact"]["fixture"]["name"]),
+            run_id="closed-loop-simulated",
+            change_id=prepared.execution_key(),
+            policy_version=str(policy["policy_id"]),
+            change_applied_at=execution_now.isoformat(),
+            evaluated_at=impact_evaluated_at.isoformat(),
+            baseline=_impact_observation(snapshot, "Baseline"),
+            post_change=_impact_observation(post_snapshot, "Post-change"),
+            seasonality="NONE_OBSERVED",
+            known_interventions=(),
+            confounders=(),
+            evidence=(
+                "same_campaign_snapshot_chain",
+                "sealed_fake_readback",
+            ),
+        )
     )
     if impact.status != "OBSERVED_POST_CHANGE":
         raise AssertionError("Impact evaluation did not complete.")
@@ -560,6 +766,7 @@ def _analytics_optimization_workflow(
         "approval_required": {
             "proposal_id": prepared.proposal_id,
             "execution_key": prepared.execution_key(),
+            "campaign": prepared.scope.campaign,
             "operation": dict(prepared.expected_diff),
             "before": prepared.current_value,
             "after": prepared.target_value,
@@ -579,6 +786,7 @@ def _analytics_optimization_workflow(
     observe_evidence = {
         "source": observe_result["source"],
         "snapshot_id": observe_result["snapshot_id"],
+        "campaign": snapshot.scope.campaign,
         "period_start": observe_result["snapshot"]["period_start"],
         "period_end": observe_result["snapshot"]["period_end"],
         "provenance": observe_result["snapshot"]["provenance"],
@@ -588,6 +796,22 @@ def _analytics_optimization_workflow(
         "external_write_sent": observe_result["external_write_sent"],
     }
     monitoring_evidence = asdict(monitoring)
+    closed_loop_envelope = {
+        "schema_version": "closed-loop-run-envelope-v1",
+        "campaign": snapshot.scope.campaign,
+        "snapshot_id": snapshot.snapshot_id,
+        "proposal_id": prepared.proposal_id,
+        "execution_key": prepared.execution_key(),
+        "readback_status": first.status,
+        "change_id": impact.change_id,
+        "impact_campaign": snapshot.scope.campaign,
+        "post_snapshot_id": impact.post_change["snapshot_id"],
+        "post_observation_id": post_snapshot.observation_id,
+        "post_snapshot_source": "LOCAL_FIXTURE",
+        "next_decision": impact.next_decision,
+        "evidence_type": "SIMULATED",
+        "capability_status": "NOT_PROVEN",
+    }
     supplemental = {
         "proposal.json": recommendation.proposal.as_dict(),
         "approval.json": asdict(used_approval),
@@ -595,6 +819,7 @@ def _analytics_optimization_workflow(
         "impact_report.json": impact.as_dict(),
         "observe-evidence.json": observe_evidence,
         "monitoring-evidence.json": monitoring_evidence,
+        "closed-loop-envelope.json": closed_loop_envelope,
     }
     run_summary = {
         "source": observe_result["source"],
@@ -608,6 +833,24 @@ def _analytics_optimization_workflow(
         "input_tokens": recommendation.provider.input_tokens,
         "output_tokens": recommendation.provider.output_tokens,
         "cost_rub": recommendation.provider.cost_rub,
+        "model_cost": {
+            "provider": recommendation.provider.provider,
+            "model_id": recommendation.provider.model_id,
+            "currency": policy["llm_cost"]["currency"],
+            "exchange_rate_rub_per_usd": policy["llm_cost"][
+                "exchange_rate_rub_per_usd"
+            ],
+            "input_usd_per_million": tariff["input_usd_per_million"],
+            "output_usd_per_million": tariff["output_usd_per_million"],
+            "limit_rub": str(policy["limits"]["llm_total_cost_rub"]),
+            "warning_percent": str(policy["limits"]["llm_warning_percent"]),
+            "charged_cost_rub": cost_usage.charged_cost_rub,
+            "reserved_cost_rub": cost_usage.reserved_cost_rub,
+            "call_count": cost_usage.call_count,
+            "warning": cost_usage.warning,
+            "exhausted": cost_usage.exhausted,
+            "configuration_hash": recommendation_service.cost_ledger.config_hash,
+        },
         "duration_ms": (
             int(observe_result["duration_ms"]) + recommendation.provider.duration_ms
         ),
@@ -621,6 +864,7 @@ def _analytics_optimization_workflow(
             "bounded_autonomy": autonomy_result.status,
             "kill_switch": blocked.status,
             "kill_switch_reason": blocked.reason_code,
+            "closed_loop_next_decision": impact.next_decision,
         },
         "execution": {
             "technical_command": "SEALED_FAKE_ADAPTERS_AND_LOCAL_INTERCEPTION_ONLY",
@@ -651,13 +895,22 @@ def _campaign_goal_workflow(
     policy: Mapping[str, Any],
     egress: ReadOnlyEgressRecorder,
 ) -> Mapping[str, Any]:
+    control_state = DurableControlState(working / "control.sqlite3")
+    lifecycle_authority = LifecycleAuthorityService(
+        policy,
+        _FixedAuthenticator(),
+        HMACMandateSigner(b"issue-23-33-local-lifecycle-key"),
+    )
     draft = validate_campaign_draft(
         _campaign_payload(),
         policy,
         _campaign_safety(),
     )
     request = _campaign_request(draft)
-    campaign_store = CampaignSagaStore(working / "campaign.sqlite3")
+    campaign_store = CampaignSagaStore(
+        working / "campaign.sqlite3",
+        lifecycle_authority,
+    )
     _register_campaign_authority(campaign_store, request, policy)
     campaign_adapter = FakeDirectManagementAdapter()
     campaign_service = CampaignLifecycleService(
@@ -667,6 +920,8 @@ def _campaign_goal_workflow(
             policy,
             campaign_adapter,
             campaign_store,
+            control_state=control_state,
+            trusted_scope=_scope("campaign-lifecycle"),
         ),
         _campaign_safety(),
     )
@@ -678,7 +933,10 @@ def _campaign_goal_workflow(
     if not calls_after_repeat:
         raise AssertionError("Campaign saga did not exercise fake writes.")
 
-    rollback_store = CampaignSagaStore(working / "campaign-rollback.sqlite3")
+    rollback_store = CampaignSagaStore(
+        working / "campaign-rollback.sqlite3",
+        lifecycle_authority,
+    )
     _register_campaign_authority(rollback_store, request, policy)
     rollback_adapter = FakeDirectManagementAdapter(fail_on=("Ads", "moderate"))
     rollback = CampaignLifecycleService(
@@ -688,6 +946,8 @@ def _campaign_goal_workflow(
             policy,
             rollback_adapter,
             rollback_store,
+            control_state=control_state,
+            trusted_scope=_scope("campaign-lifecycle-rollback"),
         ),
         _campaign_safety(),
     ).execute(request, CAMPAIGN_NOW)
@@ -697,7 +957,10 @@ def _campaign_goal_workflow(
         raise AssertionError("Campaign fake rollback left created objects.")
 
     simulation = policy["bindings"]["simulation"]
-    goal_store = GoalLifecycleStore(working / "goals.sqlite3")
+    goal_store = GoalLifecycleStore(
+        working / "goals.sqlite3",
+        lifecycle_authority,
+    )
     goal_adapter = FakeMetrikaGoalAdapter(
         (simulation["test_counter"], simulation["pilot_counter"])
     )
@@ -713,6 +976,7 @@ def _campaign_goal_workflow(
         goal_adapter,
         site_adapter,
         _FixedAuthenticator(),
+        control_state,
     )
     run_id = "goal-run-e2e"
     proposal_id = "goal-proposal-e2e"
@@ -749,7 +1013,7 @@ def _campaign_goal_workflow(
         ),
     )
     goal_store.register_reservation(reservation)
-    goal_store.register_authority(creation_authority)
+    goal_store.register_authority(creation_authority, GOAL_NOW)
     candidate = goal_service.create_candidate(
         run_id=run_id,
         proposal_id=proposal_id,
@@ -782,7 +1046,7 @@ def _campaign_goal_workflow(
             exact_diff=exact_site_diff,
         ),
     )
-    goal_store.register_authority(publish_authority)
+    goal_store.register_authority(publish_authority, GOAL_NOW)
     publication = goal_service.publish_candidate_event(
         candidate.candidate_id,
         authority_id=publish_authority.authority_id,
@@ -849,48 +1113,73 @@ def tests_now() -> datetime:
 def run_readonly_e2e(runs_root: Path, run_id: str) -> Path:
     policy = load_policy()
     runs_root.mkdir(parents=True, exist_ok=True)
+    if RUN_ID_PATTERN.fullmatch(run_id) is None or run_id in {".", ".."}:
+        safe_run_id = (
+            "rejected-"
+            + hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:16]
+        )
+        workspace = RunWorkspace.create(runs_root, safe_run_id)
+        return write_failed_e2e_artifacts(
+            workspace,
+            run_id=safe_run_id,
+            policy_version=str(policy["policy_id"]),
+            reason_code="INVALID_RUN_ID",
+            detail="Идентификатор запуска не прошёл локальную проверку.",
+        )
+    workspace = RunWorkspace.create(runs_root, run_id)
     egress = ReadOnlyEgressRecorder(policy)
-    with TemporaryDirectory(
-        prefix="." + run_id + "-work-",
-        dir=runs_root,
-    ) as temporary:
-        work = Path(temporary)
-        with egress.enforce_python_sockets():
-            analytics_artifacts, summary = _analytics_optimization_workflow(
-                work,
-                policy,
-            )
-            supplemental = dict(analytics_artifacts)
-            run_summary = dict(summary)
-            lifecycle = _campaign_goal_workflow(work, policy, egress)
-    supplemental["lifecycle-evidence.json"] = lifecycle
-    execution = dict(run_summary["execution"])
-    final_state = dict(execution["final_object_state"])
-    final_state.update(
-        {
-            "campaign_lifecycle": lifecycle["campaign_status"],
-            "campaign_compensation": lifecycle["campaign_rollback_status"],
-            "goal_technical": lifecycle["goal_technical_status"],
-            "goal_semantic": lifecycle["goal_semantic_status"],
-        }
-    )
-    execution["final_object_state"] = final_state
-    run_summary["execution"] = execution
-    checks = (
-        {"name": "analytics_optimization", "status": "PASSED"},
-        {"name": "campaign_goal_lifecycle", "status": "PASSED"},
-        {"name": "playwright_local_goal_event", "status": "PASSED"},
-        {"name": "external_non_read_egress", "status": "PASSED"},
-    )
-    return write_final_e2e_artifacts(
-        runs_root,
-        run_id=run_id,
-        policy_version=str(policy["policy_id"]),
-        checks=checks,
-        egress=egress,
-        supplemental_artifacts=supplemental,
-        run_summary=run_summary,
-    )
+    try:
+        with TemporaryDirectory(
+            prefix=".work-",
+            dir=workspace.path,
+        ) as temporary:
+            work = Path(temporary)
+            with egress.enforce_python_sockets():
+                analytics_artifacts, summary = _analytics_optimization_workflow(
+                    work,
+                    policy,
+                )
+                supplemental = dict(analytics_artifacts)
+                run_summary = dict(summary)
+                lifecycle = _campaign_goal_workflow(work, policy, egress)
+        supplemental["lifecycle-evidence.json"] = lifecycle
+        execution = dict(run_summary["execution"])
+        final_state = dict(execution["final_object_state"])
+        final_state.update(
+            {
+                "campaign_lifecycle": lifecycle["campaign_status"],
+                "campaign_compensation": lifecycle["campaign_rollback_status"],
+                "goal_technical": lifecycle["goal_technical_status"],
+                "goal_semantic": lifecycle["goal_semantic_status"],
+            }
+        )
+        execution["final_object_state"] = final_state
+        run_summary["execution"] = execution
+        checks = (
+            {"name": "analytics_optimization", "status": "PASSED"},
+            {"name": "campaign_goal_lifecycle", "status": "PASSED"},
+            {"name": "playwright_local_goal_event", "status": "PASSED"},
+            {"name": "external_non_read_egress", "status": "PASSED"},
+        )
+        return write_final_e2e_artifacts(
+            runs_root,
+            run_id=run_id,
+            policy_version=str(policy["policy_id"]),
+            checks=checks,
+            egress=egress,
+            supplemental_artifacts=supplemental,
+            run_summary=run_summary,
+            workspace=workspace,
+        )
+    except BaseException as error:
+        write_failed_e2e_artifacts(
+            workspace,
+            run_id=run_id,
+            policy_version=str(policy["policy_id"]),
+            reason_code=type(error).__name__.upper(),
+            detail="Локальный этап завершился с безопасной ошибкой.",
+        )
+        raise
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
+import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -32,9 +34,7 @@ from mox_adv.trust_boundary import (
 
 CAPABILITY_ACCEPTANCE_CASES = required_capability_contract()
 REQUIRED_CAPABILITIES = tuple(CAPABILITY_ACCEPTANCE_CASES)
-LOCAL_E2E_EXERCISED_CAPABILITIES = frozenset(REQUIRED_CAPABILITIES) - {
-    "CLOSED_LOOP_CONTROL"
-}
+LOCAL_E2E_EXERCISED_CAPABILITIES = frozenset(REQUIRED_CAPABILITIES)
 CAPABILITY_EVIDENCE_PATHS = {
     "CAMPAIGN_LIFECYCLE": (
         "lifecycle-evidence.json",
@@ -95,7 +95,15 @@ CAPABILITY_EVIDENCE_PATHS = {
         "signed-audit-anchor.json",
         "artifact-manifest.json",
     ),
-    "CLOSED_LOOP_CONTROL": (),
+    "CLOSED_LOOP_CONTROL": (
+        "closed-loop-envelope.json",
+        "observe-evidence.json",
+        "proposal.json",
+        "approval.json",
+        "change_diff.json",
+        "impact_report.json",
+        "events.jsonl",
+    ),
 }
 REQUIRED_SUPPLEMENTAL_ARTIFACTS = frozenset(
     {
@@ -106,6 +114,7 @@ REQUIRED_SUPPLEMENTAL_ARTIFACTS = frozenset(
         "observe-evidence.json",
         "monitoring-evidence.json",
         "lifecycle-evidence.json",
+        "closed-loop-envelope.json",
     }
 )
 REQUIRED_RUN_SUMMARY_FIELDS = frozenset(
@@ -121,6 +130,7 @@ REQUIRED_RUN_SUMMARY_FIELDS = frozenset(
         "input_tokens",
         "output_tokens",
         "cost_rub",
+        "model_cost",
         "duration_ms",
         "stage_durations_ms",
         "proposal_id",
@@ -436,6 +446,26 @@ def _report(
         f"Внешних read-запросов: `{len(egress.records)}`.",
         f"Локально перехваченных browser events: `{len(egress.browser_interceptions)}`.",
         (
+            "Модельный тариф: `"
+            + str(run_summary["model_cost"]["provider"])
+            + "/"
+            + str(run_summary["model_cost"]["model_id"])
+            + "`, input `"
+            + str(run_summary["model_cost"]["input_usd_per_million"])
+            + " USD/1M`, output `"
+            + str(run_summary["model_cost"]["output_usd_per_million"])
+            + " USD/1M`."
+        ),
+        (
+            "Курс: `"
+            + str(run_summary["model_cost"]["exchange_rate_rub_per_usd"])
+            + " RUB/USD`; начислено `"
+            + str(run_summary["model_cost"]["charged_cost_rub"])
+            + " ₽` из лимита `"
+            + str(run_summary["model_cost"]["limit_rub"])
+            + " ₽`."
+        ),
+        (
             "Заблокированных browser WebSocket-подключений: `"
             + str(len(egress.browser_websocket_attempts))
             + "`."
@@ -490,6 +520,7 @@ def _validate_run_summary(
     for field in (
         "provenance",
         "metrics",
+        "model_cost",
         "stage_durations_ms",
         "policy_decision",
         "execution",
@@ -500,6 +531,45 @@ def _validate_run_summary(
         value = run_summary[field]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError("The final E2E numeric metadata is invalid.")
+    model_cost = run_summary["model_cost"]
+    required_model_cost = {
+        "provider",
+        "model_id",
+        "currency",
+        "exchange_rate_rub_per_usd",
+        "input_usd_per_million",
+        "output_usd_per_million",
+        "limit_rub",
+        "warning_percent",
+        "charged_cost_rub",
+        "reserved_cost_rub",
+        "call_count",
+        "warning",
+        "exhausted",
+        "configuration_hash",
+    }
+    if (
+        set(model_cost) != required_model_cost
+        or model_cost["provider"] != run_summary["provider"]
+        or model_cost["model_id"] != run_summary["model_id"]
+        or model_cost["currency"] != "RUB"
+        or not isinstance(model_cost["call_count"], int)
+        or isinstance(model_cost["call_count"], bool)
+        or model_cost["call_count"] < 1
+        or not isinstance(model_cost["warning"], bool)
+        or not isinstance(model_cost["exhausted"], bool)
+        or not str(model_cost["configuration_hash"]).startswith("sha256:")
+        or any(
+            not isinstance(model_cost[field], str) or not model_cost[field]
+            for field in required_model_cost
+            - {
+                "call_count",
+                "warning",
+                "exhausted",
+            }
+        )
+    ):
+        raise ValueError("The final E2E model-cost evidence is invalid.")
     execution = run_summary["execution"]
     required_execution = {
         "technical_command",
@@ -516,15 +586,37 @@ def _validate_run_summary(
     approval = supplemental_artifacts["approval.json"]
     change_diff = supplemental_artifacts["change_diff.json"]
     impact = supplemental_artifacts["impact_report.json"]
+    observe = supplemental_artifacts["observe-evidence.json"]
+    envelope = supplemental_artifacts["closed-loop-envelope.json"]
+    approval_change = change_diff.get("approval_required", {})
+    impact_baseline = impact.get("baseline", {})
+    impact_post = impact.get("post_change", {})
     if (
         proposal.get("proposal_id") != run_summary["proposal_id"]
+        or proposal.get("snapshot_id") != run_summary["snapshot_id"]
         or not approval.get("approval_id")
         or approval.get("proposal_id") != run_summary["proposal_id"]
         or not approval.get("used_at")
-        or not change_diff.get("approval_required")
-        or change_diff["approval_required"].get("proposal_id")
-        != run_summary["proposal_id"]
+        or approval_change.get("proposal_id") != run_summary["proposal_id"]
+        or observe.get("snapshot_id") != run_summary["snapshot_id"]
+        or not observe.get("campaign")
         or impact.get("status") != "OBSERVED_POST_CHANGE"
+        or impact_baseline.get("snapshot_id") != run_summary["snapshot_id"]
+        or impact_baseline.get("campaign") != observe.get("campaign")
+        or impact_post.get("campaign") != observe.get("campaign")
+        or envelope.get("snapshot_id") != run_summary["snapshot_id"]
+        or envelope.get("proposal_id") != run_summary["proposal_id"]
+        or envelope.get("execution_key")
+        != approval_change.get("execution_key")
+        or envelope.get("change_id") != impact.get("change_id")
+        or envelope.get("campaign") != observe.get("campaign")
+        or envelope.get("campaign") != approval_change.get("campaign")
+        or envelope.get("impact_campaign") != impact_baseline.get("campaign")
+        or envelope.get("post_snapshot_id") != impact_post.get("snapshot_id")
+        or envelope.get("readback_status") != approval_change.get("status")
+        or envelope.get("next_decision") != impact.get("next_decision")
+        or envelope.get("evidence_type") != "SIMULATED"
+        or envelope.get("capability_status") != "NOT_PROVEN"
     ):
         raise ValueError("The final E2E stage artifacts are inconsistent.")
 
@@ -614,6 +706,7 @@ def write_final_e2e_artifacts(
     egress: ReadOnlyEgressRecorder,
     supplemental_artifacts: Mapping[str, Mapping[str, Any]],
     run_summary: Mapping[str, Any],
+    workspace: RunWorkspace | None = None,
 ) -> Path:
     """Write one immutable E2E evidence bundle and deterministic fingerprint."""
 
@@ -621,7 +714,13 @@ def write_final_e2e_artifacts(
         raise ValueError("Every local E2E check must pass before finalization.")
     _validate_run_summary(run_summary, supplemental_artifacts)
     egress.assert_read_only()
-    workspace = RunWorkspace.create(runs_root, run_id)
+    workspace = (
+        RunWorkspace.create(runs_root, run_id)
+        if workspace is None
+        else workspace
+    )
+    if workspace.path != runs_root / run_id:
+        raise ValueError("The supplied E2E workspace is not bound to run_id.")
     capabilities = final_capability_evidence()
     journal = SQLiteAuditJournal(
         workspace.path / ".audit.sqlite3",
@@ -749,6 +848,7 @@ def write_final_e2e_artifacts(
         "input_tokens": run_summary["input_tokens"],
         "output_tokens": run_summary["output_tokens"],
         "cost_rub": run_summary["cost_rub"],
+        "model_cost": run_summary["model_cost"],
         "duration_ms": run_summary["duration_ms"],
         "stage_durations_ms": run_summary["stage_durations_ms"],
         "proposal_id": run_summary["proposal_id"],
@@ -803,3 +903,90 @@ def write_final_e2e_artifacts(
     )
     verify_e2e_artifact_manifest(workspace.path)
     return workspace.path
+
+
+def write_failed_e2e_artifacts(
+    workspace: RunWorkspace,
+    *,
+    run_id: str,
+    policy_version: str,
+    reason_code: str,
+    detail: str,
+) -> Path:
+    """Ensure every failed E2E run retains the three mandatory artifacts."""
+
+    events = (
+        {
+            "sequence": 1,
+            "event_type": "e2e.started",
+            "run_id": run_id,
+            "external_write_allowed": False,
+            "event_send_allowed": False,
+        },
+        {
+            "sequence": 2,
+            "event_type": "e2e.failed",
+            "run_id": run_id,
+            "reason_code": reason_code,
+        },
+    )
+    result = {
+        "schema_version": "readonly-e2e-result-v1",
+        "policy_version": policy_version,
+        "run_id": run_id,
+        "status": "FAILED",
+        "execution_status": "BLOCKED",
+        "evidence_type": "SIMULATED",
+        "external_write_sent": False,
+        "external_event_sent": False,
+        "blocking_code": reason_code,
+    }
+    report = "\n".join(
+        (
+            "# Неуспешный read-only E2E запуск MOX-ADV",
+            "",
+            "Запуск остановлен безопасно.",
+            "Внешние write-запросы и события не отправлялись.",
+            f"Код: `{reason_code}`.",
+            f"Деталь: {detail}",
+            "",
+        )
+    )
+    _replace_failed_artifact(
+        workspace,
+        "events.jsonl",
+        "".join(canonical_json(event) + "\n" for event in events),
+    )
+    _replace_failed_artifact(
+        workspace,
+        "result.json",
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    _replace_failed_artifact(workspace, "report.md", report)
+    return workspace.path
+
+
+def _replace_failed_artifact(
+    workspace: RunWorkspace,
+    name: str,
+    text: str,
+) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".failed-" + name + ".",
+        dir=str(workspace.path),
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, workspace.path / name)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
