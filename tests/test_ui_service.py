@@ -137,7 +137,18 @@ class StubProductionReader:
 
 
 class UiRunServiceTests(unittest.TestCase):
-    def test_test_mode_runs_linked_analytics_recommendation_and_fake_readback(
+    def test_manual_test_cycle_always_waits_for_operator_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = UiRunService(Path(temporary))
+
+            report = service.run("test", origin="MANUAL")
+
+            self.assertEqual("APPROVAL_REQUIRED", report["operating_mode"])
+            self.assertEqual("PENDING_APPROVAL", report["execution"]["status"])
+            self.assertEqual(0, report["execution"]["write_calls"])
+            self.assertFalse(report["execution"]["executor_invoked"])
+
+    def test_test_mode_runs_linked_analytics_and_returns_pending_proposal(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -159,12 +170,9 @@ class UiRunServiceTests(unittest.TestCase):
                 report["recommendation"]["action"],
             )
             self.assertEqual(10, report["recommendation"]["relative_step_percent"])
-            self.assertEqual("APPLIED", report["execution"]["status"])
-            self.assertEqual(
-                report["execution"]["after_micros"],
-                report["execution"]["readback_micros"],
-            )
-            self.assertEqual(1, report["execution"]["write_calls"])
+            self.assertEqual("PENDING_APPROVAL", report["execution"]["status"])
+            self.assertIsNone(report["execution"]["readback_micros"])
+            self.assertEqual(0, report["execution"]["write_calls"])
             self.assertFalse(report["safety"]["external_write_sent"])
             self.assertTrue(
                 (Path(temporary) / report["run_id"] / "ui-report.html").is_file()
@@ -232,7 +240,7 @@ class UiRunServiceTests(unittest.TestCase):
                 report["decision"]["reason"].lower(),
             )
             self.assertEqual(10, report["recommendation"]["relative_step_percent"])
-            self.assertEqual("APPLIED", report["execution"]["status"])
+            self.assertEqual("PENDING_APPROVAL", report["execution"]["status"])
             self.assertLess(
                 report["execution"]["after_micros"],
                 report["execution"]["before_micros"],
@@ -267,8 +275,8 @@ class UiRunServiceTests(unittest.TestCase):
                 "SUSPEND_CAMPAIGN",
                 report["recommendation"]["action"],
             )
-            self.assertEqual("APPLIED", report["execution"]["status"])
-            self.assertEqual("SUSPENDED", report["execution"]["readback_micros"])
+            self.assertEqual("PENDING_APPROVAL", report["execution"]["status"])
+            self.assertIsNone(report["execution"]["readback_micros"])
 
     def test_test_mode_decreases_search_bid_when_cpa_is_high_without_budget_pressure(
         self,
@@ -296,7 +304,7 @@ class UiRunServiceTests(unittest.TestCase):
                 "DECREASE_SEARCH_BID",
                 report["recommendation"]["action"],
             )
-            self.assertEqual("APPLIED", report["execution"]["status"])
+            self.assertEqual("PENDING_APPROVAL", report["execution"]["status"])
             self.assertLess(
                 report["execution"]["after_micros"],
                 report["execution"]["before_micros"],
@@ -328,7 +336,7 @@ class UiRunServiceTests(unittest.TestCase):
                 "INCREASE_SEARCH_BID",
                 report["recommendation"]["action"],
             )
-            self.assertEqual("APPLIED", report["execution"]["status"])
+            self.assertEqual("PENDING_APPROVAL", report["execution"]["status"])
             self.assertGreater(
                 report["execution"]["after_micros"],
                 report["execution"]["before_micros"],
@@ -385,8 +393,8 @@ class UiRunServiceTests(unittest.TestCase):
                 "SET_AD_VARIANT",
                 report["recommendation"]["action"],
             )
-            self.assertEqual("APPLIED", report["execution"]["status"])
-            self.assertEqual("B", report["execution"]["readback_micros"])
+            self.assertEqual("PENDING_APPROVAL", report["execution"]["status"])
+            self.assertIsNone(report["execution"]["readback_micros"])
 
     def test_test_mode_uses_operator_recommendation_thresholds_without_weakening_gate0(
         self,
@@ -416,9 +424,9 @@ class UiRunServiceTests(unittest.TestCase):
                 "DECREASE_WEEKLY_BUDGET",
                 report["recommendation"]["action"],
             )
-            self.assertEqual("BLOCKED", report["execution"]["status"])
+            self.assertEqual("PENDING_APPROVAL", report["execution"]["status"])
             self.assertEqual(
-                "ACTION_POLICY_REJECTED",
+                "EXACT_APPROVAL_REQUIRED",
                 report["execution"]["reason_code"],
             )
             self.assertEqual(
@@ -563,6 +571,62 @@ class UiRunServiceTests(unittest.TestCase):
             self.assertEqual("NO_TRIGGER_MATCH", report["execution"]["reason_code"])
             self.assertFalse(report["execution"]["executor_invoked"])
             self.assertEqual("SKIPPED", report["steps"][-1]["status"])
+
+    def test_operator_can_revise_pending_change_size_before_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            service = UiRunService(root)
+            pending = service.run(
+                "test",
+                origin="MANUAL",
+                scenario={
+                    "impressions": 5000,
+                    "clicks": 100,
+                    "conversions": 3,
+                    "visits": 100,
+                    "spend_rub": 4000,
+                    "weekly_budget_rub": 10000,
+                    "baseline_spend_rub": 3000,
+                    "baseline_conversions": 3,
+                },
+            )
+
+            revised = service.revise_pending_run(
+                pending["run_id"],
+                relative_step_percent=5,
+            )
+
+            self.assertNotEqual(pending["run_id"], revised["run_id"])
+            self.assertEqual(pending["run_id"], revised["source_run_id"])
+            self.assertEqual(5, revised["recommendation"]["relative_step_percent"])
+            self.assertEqual(5, revised["execution"]["relative_step_percent"])
+            self.assertEqual(
+                revised["execution"]["before_micros"] * 95 // 100,
+                revised["execution"]["after_micros"],
+            )
+            self.assertEqual("PENDING_APPROVAL", revised["execution"]["status"])
+            self.assertFalse(revised["execution"]["executor_invoked"])
+            proposal = json.loads(
+                (root / revised["run_id"] / "proposal.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(5, proposal["expected_diff"]["relative_step_percent"])
+            self.assertIn("изменил размер", revised["decision"]["reason"])
+
+    def test_operator_revision_rejects_step_outside_policy_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = UiRunService(Path(temporary))
+            pending = service.run("test", origin="MANUAL")
+
+            with self.assertRaises(UiRunRejected) as rejected:
+                service.revise_pending_run(
+                    pending["run_id"],
+                    relative_step_percent=11,
+                )
+
+            self.assertEqual(
+                "PROPOSAL_REVISION_OUTSIDE_POLICY",
+                rejected.exception.reason_code,
+            )
 
     def test_production_mode_runs_read_only_without_execution_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

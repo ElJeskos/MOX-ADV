@@ -73,22 +73,22 @@ class UiBrowserTests(unittest.TestCase):
                         lambda error: page_errors.append(str(error)),
                     )
                     base_url = f"http://127.0.0.1:{server.server_port}"
-                    page.goto(base_url, wait_until="networkidle")
+                    page.goto(base_url + "/cycle", wait_until="networkidle")
 
                     page.get_by_role("tab", name="Основной").click()
                     page.get_by_role(
                         "button",
-                        name="Запустить read-only анализ",
+                        name="Получить предложение",
                     ).click()
                     page.get_by_role(
                         "heading",
-                        name="Read-only анализ завершён",
+                        name="Анализ завершён",
                     ).wait_for()
 
                     self.assertTrue(page.locator("#report").is_visible())
                     self.assertFalse(page.locator("#blocked-panel").is_visible())
                     self.assertIn(
-                        "executor отключён",
+                        "Реальная кампания не изменена",
                         page.locator("#safety-copy").inner_text(),
                     )
                     self.assertEqual([], page_errors)
@@ -99,7 +99,7 @@ class UiBrowserTests(unittest.TestCase):
                     )
                     self.assertTrue(
                         all(
-                            url == base_url or url.startswith(base_url + "/")
+                            url.startswith(base_url + "/")
                             for _, url in browser_requests
                         ),
                         browser_requests,
@@ -161,12 +161,13 @@ class UiBrowserTests(unittest.TestCase):
                     browser = playwright.chromium.launch(headless=True)
                     page = browser.new_page(viewport={"width": 1440, "height": 1000})
                     page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
+                        f"http://127.0.0.1:{server.server_port}/cycle",
                         wait_until="networkidle",
                     )
+                    page.get_by_role("tab", name="Основной").click()
                     page.get_by_role(
                         "button",
-                        name="Запустить read-only анализ",
+                        name="Получить предложение",
                     ).click()
                     page.locator("#report").wait_for(state="visible")
 
@@ -213,7 +214,7 @@ class UiBrowserTests(unittest.TestCase):
                     browser = playwright.chromium.launch(headless=True)
                     page = browser.new_page(viewport={"width": 1440, "height": 1000})
                     page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
+                        f"http://127.0.0.1:{server.server_port}/cycle",
                         wait_until="networkidle",
                     )
                     page.get_by_role("tab", name="Основной").click()
@@ -227,7 +228,7 @@ class UiBrowserTests(unittest.TestCase):
                     self.assertTrue(
                         page.get_by_role(
                             "button",
-                            name="Запустить read-only анализ",
+                            name="Получить предложение",
                         ).is_disabled()
                     )
                     self.assertIn(
@@ -266,12 +267,13 @@ class UiBrowserTests(unittest.TestCase):
                     browser = playwright.chromium.launch(headless=True)
                     page = browser.new_page(viewport={"width": 1440, "height": 1000})
                     page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
+                        f"http://127.0.0.1:{server.server_port}/cycle",
                         wait_until="networkidle",
                     )
+                    page.get_by_role("tab", name="Основной").click()
                     run_button = page.get_by_role(
                         "button",
-                        name="Запустить read-only анализ",
+                        name="Получить предложение",
                     )
                     self.assertFalse(run_button.is_disabled())
 
@@ -312,42 +314,25 @@ class UiBrowserTests(unittest.TestCase):
                     browser = playwright.chromium.launch(headless=True)
                     page = browser.new_page(viewport={"width": 1440, "height": 1000})
                     page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
+                        f"http://127.0.0.1:{server.server_port}/cycle",
                         wait_until="networkidle",
                     )
 
-                    page.get_by_role("tab", name="Тестовый").click()
                     page.get_by_role(
                         "button",
-                        name="APPROVAL REQUIRED",
-                    ).click()
-                    page.get_by_role(
-                        "button",
-                        name="Запустить тестовый цикл",
+                        name="Получить предложение",
                     ).click()
                     page.get_by_text(
-                        "Ожидает точного Approval",
-                        exact=False,
+                        "Предложение готово и ещё не применено",
+                        exact=True,
                     ).wait_for()
                     page.get_by_role(
                         "button",
-                        name="Подтвердить точный proposal",
+                        name="Согласиться и применить",
                     ).click()
-                    page.get_by_text(
-                        "Точный Approval выдан",
-                        exact=False,
-                    ).wait_for()
-                    page.get_by_role(
-                        "button",
-                        name="Применить подтверждённое",
-                    ).click()
-                    page.get_by_text(
-                        "Точный Approval использован",
-                        exact=False,
-                    ).wait_for()
                     page.get_by_role(
                         "heading",
-                        name="Цикл завершён",
+                        name="Предложение применено",
                     ).wait_for()
 
                     self.assertTrue(page.locator("#report").is_visible())
@@ -370,7 +355,7 @@ class UiBrowserTests(unittest.TestCase):
                         execution_text.replace("\N{NO-BREAK SPACE}", " "),
                     )
                     self.assertIn(
-                        "sealed fake",
+                        "Тестовый результат подтверждён",
                         page.locator("#safety-copy").inner_text(),
                     )
                     with page.expect_download() as download_info:
@@ -436,18 +421,13 @@ class UiBrowserTests(unittest.TestCase):
                     )
                     base_url = f"http://127.0.0.1:{server.server_port}"
                     page.goto(
-                        base_url,
+                        base_url + "/cycle",
                         wait_until="networkidle",
                     )
                     page.get_by_role("tab", name="Основной").click()
                     page.get_by_role(
                         "button",
-                        name="RECOMMEND",
-                        exact=True,
-                    ).click()
-                    page.get_by_role(
-                        "button",
-                        name="Запустить read-only анализ",
+                        name="Получить предложение",
                     ).click()
                     seen_states: list[list[str]] = []
                     deadline = time.monotonic() + 10
@@ -510,7 +490,7 @@ class UiBrowserTests(unittest.TestCase):
                         page.locator('[data-step="apply"] .step-state').inner_text(),
                     )
                     self.assertIn(
-                        "executor отключён",
+                        "Реальная кампания не изменена",
                         page.locator("#safety-copy").inner_text(),
                     )
                     self.assertIn(
@@ -575,25 +555,19 @@ class UiBrowserTests(unittest.TestCase):
                     browser = playwright.chromium.launch(headless=True)
                     page = browser.new_page(viewport={"width": 1440, "height": 1100})
                     page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
+                        f"http://127.0.0.1:{server.server_port}/cycle",
                         wait_until="networkidle",
                     )
 
-                    page.get_by_role("tab", name="Тестовый").click()
+                    page.locator("#scenario-impressions").fill("2000")
+                    page.locator("#scenario-clicks").fill("20")
+                    page.locator("#scenario-spend").fill("400")
+                    page.locator("#scenario-visits").fill("24")
+                    page.locator("#scenario-conversions").fill("1")
+                    page.locator("#scenario-budget").fill("2000")
                     page.get_by_role(
                         "button",
-                        name="RECOMMEND",
-                        exact=True,
-                    ).click()
-                    page.get_by_label("Показы").fill("2000")
-                    page.get_by_label("Клики").fill("20")
-                    page.get_by_label("Расход, ₽", exact=True).fill("400")
-                    page.get_by_label("Визиты").fill("24")
-                    page.get_by_label("Конверсии", exact=True).fill("1")
-                    page.get_by_label("Недельный бюджет, ₽").fill("2000")
-                    page.get_by_role(
-                        "button",
-                        name="Запустить тестовый цикл",
+                        name="Получить предложение",
                     ).click()
                     page.get_by_role(
                         "heading",
@@ -637,34 +611,42 @@ class UiBrowserTests(unittest.TestCase):
                     browser = playwright.chromium.launch(headless=True)
                     page = browser.new_page(viewport={"width": 1440, "height": 1200})
                     page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
+                        f"http://127.0.0.1:{server.server_port}/cycle",
                         wait_until="networkidle",
                     )
 
-                    page.get_by_role("tab", name="Тестовый").click()
-                    page.get_by_role(
-                        "button",
-                        name="BOUNDED AUTONOMY",
-                    ).click()
-                    page.get_by_role(
-                        "button",
-                        name="Выдать тестовый Mandate",
-                    ).click()
-                    page.get_by_text("Mandate активирован", exact=False).wait_for()
                     page.locator("#scenario-impressions").fill("5000")
                     page.locator("#scenario-clicks").fill("100")
                     page.locator("#scenario-spend").fill("4000")
                     page.locator("#scenario-visits").fill("100")
                     page.locator("#scenario-conversions").fill("3")
                     page.locator("#scenario-budget").fill("10000")
+                    page.locator(".advanced-metrics summary").click()
                     page.locator("#scenario-baseline-spend").fill("3000")
                     page.locator("#scenario-baseline-conversions").fill("3")
+                    page.get_by_role(
+                        "link",
+                        name="Автопилот",
+                        exact=True,
+                    ).click()
                     page.get_by_label("Периодичность").select_option("60")
                     page.get_by_role(
                         "button",
                         name="Включить автопилот",
                     ).click()
-                    page.get_by_text("Автопилот включён", exact=True).wait_for()
+                    page.get_by_text(
+                        "Циклы будут запускаться и применяться автоматически.",
+                        exact=False,
+                    ).wait_for()
+                    self.assertIn(
+                        "Следующий запуск",
+                        page.locator("#automation-timing").inner_text(),
+                    )
+                    page.get_by_role(
+                        "link",
+                        name="История",
+                        exact=True,
+                    ).click()
                     page.locator("#decision-history article").first.wait_for(
                         timeout=10_000
                     )
@@ -674,16 +656,7 @@ class UiBrowserTests(unittest.TestCase):
                     ).first.inner_text()
                     self.assertIn("По расписанию", history_text)
                     self.assertIn("Расход растёт без роста конверсий", history_text)
-                    self.assertIn("APPLIED", history_text)
-                    self.assertIn(
-                        "Следующий запуск",
-                        page.locator("#automation-timing").inner_text(),
-                    )
-                    page.get_by_role(
-                        "heading",
-                        name="Цикл завершён",
-                    ).wait_for()
-                    self.assertTrue(page.locator("#report").is_visible())
+                    self.assertIn("Применено", history_text)
                     with page.expect_download() as download_info:
                         page.locator("#decision-history article").first.get_by_role(
                             "link",
@@ -710,14 +683,13 @@ class UiBrowserTests(unittest.TestCase):
                     browser = playwright.chromium.launch(headless=True)
                     page = browser.new_page(viewport={"width": 1440, "height": 1200})
                     page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
+                        f"http://127.0.0.1:{server.server_port}/rules",
                         wait_until="networkidle",
                     )
 
-                    page.get_by_role("tab", name="Тестовый").click()
                     page.get_by_role(
                         "heading",
-                        name="Справочник рекомендаций",
+                        name="Правила автопилота",
                     ).wait_for()
                     self.assertGreaterEqual(
                         page.locator("#recommendation-matrix tbody tr").count(),
@@ -736,30 +708,29 @@ class UiBrowserTests(unittest.TestCase):
                         name="Сохранить логику",
                     ).click()
                     page.get_by_text(
-                        "Логика рекомендаций сохранена.",
+                        "Логика решений сохранена.",
                         exact=True,
                     ).wait_for()
 
                     page.reload(wait_until="networkidle")
-                    page.get_by_role("tab", name="Тестовый").click()
-                    page.get_by_role(
-                        "button",
-                        name="RECOMMEND",
-                        exact=True,
-                    ).click()
                     self.assertEqual(
                         "800",
                         page.get_by_label("Целевой CPA, ₽").input_value(),
                     )
-                    page.get_by_label("Показы").fill("10000")
-                    page.get_by_label("Клики").fill("100")
-                    page.get_by_label("Расход, ₽", exact=True).fill("9000")
-                    page.get_by_label("Визиты").fill("100")
-                    page.get_by_label("Конверсии", exact=True).fill("10")
-                    page.get_by_label("Недельный бюджет, ₽").fill("4000")
+                    page.get_by_role(
+                        "link",
+                        name="Запуск цикла",
+                        exact=True,
+                    ).click()
+                    page.locator("#scenario-impressions").fill("10000")
+                    page.locator("#scenario-clicks").fill("100")
+                    page.locator("#scenario-spend").fill("9000")
+                    page.locator("#scenario-visits").fill("100")
+                    page.locator("#scenario-conversions").fill("10")
+                    page.locator("#scenario-budget").fill("4000")
                     page.get_by_role(
                         "button",
-                        name="Запустить тестовый цикл",
+                        name="Получить предложение",
                     ).click()
                     page.get_by_role(
                         "heading",

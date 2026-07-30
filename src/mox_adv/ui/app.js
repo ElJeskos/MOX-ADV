@@ -1,5 +1,6 @@
 const state = {
-  mode: "production",
+  mode: "test",
+  currentPage: "overview",
   status: null,
   statusError: false,
   running: false,
@@ -15,6 +16,15 @@ const state = {
 };
 
 const elements = {
+  pages: Array.from(document.querySelectorAll("[data-page]")),
+  navigationLinks: Array.from(document.querySelectorAll("[data-nav]")),
+  pageLinks: Array.from(document.querySelectorAll("[data-page-link]")),
+  overviewAutomationState: document.querySelector(
+    "#overview-automation-state",
+  ),
+  overviewNextRun: document.querySelector("#overview-next-run"),
+  overviewLastDecision: document.querySelector("#overview-last-decision"),
+  overviewLastRun: document.querySelector("#overview-last-run"),
   modeButtons: Array.from(document.querySelectorAll(".mode-button")),
   modeName: document.querySelector("#mode-name"),
   modeDescription: document.querySelector("#mode-description"),
@@ -42,6 +52,11 @@ const elements = {
   executionLine: document.querySelector("#execution-line"),
   safetyCopy: document.querySelector("#safety-copy"),
   downloadReport: document.querySelector("#download-report"),
+  proposalReview: document.querySelector("#proposal-review"),
+  proposalStep: document.querySelector("#proposal-step"),
+  reviseProposal: document.querySelector("#revise-proposal"),
+  acceptProposal: document.querySelector("#accept-proposal"),
+  proposalMessage: document.querySelector("#proposal-message"),
   testLab: document.querySelector("#test-lab"),
   scenarioInputs: {
     impressions: document.querySelector("#scenario-impressions"),
@@ -157,6 +172,7 @@ const elements = {
     "#save-recommendation-rules",
   ),
   recommendationMessage: document.querySelector("#recommendation-message"),
+  triggerRulesHost: document.querySelector("#trigger-rules-host"),
   decisionHistory: document.querySelector("#decision-history"),
   operatingModes: Array.from(
     document.querySelectorAll("#operating-modes button"),
@@ -219,16 +235,29 @@ const actionLabels = {
   REQUEST_HUMAN_HELP: "Передать человеку",
 };
 
-const operatingModeCopy = {
-  OBSERVE:
-    "Только сбор связанных данных и объяснение. Proposal и executor не запускаются.",
-  RECOMMEND:
-    "Proposal создаётся без применения. Approval и executor не запускаются.",
-  APPROVAL_REQUIRED:
-    "Изменение возможно только после подтверждения точного proposal и повторного policy-check.",
-  BOUNDED_AUTONOMY:
-    "Scheduler выполняет не более одного обратимого действия внутри активного Mandate.",
-};
+function operatorReason(value) {
+  const text = String(value || "");
+  const legacyPrefixes = [
+    [
+      "Точный одноразовый Approval подтверждён оператором.",
+      "Предложение подтверждено пользователем.",
+    ],
+    [
+      "Связанные показатели собраны. В режиме OBSERVE proposal и executor не запускаются.",
+      "Связанные показатели собраны без применения изменений.",
+    ],
+    [
+      "Ни один активный триггер не сработал. Рекомендация сохранена, executor не запускался.",
+      "Ни один активный триггер не сработал. Предложение сохранено без изменения кампании.",
+    ],
+  ];
+  for (const [technicalPrefix, operatorPrefix] of legacyPrefixes) {
+    if (text.startsWith(technicalPrefix)) {
+      return operatorPrefix + text.slice(technicalPrefix.length);
+    }
+  }
+  return text;
+}
 
 const progressCopy = {
   direct: "Читаем данные Яндекс.Директа",
@@ -239,7 +268,84 @@ const progressCopy = {
 };
 
 function setText(element, value) {
+  if (!element) return;
   element.textContent = String(value);
+}
+
+const pageTitles = {
+  overview: "Обзор",
+  cycle: "Запуск цикла",
+  autopilot: "Автопилот",
+  rules: "Правила",
+  history: "История",
+  workflows: "Сценарии",
+  control: "Контроль",
+};
+
+function pageFromPath(pathname) {
+  const candidate = pathname.replace(/^\/+|\/+$/g, "") || "overview";
+  return Object.hasOwn(pageTitles, candidate) ? candidate : "overview";
+}
+
+function showPage(page, pushHistory = false) {
+  const selectedPage = Object.hasOwn(pageTitles, page) ? page : "overview";
+  state.currentPage = selectedPage;
+  elements.pages.forEach((item) => {
+    item.hidden =
+      item.dataset.page !== selectedPage ||
+      (item.classList.contains("scenario-panel") && state.mode !== "test");
+  });
+  elements.pageLinks.forEach((link) => {
+    const active = link.dataset.pageLink === selectedPage;
+    link.classList.toggle("is-active", active);
+    if (active) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
+  });
+  document.title = `${pageTitles[selectedPage]} — MOX-ADV`;
+  if (pushHistory && window.location.pathname !== `/${selectedPage}`) {
+    window.history.pushState({ page: selectedPage }, "", `/${selectedPage}`);
+  }
+  window.scrollTo({ top: 0, behavior: "instant" });
+}
+
+function organizePages() {
+  const triggerRules = document.querySelector(".automation-panel .rule-list");
+  if (triggerRules && elements.triggerRulesHost) {
+    elements.triggerRulesHost.append(triggerRules);
+    const secondaryRules = Array.from(
+      triggerRules.querySelectorAll(":scope > .rule-row"),
+    ).slice(3);
+    if (secondaryRules.length) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      const rules = document.createElement("div");
+      details.className = "advanced-rules";
+      rules.className = "advanced-rules-list";
+      setText(summary, `Дополнительные триггеры · ${secondaryRules.length}`);
+      secondaryRules.forEach((rule) => rules.append(rule));
+      details.append(summary, rules);
+      elements.triggerRulesHost.append(details);
+    }
+  }
+
+  const scenarioFields = document.querySelector(".scenario-fields");
+  const secondaryFields = scenarioFields
+    ? Array.from(scenarioFields.querySelectorAll(":scope > label")).slice(6)
+    : [];
+  if (scenarioFields && secondaryFields.length) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    const fields = document.createElement("div");
+    details.className = "advanced-metrics";
+    fields.className = "advanced-metrics-grid";
+    setText(summary, "Дополнительные показатели");
+    secondaryFields.forEach((field) => fields.append(field));
+    details.append(summary, fields);
+    scenarioFields.append(details);
+  }
 }
 
 function updateMode() {
@@ -249,12 +355,12 @@ function updateMode() {
     button.classList.toggle("is-active", active);
     button.setAttribute("aria-selected", String(active));
   });
-  setText(elements.modeName, isTest ? "Тестовый контур" : "Основной контур");
+  setText(elements.modeName, isTest ? "Тестовые данные" : "Реальные данные");
   setText(
     elements.modeDescription,
     isTest
-      ? "Связанные fixtures Директа и Метрики. Изменение применяется только к fake-объекту."
-      : "Read-only анализ реальных данных Яндекс.Директа и Метрики. Рекомендация формируется без approval и применения.",
+      ? "Укажите показатели кампании и посмотрите, какое решение примет система."
+      : "Система проанализирует реальные данные Директа и Метрики. Кампания не изменится без вашего согласия.",
   );
   elements.modeIndicator.style.background = isTest ? "var(--green)" : "var(--amber)";
   elements.modeIndicator.style.boxShadow = isTest
@@ -263,14 +369,14 @@ function updateMode() {
   elements.sourceList.replaceChildren();
   const sources = isTest
     ? [
-        ["Директ", "Fixture"],
-        ["Метрика", "Fixture"],
-        ["Изменения", "Sealed fake"],
+        ["Директ", "Тестовые данные"],
+        ["Метрика", "Тестовые данные"],
+        ["Кампания", "Без реальных изменений"],
       ]
     : [
-        ["Директ", "Production API · read-only"],
-        ["Метрика", "Production API · read-only"],
-        ["Изменения", "Запрещены"],
+        ["Директ", "Реальные данные"],
+        ["Метрика", "Реальные данные"],
+        ["Кампания", "Только после согласия"],
       ];
   sources.forEach(([label, value]) => {
     const item = document.createElement("li");
@@ -283,18 +389,18 @@ function updateMode() {
   });
   setText(
     elements.runButtonLabel,
-    isTest ? "Запустить тестовый цикл" : "Запустить read-only анализ",
+    "Получить предложение",
   );
   setText(
     elements.controlNote,
     isTest
-      ? "Реальные credentials не загружаются. Внешние write-запросы запрещены."
-      : "Executor и approval отключены. Любые внешние write-запросы запрещены.",
+      ? "Реальная рекламная кампания не изменяется."
+      : "Перед применением система обязательно попросит ваше согласие.",
   );
   elements.report.hidden = true;
   elements.blockedPanel.hidden = true;
   elements.emptyState.hidden = false;
-  elements.testLab.hidden = !isTest;
+  showPage(state.currentPage);
   resetPipeline();
   const readiness = state.status?.production_mode;
   const productionUnavailable = !isTest && readiness?.ready !== true;
@@ -550,7 +656,7 @@ function renderRecommendationMatrix() {
       "01",
       `0 конверсий и расход ≥ ${rules.no_conversion_spend_rub} ₽`,
       "SUSPEND_CAMPAIGN",
-      "Кампания приостанавливается в sealed fake",
+      "Тестовая кампания приостанавливается",
     ],
     [
       "02",
@@ -597,21 +703,21 @@ function renderRecommendationMatrix() {
     ],
     [
       "08",
-      `кампания SUSPENDED; ${enoughSample}; CPA ≤ ${rules.target_cpa_rub} ₽`,
+      `кампания приостановлена; ${enoughSample}; CPA ≤ ${rules.target_cpa_rub} ₽`,
       "RESUME_CAMPAIGN",
-      "Кампания возобновляется только через точный Approval",
+      "Кампания возобновляется только после подтверждения",
     ],
     [
       "09",
-      "Источники несовместимы, freshness нарушен или найден внешний writer",
+      "Источники несовместимы, данные устарели или найдено внешнее изменение",
       "REQUEST_HUMAN_HELP",
-      "Write блокируется, решение передаётся оператору",
+      "Применение останавливается, решение передаётся пользователю",
     ],
     [
       "10",
       "Ни одно из условий выше не выполнено",
       "NO_CHANGE",
-      "Настройки сохраняются без write-вызова",
+      "Настройки сохраняются без изменения кампании",
     ],
   ];
   elements.recommendationMatrixBody.replaceChildren();
@@ -735,13 +841,23 @@ function renderAutomationState(settings) {
         ? `Последний запуск: ${formatMoment(settings.last_run_at)}`
         : "Запуски ещё не выполнялись.",
   );
+  setText(
+    elements.overviewAutomationState,
+    settings.enabled ? "Включён" : "Выключен",
+  );
+  setText(
+    elements.overviewNextRun,
+    settings.enabled
+      ? `Следующий цикл: ${formatMoment(settings.next_run_at)}`
+      : "Запуски не запланированы",
+  );
 }
 
 function automationPayload(enabled) {
   return {
     enabled,
     mode: "test",
-    operating_mode: state.operatingMode,
+    operating_mode: "BOUNDED_AUTONOMY",
     interval_minutes: integerValue(elements.automationInterval),
     rules: readRules(),
     scenario: readScenario(),
@@ -771,12 +887,12 @@ async function saveAutomation(enabled, source = "automation") {
     }
     applyAutomationSettings(payload);
     if (source === "recommendation") {
-      setText(message, "Логика рекомендаций сохранена.");
+      setText(message, "Логика решений сохранена.");
     } else {
       setText(
         message,
         payload.enabled
-          ? "Настройки сохранены. Первый цикл поставлен в очередь."
+          ? "Автопилот включён. Циклы будут запускаться и применяться автоматически."
           : "Настройки сохранены.",
       );
     }
@@ -801,8 +917,19 @@ function renderHistory(items) {
     empty.className = "history-empty";
     setText(empty, "История появится после первого тестового цикла.");
     elements.decisionHistory.append(empty);
+    setText(elements.overviewLastDecision, "Решений пока нет");
+    setText(elements.overviewLastRun, "Запустите первый цикл вручную");
     return;
   }
+  const latest = items[0];
+  setText(
+    elements.overviewLastDecision,
+    actionLabels[latest.action] || latest.action,
+  );
+  setText(
+    elements.overviewLastRun,
+    `${historyOrigin(latest.origin)} · ${formatMoment(latest.created_at)}`,
+  );
   items.forEach((entry) => {
     const item = document.createElement("article");
     const origin = document.createElement("div");
@@ -824,13 +951,23 @@ function renderHistory(items) {
     trigger.append(triggerTitle, triggerValue);
 
     const reason = document.createElement("p");
-    setText(reason, entry.reason);
+    setText(reason, operatorReason(entry.reason));
 
     const result = document.createElement("div");
     const status = document.createElement("strong");
     const link = document.createElement("a");
     result.className = "history-status";
-    setText(status, entry.execution_status);
+    const executionLabels = {
+      APPLIED: "Применено",
+      PENDING_APPROVAL: "Ждёт решения",
+      NO_CHANGE: "Без изменений",
+      BLOCKED: "Остановлено",
+      NOT_STARTED: "Не применялось",
+    };
+    setText(
+      status,
+      executionLabels[entry.execution_status] || entry.execution_status,
+    );
     result.append(status, document.createElement("br"));
     if (entry.report_href) {
       link.href = entry.report_href;
@@ -889,12 +1026,15 @@ function renderReport(report) {
   elements.emptyState.hidden = true;
   elements.blockedPanel.hidden = true;
   elements.report.hidden = false;
+  elements.proposalReview.hidden = true;
+  elements.proposalMessage.classList.remove("is-error");
+  setText(elements.proposalMessage, "");
   setText(
     elements.workspaceTitle,
     readOnly && report.recommendation.status === "NEEDS_HUMAN"
-      ? "Read-only анализ завершён · нужна проверка"
+      ? "Анализ завершён · нужна проверка"
       : readOnly
-        ? "Read-only анализ завершён"
+        ? "Анализ завершён"
         : "Цикл завершён",
   );
   setStatus(
@@ -919,7 +1059,9 @@ function renderReport(report) {
   );
   setText(
     elements.decisionCopy,
-    report.decision?.reason || report.recommendation.explanation_ru,
+    operatorReason(
+      report.decision?.reason || report.recommendation.explanation_ru,
+    ),
   );
   setText(elements.changeLabel, readOnly ? "Предложение" : "Изменение");
   setText(
@@ -941,38 +1083,44 @@ function renderReport(report) {
       );
     });
   if (readOnly) {
-    setText(elements.executionLabel, "Граница исполнения");
+    setText(elements.executionLabel, "Результат");
     setText(
       elements.executionLine,
       "Рекомендация сформирована · не применено",
     );
     setText(
       elements.safetyCopy,
-      "Read-only · executor отключён · write-запросы запрещены",
+      "Реальная кампания не изменена",
     );
   } else if (
     report.execution.status === "NOT_STARTED" &&
     report.execution.reason_code === "READ_ONLY_MODE"
   ) {
-    setText(elements.executionLabel, "Граница исполнения");
+    setText(elements.executionLabel, "Результат");
     setText(
       elements.executionLine,
       "Рекомендация сформирована · не применено",
     );
     setText(
       elements.safetyCopy,
-      "Режим RECOMMEND · executor отключён · write-запросы запрещены",
+      "Реальная кампания не изменена",
     );
   } else if (report.execution.status === "PENDING_APPROVAL") {
-    setText(elements.executionLabel, "Ожидает полномочия");
+    setText(elements.executionLabel, "Нужно ваше решение");
     setText(
       elements.executionLine,
-      "Ожидает точного Approval · executor ещё не запускался",
+      "Предложение готово и ещё не применено",
     );
     setText(
       elements.safetyCopy,
-      "Proposal сохранён · внешняя запись отсутствует",
+      "Вы можете изменить размер шага или принять предложение",
     );
+    const step = Number(report.recommendation.relative_step_percent || 0);
+    elements.proposalReview.hidden = false;
+    elements.proposalStep.value = String(step || 1);
+    elements.proposalStep.disabled = step <= 0;
+    elements.reviseProposal.disabled = step <= 0;
+    elements.acceptProposal.disabled = false;
     setText(elements.approvalState, "Ожидает решения");
     setFactValues(elements.approvalFacts, [
       report.recommendation.proposal_id,
@@ -984,18 +1132,17 @@ function renderReport(report) {
       "30 минут",
     ]);
   } else if (report.execution.status === "APPLIED") {
-    setText(elements.executionLabel, "Применение и readback");
+    setText(elements.executionLabel, "Изменение применено");
     setText(
       elements.executionLine,
       `${executionValue(report.execution.before_micros)} → ` +
-        `${executionValue(report.execution.after_micros)} · ` +
-        `readback ${executionValue(report.execution.readback_micros)}`,
+        `${executionValue(report.execution.after_micros)}`,
     );
     setText(
       elements.safetyCopy,
       report.safety.external_write_sent
-        ? "Внешняя запись выполнена"
-        : "Внешняя запись отсутствует · sealed fake",
+        ? "Изменение подтверждено в рекламной системе"
+        : "Тестовый результат подтверждён без изменения реальной кампании",
     );
   } else if (report.execution.status === "NO_CHANGE") {
     setText(elements.executionLabel, "Результат решения");
@@ -1005,17 +1152,17 @@ function renderReport(report) {
     );
     setText(
       elements.safetyCopy,
-      "Тестовый policy завершил цикл без изменения",
+      "Безопасная проверка завершила цикл без изменения",
     );
   } else {
-    setText(elements.executionLabel, "Результат policy");
+    setText(elements.executionLabel, "Результат проверки");
     setText(
       elements.executionLine,
-      `Применение остановлено · ${report.execution.reason_code}`,
+      "Применение остановлено безопасной проверкой",
     );
     setText(
       elements.safetyCopy,
-      "Внешняя запись отсутствует · policy fail-closed",
+      "Реальная кампания не изменена",
     );
   }
   elements.downloadReport.href = report.artifacts.html;
@@ -1058,13 +1205,12 @@ async function run() {
     elements.workspaceTitle,
     state.mode === "test"
       ? "Выполняется тестовый цикл"
-      : "Выполняется read-only анализ",
+      : "Анализируем реальные данные",
   );
   setStatus("В работе", "is-running");
   try {
     const requestPayload = {
       mode: state.mode,
-      operating_mode: state.operatingMode,
     };
     if (state.mode === "test") {
       requestPayload.scenario = readScenario();
@@ -1139,6 +1285,64 @@ async function requestJson(url, options = {}) {
   return payload;
 }
 
+async function reviseCurrentProposal() {
+  if (!state.currentReportRunId) return;
+  const relativeStep = Number(elements.proposalStep.value);
+  elements.reviseProposal.disabled = true;
+  elements.acceptProposal.disabled = true;
+  elements.proposalMessage.classList.remove("is-error");
+  setText(elements.proposalMessage, "Сохраняем правки…");
+  try {
+    const report = await requestJson("/api/proposals/revise", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        run_id: state.currentReportRunId,
+        relative_step_percent: relativeStep,
+      }),
+    });
+    renderConfirmedPipeline(report.steps);
+    renderReport(report);
+    setText(elements.proposalMessage, "Правки сохранены. Предложение обновлено.");
+    await Promise.all([refreshTestState(false), refreshControlPlane()]);
+  } catch (error) {
+    elements.proposalMessage.classList.add("is-error");
+    setText(elements.proposalMessage, error.message);
+    elements.reviseProposal.disabled = false;
+    elements.acceptProposal.disabled = false;
+  }
+}
+
+async function acceptCurrentProposal() {
+  if (!state.currentReportRunId) return;
+  const runId = state.currentReportRunId;
+  elements.reviseProposal.disabled = true;
+  elements.acceptProposal.disabled = true;
+  elements.proposalMessage.classList.remove("is-error");
+  setText(elements.proposalMessage, "Применяем согласованное предложение…");
+  try {
+    await requestJson("/api/control-plane/approvals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "grant_latest", run_id: runId }),
+    });
+    const report = await requestJson("/api/control-plane/approvals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "apply_latest", run_id: runId }),
+    });
+    renderConfirmedPipeline(report.steps);
+    renderReport(report);
+    setText(elements.workspaceTitle, "Предложение применено");
+    await Promise.all([refreshTestState(false), refreshControlPlane()]);
+  } catch (error) {
+    elements.proposalMessage.classList.add("is-error");
+    setText(elements.proposalMessage, error.message);
+    elements.reviseProposal.disabled = false;
+    elements.acceptProposal.disabled = false;
+  }
+}
+
 function setFactValues(container, values) {
   const targets = Array.from(container.querySelectorAll("dd"));
   values.forEach((value, index) => {
@@ -1149,15 +1353,6 @@ function setFactValues(container, values) {
 function renderControlPlane(control) {
   state.controlPlane = control;
   state.operatingMode = control.operating_mode.selected;
-  elements.operatingModes.forEach((button) => {
-    const active = button.dataset.operatingMode === state.operatingMode;
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-pressed", String(active));
-  });
-  setText(
-    elements.operatingModeNote,
-    operatingModeCopy[state.operatingMode],
-  );
 
   const approval = state.currentProposalId
     ? control.approvals.find(
@@ -1411,6 +1606,25 @@ async function applyLatestApproval() {
 }
 
 function renderWorkflowSteps(container, steps) {
+  const labels = {
+    CAMPAIGN_ADD: "Создание кампании",
+    AD_GROUP_ADD: "Создание группы объявлений",
+    ADS_ADD: "Добавление объявлений",
+    KEYWORD_ADD: "Добавление ключевых фраз",
+    MODERATION_SUBMIT: "Отправка на модерацию",
+    MODERATION_READBACK: "Проверка модерации",
+    CAMPAIGN_LAUNCH: "Запуск кампании",
+    FULL_READBACK: "Проверка результата",
+    GOAL_CANDIDATE: "Подготовка цели",
+    METRIKA_GOAL_ADD: "Создание цели в Метрике",
+    SITE_EVENT_PUBLISH: "Публикация события на сайте",
+    REACH_GOAL_VERIFY: "Проверка достижения цели",
+    DELIVERY_POLLING: "Проверка поступления данных",
+    HUMAN_APPROVE: "Смысл цели подтверждён",
+    HUMAN_REJECT: "Смысл цели отклонён",
+    CLEANUP: "Удаление тестовой цели",
+    ACTIVATE_PRIMARY: "Назначение основной цели",
+  };
   container.replaceChildren();
   steps.forEach((label, index) => {
     const row = document.createElement("div");
@@ -1419,8 +1633,8 @@ function renderWorkflowSteps(container, steps) {
     const status = document.createElement("strong");
     row.className = "workflow-step";
     setText(number, String(index + 1).padStart(2, "0"));
-    setText(name, label.replaceAll("_", " "));
-    setText(status, "PASSED");
+    setText(name, labels[label] || label.replaceAll("_", " "));
+    setText(status, "Готово");
     row.append(number, name, status);
     container.append(row);
   });
@@ -1428,7 +1642,7 @@ function renderWorkflowSteps(container, steps) {
 
 async function runCampaignWorkflow() {
   elements.runCampaignWorkflow.disabled = true;
-  setText(elements.workflowMessage, "Выполняется локальная campaign saga…");
+  setText(elements.workflowMessage, "Проверяем создание и запуск кампании…");
   try {
     const result = await requestJson("/api/workflows/campaign", {
       method: "POST",
@@ -1439,7 +1653,9 @@ async function runCampaignWorkflow() {
     );
     setText(
       elements.workflowMessage,
-      `Campaign lifecycle завершён: ${result.status}`,
+      result.status === "APPLIED"
+        ? "Проверка кампании завершена успешно."
+        : "Проверка кампании завершена с ограничениями.",
     );
     await refreshEvidence();
   } catch (error) {
@@ -1458,7 +1674,7 @@ async function runGoalTechnical() {
   );
   setText(
     elements.workflowMessage,
-    "Проверяется цель, site event и доставка reachGoal…",
+    "Проверяем цель, событие на сайте и поступление данных в Метрику…",
   );
   try {
     const result = await requestJson("/api/workflows/goal", {
@@ -1475,7 +1691,7 @@ async function runGoalTechnical() {
     ]);
     setText(
       elements.workflowMessage,
-      "Техническая проверка VERIFIED. Требуется отдельное решение о бизнес-смысле.",
+      "Техническая проверка завершена. Подтвердите бизнес-смысл цели.",
     );
     elements.approveGoal.disabled = false;
     elements.rejectGoal.disabled = false;
@@ -1509,7 +1725,9 @@ async function decideGoalWorkflow(semanticDecision) {
     ]);
     setText(
       elements.workflowMessage,
-      `Goal lifecycle завершён: ${result.status}`,
+      result.status === "REJECTED"
+        ? "Проверка цели завершена: цель отклонена."
+        : "Проверка цели завершена успешно.",
     );
     await refreshEvidence();
   } catch (error) {
@@ -1532,14 +1750,33 @@ async function runImpactEvaluation() {
     });
     const title = elements.impactResult.querySelector("strong");
     const copy = elements.impactResult.querySelector("p");
-    setText(title, result.recommended_next_decision.replaceAll("_", " "));
+    const nextDecisionLabels = {
+      KEEP_CHANGE: "Сохранить изменение",
+      ROLLBACK_CHANGE: "Откатить изменение",
+      ADJUST_CHANGE: "Скорректировать изменение",
+      ESCALATE_TO_HUMAN: "Передать решение человеку",
+    };
+    const confidenceLabels = {
+      HIGH: "высокая",
+      MEDIUM: "средняя",
+      LOW: "низкая",
+    };
+    setText(
+      title,
+      nextDecisionLabels[result.recommended_next_decision] ||
+        "Требуется дополнительная проверка",
+    );
     setText(
       copy,
-      `Confidence: ${result.impact_report.confidence} · ${result.status}`,
+      `Уверенность: ${
+        confidenceLabels[result.impact_report.confidence] ||
+        result.impact_report.confidence
+      }`,
     );
     await refreshEvidence();
   } catch (error) {
-    elements.impactResult.querySelector("strong").textContent = "BLOCKED";
+    elements.impactResult.querySelector("strong").textContent =
+      "Не удалось оценить";
     elements.impactResult.querySelector("p").textContent = error.message;
   } finally {
     elements.runImpact.disabled = false;
@@ -1599,14 +1836,16 @@ async function runFullEvidence() {
   elements.runFullEvidence.disabled = true;
   setText(
     elements.evidenceMessage,
-    "Выполняются аналитика, policy, lifecycle, safety и audit проверки…",
+    "Проверяем аналитику, правила, безопасность и журнал решений…",
   );
   try {
     const result = await requestJson("/api/evidence/run", { method: "POST" });
     renderEvidence(result);
     setText(
       elements.evidenceMessage,
-      `Полный тестовый контур завершён · ${result.overall_status} · ${result.run_id}.`,
+      result.overall_status === "PROVEN"
+        ? "Полная самопроверка завершена успешно."
+        : "Самопроверка завершена. Некоторые возможности требуют дополнительной проверки.",
     );
   } catch (error) {
     elements.evidenceMessage.classList.add("is-error");
@@ -1625,6 +1864,19 @@ elements.modeButtons.forEach((button) => {
 });
 
 elements.runButton.addEventListener("click", run);
+elements.reviseProposal.addEventListener("click", reviseCurrentProposal);
+elements.acceptProposal.addEventListener("click", acceptCurrentProposal);
+elements.navigationLinks.forEach((link) => {
+  link.addEventListener("click", (event) => {
+    const url = new URL(link.href, window.location.origin);
+    if (url.origin !== window.location.origin) return;
+    event.preventDefault();
+    showPage(pageFromPath(url.pathname), true);
+  });
+});
+window.addEventListener("popstate", () => {
+  showPage(pageFromPath(window.location.pathname));
+});
 Object.values(elements.scenarioInputs).forEach((input) => {
   input.addEventListener("input", renderDerivedPreview);
 });
@@ -1694,6 +1946,8 @@ fetch("/api/status")
     updateMode();
   });
 
+organizePages();
+showPage(pageFromPath(window.location.pathname));
 updateMode();
 renderDerivedPreview();
 renderRecommendationMatrix();

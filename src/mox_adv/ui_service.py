@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import threading
 from collections.abc import Mapping
 from copy import deepcopy
@@ -39,6 +40,7 @@ from mox_adv.mandate_store import DurableMandateAuthority
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.observe import run_observe_fixture
 from mox_adv.proposal_store import ImmutableProposalStore
+from mox_adv.recommend_contracts import OptimizationProposalV1
 from mox_adv.recommend_projection import build_sanitized_projection
 from mox_adv.recommend_service import RecommendationService
 from mox_adv.ui_automation import (
@@ -237,15 +239,21 @@ def _prepare_simulated_change(
     step = int(proposal.expected_diff.get("relative_step_percent", 0))
     if action_spec.family == ActionFamily.WEEKLY_BUDGET:
         current_value: Any = int(snapshot["campaign"]["current_weekly_budget_micros"])
+        relative_percent = (
+            step if int(action_spec.relative_percent or 0) > 0 else -step
+        )
         target_value: Any = calculate_relative_target(
             current_value,
-            int(action_spec.relative_percent or 0),
+            relative_percent,
         )
     elif action_spec.family == ActionFamily.SEARCH_BID:
         current_value = int(snapshot["campaign"]["current_search_bid_micros"])
+        relative_percent = (
+            step if int(action_spec.relative_percent or 0) > 0 else -step
+        )
         target_value = calculate_relative_target(
             current_value,
-            int(action_spec.relative_percent or 0),
+            relative_percent,
         )
     elif action_spec.family == ActionFamily.CAMPAIGN_STATE:
         current_value = str(snapshot["campaign"]["state"])
@@ -1098,9 +1106,14 @@ class UiRunService:
                 "INVALID_OPERATING_MODE",
                 "Unknown operating mode.",
             )
-        effective_operating_mode = operating_mode or (
-            "LEGACY_PRODUCTION" if mode == "production" else "LEGACY_TEST"
-        )
+        if operating_mode is not None:
+            effective_operating_mode = operating_mode
+        elif mode == "test" and origin == "MANUAL":
+            effective_operating_mode = "APPROVAL_REQUIRED"
+        else:
+            effective_operating_mode = (
+                "LEGACY_PRODUCTION" if mode == "production" else "LEGACY_TEST"
+            )
         if effective_operating_mode == "BOUNDED_AUTONOMY" and not mandate_id:
             raise UiRunRejected(
                 "MANDATE_REQUIRED",
@@ -1216,8 +1229,7 @@ class UiRunService:
                 "action": "NO_CHANGE",
                 "relative_step_percent": 0,
                 "explanation_ru": (
-                    "Связанные показатели собраны. "
-                    "В режиме OBSERVE proposal и executor не запускаются."
+                    "Связанные показатели собраны без применения изменений."
                 ),
                 "expected_direction": "NO_CHANGE",
                 "risks": [],
@@ -1459,7 +1471,7 @@ class UiRunService:
             elif origin == "SCHEDULED" and not matched_triggers:
                 decision_reason = (
                     "Ни один активный триггер не сработал. "
-                    "Рекомендация сохранена, executor не запускался."
+                    "Предложение сохранено без изменения кампании."
                 )
             elif matched_triggers:
                 decision_reason = (
@@ -1760,6 +1772,172 @@ class UiRunService:
         self.autonomy_control_state.register_prepared_change(prepared)
         return prepared
 
+    def revise_pending_run(
+        self,
+        run_id: str,
+        *,
+        relative_step_percent: int,
+    ) -> dict[str, Any]:
+        """Create a new immutable pending proposal with an operator-edited step."""
+
+        (
+            pending,
+            proposal_value,
+            snapshot,
+            _,
+            _,
+        ) = self._pending_approval_context(run_id)
+        maximum_step = int(self.policy["limits"]["maximum_step_percent"])
+        if (
+            isinstance(relative_step_percent, bool)
+            or not isinstance(relative_step_percent, int)
+            or not 1 <= relative_step_percent <= maximum_step
+        ):
+            raise UiRunRejected(
+                "PROPOSAL_REVISION_OUTSIDE_POLICY",
+                f"Размер изменения должен быть от 1% до {maximum_step}%.",
+            )
+        expected_diff = proposal_value.get("expected_diff")
+        if (
+            not isinstance(expected_diff, Mapping)
+            or "relative_step_percent" not in expected_diff
+        ):
+            raise UiRunRejected(
+                "PROPOSAL_REVISION_UNSUPPORTED",
+                "Для этого предложения размер изменения не редактируется.",
+            )
+        now = datetime.now(timezone.utc)
+        revision_run_id = "ui-revision-" + now.strftime("%Y%m%dT%H%M%S%fZ")
+        revised_value = deepcopy(proposal_value)
+        revised_value.update(
+            {
+                "proposal_id": "proposal-" + revision_run_id,
+                "run_id": revision_run_id,
+                "created_at": now.isoformat(),
+                "expires_at": (now + timedelta(minutes=30)).isoformat(),
+                "explanation_ru": (
+                    str(proposal_value["explanation_ru"])
+                    + f" Оператор изменил размер корректировки до {relative_step_percent}%."
+                ),
+            }
+        )
+        revised_value["expected_diff"] = {
+            **dict(expected_diff),
+            "relative_step_percent": relative_step_percent,
+        }
+        recommendation_rules = pending["decision"]["recommendation_rules"]
+        projection = build_sanitized_projection(
+            _projection_source(snapshot),
+            recommendation_policy(self.policy, recommendation_rules),
+        )
+        revised_proposal = OptimizationProposalV1.from_mapping(
+            revised_value,
+            projection,
+        )
+        revised_value = revised_proposal.as_dict()
+        proposal_hash = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    revised_value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        prepared, step = _prepare_simulated_change(
+            policy=self.policy,
+            snapshot=snapshot,
+            proposal=revised_proposal,
+            proposal_hash=proposal_hash,
+        )
+        execution = _pending_authority_execution(
+            revised_proposal,
+            prepared,
+            step,
+            status="PENDING_APPROVAL",
+            reason_code="EXACT_APPROVAL_REQUIRED",
+        )
+        source_directory = self.runs_root / run_id
+        run_directory = self.runs_root / revision_run_id
+        run_directory.mkdir(parents=True, exist_ok=False)
+        shutil.copytree(
+            source_directory / "components",
+            run_directory / "components",
+        )
+        report = deepcopy(pending)
+        report.update(
+            {
+                "run_id": revision_run_id,
+                "source_run_id": run_id,
+                "created_at": now.isoformat(),
+                "recommendation": {
+                    **pending["recommendation"],
+                    "proposal_id": revised_proposal.proposal_id,
+                    "relative_step_percent": relative_step_percent,
+                    "explanation_ru": revised_proposal.explanation_ru,
+                },
+                "execution": execution,
+                "safety": {
+                    **pending["safety"],
+                    "approval": "PENDING",
+                    "executor_invoked": False,
+                },
+                "artifacts": {
+                    "json": f"/api/runs/{revision_run_id}",
+                    "html": f"/api/runs/{revision_run_id}/report",
+                },
+            }
+        )
+        report["decision"] = {
+            **pending["decision"],
+            "reason": (
+                f"Оператор изменил размер корректировки с "
+                f"{pending['recommendation']['relative_step_percent']}% "
+                f"до {relative_step_percent}%. "
+                + str(pending["recommendation"]["explanation_ru"])
+            ),
+            "operator_revision": {
+                "source_run_id": run_id,
+                "relative_step_percent": relative_step_percent,
+            },
+        }
+        (run_directory / "ui-report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        (run_directory / "ui-report.html").write_text(
+            _report_html(report),
+            encoding="utf-8",
+        )
+        (run_directory / "proposal.json").write_text(
+            json.dumps(
+                revised_value,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        source_result = _read_json(source_directory / "result.json")
+        self._write_normative_evidence(
+            run_directory=run_directory,
+            report=report,
+            snapshot=snapshot,
+            provider={
+                "provider": source_result["provider"],
+                "model_id": source_result["model_id"],
+                "input_tokens": source_result["input_tokens"],
+                "output_tokens": source_result["output_tokens"],
+                "cost_rub": source_result["cost_rub"],
+                "duration_ms": source_result["duration_ms"],
+            },
+        )
+        self.automation_store.record_report(report)
+        return report
+
     def approve_pending_run(self, run_id: str) -> dict[str, Any]:
         """Consume an existing exact Approval and execute it in a new run."""
 
@@ -1831,7 +2009,7 @@ class UiRunService:
         report["decision"] = {
             **pending.get("decision", {}),
             "reason": (
-                "Точный одноразовый Approval подтверждён оператором. "
+                "Предложение подтверждено пользователем. "
                 + str(pending["recommendation"]["explanation_ru"])
             ),
         }

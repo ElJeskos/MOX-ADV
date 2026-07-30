@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
-from typing import Any, Mapping, Optional, Protocol, Union
+from typing import Any, Protocol, Union
 
 
 class CommandRejected(ValueError):
@@ -34,10 +35,10 @@ class ActionSpec:
     family: ActionFamily
     service: str
     method: str
-    relative_percent: Optional[int] = None
-    source_state: Optional[str] = None
-    target_state: Optional[str] = None
-    rollback_action: Optional[OptimizationAction] = None
+    relative_percent: int | None = None
+    source_state: str | None = None
+    target_state: str | None = None
+    rollback_action: OptimizationAction | None = None
 
 
 ACTION_SPECS = {
@@ -183,7 +184,7 @@ def calculate_relative_target(current_value: int, percent: int) -> int:
     multiplier = Decimal(100 + percent) / Decimal(100)
     return int(
         (Decimal(current_value) * multiplier).quantize(
-            Decimal("1"),
+            Decimal(1),
             rounding=ROUND_HALF_UP,
         )
     )
@@ -212,10 +213,20 @@ def build_high_level_command(
     if spec.relative_percent is not None:
         if isinstance(current, bool) or not isinstance(current, int):
             raise CommandRejected("INVALID_INPUT: current numeric value is invalid.")
-        exact_target = calculate_relative_target(current, spec.relative_percent)
+        relative_step = diff.get("relative_step_percent")
+        if (
+            isinstance(relative_step, bool)
+            or not isinstance(relative_step, int)
+            or not 1 <= relative_step <= abs(spec.relative_percent)
+        ):
+            raise CommandRejected("INVALID_INPUT: numeric step is not exact.")
+        signed_step = (
+            relative_step if spec.relative_percent > 0 else -relative_step
+        )
+        exact_target = calculate_relative_target(current, signed_step)
         if target != exact_target or diff != {
             "operation": action,
-            "relative_step_percent": 10,
+            "relative_step_percent": relative_step,
         }:
             raise CommandRejected("INVALID_INPUT: numeric diff is not exact.")
         if exact_target < minimum_value or exact_target > maximum_value:

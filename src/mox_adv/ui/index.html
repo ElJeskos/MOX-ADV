@@ -4,130 +4,124 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
-    <title>MOX-ADV Control</title>
+    <title>MOX-ADV — управление рекламой</title>
     <link rel="stylesheet" href="/assets/app.css">
     <script src="/assets/app.js" defer></script>
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
+    <header class="app-header">
+      <a class="brand" href="/overview" data-nav>
         <span class="brand-mark" aria-hidden="true">M</span>
         <span>MOX-ADV</span>
-        <span class="brand-section">Control</span>
-      </div>
+      </a>
+      <nav class="main-nav" aria-label="Основная навигация">
+        <a href="/overview" data-nav data-page-link="overview">Обзор</a>
+        <a href="/cycle" data-nav data-page-link="cycle">Запуск цикла</a>
+        <a href="/autopilot" data-nav data-page-link="autopilot">Автопилот</a>
+        <a href="/rules" data-nav data-page-link="rules">Правила</a>
+        <a href="/history" data-nav data-page-link="history">История</a>
+        <a href="/workflows" data-nav data-page-link="workflows">Сценарии</a>
+        <a href="/control" data-nav data-page-link="control">Контроль</a>
+      </nav>
       <div class="service-state" id="service-state">
         <span class="state-dot" aria-hidden="true"></span>
-        <span>Локальный контур</span>
+        <span>Система готова</span>
       </div>
     </header>
 
-    <main class="shell">
+    <section class="page overview-page" data-page="overview" aria-labelledby="overview-title">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">Состояние системы</p>
+          <h1 id="overview-title">Управление рекламой</h1>
+          <p>Директ и Метрика объединены в один цикл анализа и принятия решений.</p>
+        </div>
+        <a class="primary-link" href="/cycle" data-nav>Запустить цикл</a>
+      </div>
+      <div class="overview-status">
+        <div>
+          <span>Автопилот</span>
+          <strong id="overview-automation-state">Выключен</strong>
+          <small id="overview-next-run">Запуски не запланированы</small>
+        </div>
+        <div>
+          <span>Последнее решение</span>
+          <strong id="overview-last-decision">Решений пока нет</strong>
+          <small id="overview-last-run">Запустите первый цикл вручную</small>
+        </div>
+        <div>
+          <span>Источники</span>
+          <strong>Яндекс Директ + Метрика</strong>
+          <small>Связанные данные одной кампании</small>
+        </div>
+      </div>
+      <div class="overview-actions">
+        <a href="/autopilot" data-nav>Настроить автопилот <span>→</span></a>
+        <a href="/history" data-nav>Посмотреть историю решений <span>→</span></a>
+      </div>
+    </section>
+
+    <main class="page shell" data-page="cycle">
       <aside class="controls" aria-labelledby="control-title">
         <div>
-          <p class="eyebrow">Управление запуском</p>
-          <h1 id="control-title">Один запуск.<br>Два источника.</h1>
+          <p class="eyebrow">Ручной запуск</p>
+          <h1 id="control-title">Получить предложение</h1>
           <p class="lede">
-            Директ и Метрика проходят единый анализ, решение и контроль применения.
+            Система проанализирует кампанию. Вы сможете изменить предложение до применения.
           </p>
         </div>
 
         <div class="mode-switch" role="tablist" aria-label="Режим запуска">
           <button
-            class="mode-button"
+            class="mode-button is-active"
             id="mode-test"
             role="tab"
-            aria-selected="false"
+            aria-selected="true"
             data-mode="test"
           >
             Тестовый
           </button>
           <button
-            class="mode-button is-active"
+            class="mode-button"
             id="mode-production"
             role="tab"
-            aria-selected="true"
+            aria-selected="false"
             data-mode="production"
           >
             Основной
           </button>
         </div>
 
-        <div class="operating-mode-control">
-          <p class="eyebrow">Контур исполнения</p>
-          <div
-            class="operating-modes"
-            id="operating-modes"
-            role="group"
-            aria-label="Операционный режим"
-          >
-            <button
-              class="operating-mode is-active"
-              type="button"
-              data-operating-mode="OBSERVE"
-              aria-pressed="true"
-            >
-              OBSERVE
-            </button>
-            <button
-              class="operating-mode"
-              type="button"
-              data-operating-mode="RECOMMEND"
-              aria-pressed="false"
-            >
-              RECOMMEND
-            </button>
-            <button
-              class="operating-mode"
-              type="button"
-              data-operating-mode="APPROVAL_REQUIRED"
-              aria-pressed="false"
-            >
-              APPROVAL REQUIRED
-            </button>
-            <button
-              class="operating-mode"
-              type="button"
-              data-operating-mode="BOUNDED_AUTONOMY"
-              aria-pressed="false"
-            >
-              BOUNDED AUTONOMY
-            </button>
-          </div>
-          <p class="operating-mode-note" id="operating-mode-note">
-            Только сбор связанных данных и объяснение. Proposal и executor не запускаются.
-          </p>
-        </div>
-
         <section class="mode-context" aria-live="polite">
           <div class="mode-heading">
             <span class="mode-indicator" id="mode-indicator"></span>
-            <strong id="mode-name">Основной контур</strong>
+            <strong id="mode-name">Тестовые данные</strong>
           </div>
           <p id="mode-description">
-            Read-only анализ реальных данных Яндекс.Директа и Метрики. Рекомендация формируется без approval и применения.
+            Укажите показатели кампании и посмотрите, какое решение примет система.
           </p>
           <ul class="source-list" id="source-list">
-            <li><span>Директ</span><strong>Production API · read-only</strong></li>
-            <li><span>Метрика</span><strong>Production API · read-only</strong></li>
-            <li><span>Изменения</span><strong>Запрещены</strong></li>
+            <li><span>Директ</span><strong>Тестовые данные</strong></li>
+            <li><span>Метрика</span><strong>Тестовые данные</strong></li>
+            <li><span>Кампания</span><strong>Без реальных изменений</strong></li>
           </ul>
         </section>
 
         <button class="run-button" id="run-button" type="button">
-          <span id="run-button-label">Запустить read-only анализ</span>
+          <span id="run-button-label">Получить предложение</span>
           <span class="button-arrow" aria-hidden="true">↗</span>
         </button>
 
         <p class="control-note" id="control-note">
-          Executor и approval отключены. Любые внешние write-запросы запрещены.
+          После анализа вы сможете изменить предложение и решить, применять ли его.
         </p>
       </aside>
 
       <section class="workspace" aria-labelledby="workspace-title">
         <div class="workspace-head">
           <div>
-            <p class="eyebrow">Текущий запуск</p>
-            <h2 id="workspace-title">Готов к анализу</h2>
+            <p class="eyebrow">Результат цикла</p>
+            <h2 id="workspace-title">Готов к запуску</h2>
           </div>
           <span class="run-status is-idle" id="run-status">Ожидание</span>
         </div>
@@ -150,7 +144,7 @@
           </li>
           <li data-step="recommend">
             <span class="step-number">04</span>
-            <span>Решение</span>
+            <span>Предложение</span>
             <span class="step-state">Ожидает</span>
           </li>
           <li data-step="apply">
@@ -164,7 +158,7 @@
           <div class="signal" aria-hidden="true">
             <span></span><span></span><span></span><span></span><span></span>
           </div>
-          <p>После запуска здесь появятся метрики, рекомендация и статус границы исполнения.</p>
+          <p>После запуска здесь появятся основные метрики и предложение по кампании.</p>
         </div>
 
         <section class="report" id="report" hidden aria-live="polite">
@@ -177,7 +171,7 @@
 
           <div class="decision">
             <div>
-              <p class="eyebrow">Рекомендация</p>
+              <p class="eyebrow">Предложение системы</p>
               <h3 id="decision-title">—</h3>
               <p id="decision-copy">—</p>
             </div>
@@ -189,14 +183,35 @@
 
           <div class="execution">
             <div>
-              <p class="eyebrow" id="execution-label">Граница исполнения</p>
+              <p class="eyebrow" id="execution-label">Результат</p>
               <p class="execution-line" id="execution-line">—</p>
             </div>
             <div class="safety-proof">
               <span class="proof-dot" aria-hidden="true"></span>
-              <span id="safety-copy">Внешняя запись отсутствует</span>
+              <span id="safety-copy">Изменения ещё не применены</span>
             </div>
           </div>
+
+          <section class="proposal-review" id="proposal-review" hidden>
+            <div>
+              <p class="eyebrow">Ваше решение</p>
+              <h4>Согласуйте размер изменения</h4>
+              <p>Можно принять предложение как есть или уменьшить шаг перед применением.</p>
+            </div>
+            <label class="proposal-step-field">
+              <span>Размер изменения</span>
+              <span><input id="proposal-step" type="number" min="1" max="10" value="10">%</span>
+            </label>
+            <div class="proposal-actions">
+              <button class="secondary-button" id="revise-proposal" type="button">
+                Сохранить правки
+              </button>
+              <button class="run-button compact" id="accept-proposal" type="button">
+                Согласиться и применить
+              </button>
+            </div>
+            <p class="automation-message" id="proposal-message" aria-live="polite"></p>
+          </section>
 
           <div class="report-actions">
             <a id="download-report" href="#" download>Скачать отчёт HTML</a>
@@ -214,20 +229,19 @@
       </section>
     </main>
 
-    <section class="operator-console" aria-label="Управление полным циклом">
+    <section class="page operator-console" data-page="control" aria-label="Управление безопасностью">
       <div class="operator-console-head">
         <div>
-          <p class="eyebrow">Safety control plane</p>
-          <h2>Полномочия и аварийная остановка</h2>
+          <p class="eyebrow">Безопасность</p>
+          <h2>Аварийная остановка</h2>
         </div>
         <p>
-          Approval, Mandate и kill switch остаются server-side объектами.
-          Интерфейс показывает точную область действия и не принимает секреты.
+          Здесь можно немедленно остановить применение любых новых изменений.
         </p>
       </div>
 
       <div class="authority-layout">
-        <section class="authority-panel" aria-labelledby="approval-title">
+        <section class="authority-panel" aria-labelledby="approval-title" hidden>
           <div class="panel-head">
             <div>
               <p class="eyebrow">Одноразовое полномочие</p>
@@ -255,7 +269,7 @@
           </div>
         </section>
 
-        <section class="authority-panel" aria-labelledby="mandate-title">
+        <section class="authority-panel" aria-labelledby="mandate-title" hidden>
           <div class="panel-head">
             <div>
               <p class="eyebrow">Ограниченная автономия</p>
@@ -282,21 +296,21 @@
         <section class="authority-panel kill-panel" aria-labelledby="kill-title">
           <div class="panel-head">
             <div>
-              <p class="eyebrow">Incident control</p>
-              <h3 id="kill-title">Kill switch</h3>
+              <p class="eyebrow">Экстренное управление</p>
+              <h3 id="kill-title">Остановить изменения</h3>
             </div>
             <span class="automation-state" id="kill-state">Снят</span>
           </div>
           <p class="panel-copy">
-            Блокирует следующую ещё не отправленную команду во всех выбранных scope.
+            Новые изменения не будут отправляться, пока блокировка не снята.
           </p>
           <label class="interval-field">
-            <span>Scope</span>
+            <span>Область действия</span>
             <select id="kill-scope">
-              <option value="global">Global</option>
-              <option value="organization">Organization</option>
-              <option value="connection">Connection</option>
-              <option value="campaign">Campaign</option>
+              <option value="global">Вся система</option>
+              <option value="organization">Организация</option>
+              <option value="connection">Подключение</option>
+              <option value="campaign">Кампания</option>
             </select>
           </label>
           <label class="interval-field">
@@ -316,8 +330,8 @@
       <p class="automation-message" id="control-plane-message" aria-live="polite"></p>
     </section>
 
-    <section class="test-lab" id="test-lab" hidden aria-labelledby="test-lab-title">
-      <div class="test-lab-head">
+    <section class="page-fragments test-lab" id="test-lab" aria-labelledby="test-lab-title">
+      <div class="test-lab-head" hidden>
         <div>
           <p class="eyebrow">Тестовый полигон</p>
           <h2 id="test-lab-title">Сценарий и автопилот</h2>
@@ -329,11 +343,11 @@
       </div>
 
       <div class="lab-grid">
-        <section class="lab-panel scenario-panel" aria-labelledby="scenario-title">
+        <section class="page lab-panel scenario-panel" data-page="cycle" aria-labelledby="scenario-title">
           <div class="panel-head">
             <div>
-              <p class="eyebrow">Входные данные</p>
-              <h3 id="scenario-title">Метрики тестовой кампании</h3>
+              <p class="eyebrow">Тестовые данные</p>
+              <h3 id="scenario-title">Показатели кампании</h3>
             </div>
             <span class="panel-index">01</span>
           </div>
@@ -363,11 +377,11 @@
               <input id="scenario-budget" type="number" min="1" value="2000">
             </label>
             <label>
-              <span>Baseline: расход, ₽</span>
+              <span>Для сравнения: расход, ₽</span>
               <input id="scenario-baseline-spend" type="number" min="0" value="1800">
             </label>
             <label>
-              <span>Baseline: конверсии</span>
+              <span>Для сравнения: конверсии</span>
               <input id="scenario-baseline-conversions" type="number" min="0" value="10">
             </label>
             <label>
@@ -375,15 +389,15 @@
               <input id="scenario-expected-spend" type="number" min="1" value="1600">
             </label>
             <label>
-              <span>Baseline impressions</span>
+              <span>Для сравнения: показы</span>
               <input id="scenario-baseline-impressions" type="number" min="1" value="10000">
             </label>
             <label>
-              <span>Baseline clicks</span>
+              <span>Для сравнения: клики</span>
               <input id="scenario-baseline-clicks" type="number" min="0" value="100">
             </label>
             <label>
-              <span>Baseline visits</span>
+              <span>Для сравнения: визиты</span>
               <input id="scenario-baseline-visits" type="number" min="1" value="100">
             </label>
             <label>
@@ -395,7 +409,7 @@
               <input id="scenario-source-mismatch" type="number" min="0" value="0">
             </label>
             <label>
-              <span>Возраст Direct, минут</span>
+              <span>Задержка данных Директа, минут</span>
               <input id="scenario-direct-age" type="number" min="0" value="1">
             </label>
             <label>
@@ -403,7 +417,7 @@
               <input id="scenario-metrika-age" type="number" min="0" value="1">
             </label>
             <label>
-              <span>Разница watermarks, минут</span>
+              <span>Разница времени данных, минут</span>
               <input id="scenario-watermark-skew" type="number" min="0" value="0">
             </label>
             <label>
@@ -421,11 +435,11 @@
           <div class="derived-preview" id="derived-preview" aria-live="polite"></div>
         </section>
 
-        <section class="lab-panel automation-panel" aria-labelledby="automation-title">
+        <section class="page lab-panel automation-panel" data-page="autopilot" aria-labelledby="automation-title">
           <div class="panel-head">
             <div>
-              <p class="eyebrow">Проактивный цикл</p>
-              <h3 id="automation-title">Тестовый автопилот</h3>
+              <p class="eyebrow">Автоматическое управление</p>
+              <h3 id="automation-title">Автопилот</h3>
             </div>
             <span class="automation-state" id="automation-state">Выключен</span>
           </div>
@@ -479,7 +493,7 @@
             <div class="rule-row">
               <label class="rule-toggle">
                 <input id="rule-pacing-enabled" type="checkbox" checked>
-                <span>Опережение pacing</span>
+                <span>Расход опережает план</span>
               </label>
               <label><span>Pacing ≥, %</span><input id="rule-pacing-threshold" type="number" min="120" value="120"></label>
             </div>
@@ -492,7 +506,7 @@
               <label><span>Отклонение ≥, %</span><input id="rule-ctr-threshold" type="number" min="30" value="30"></label>
             </div>
             <div class="rule-row">
-              <label class="rule-toggle"><input id="rule-cvr-enabled" type="checkbox" checked><span>Отклонение conversion rate</span></label>
+              <label class="rule-toggle"><input id="rule-cvr-enabled" type="checkbox" checked><span>Отклонение конверсии</span></label>
               <label><span>Отклонение ≥, %</span><input id="rule-cvr-threshold" type="number" min="30" value="30"></label>
             </div>
             <div class="rule-row">
@@ -506,19 +520,19 @@
             </div>
             <div class="rule-row">
               <label class="rule-toggle"><input id="rule-external-enabled" type="checkbox" checked><span>Внешнее изменение</span></label>
-              <span>Любое неизвестное изменение блокирует write.</span>
+              <span>Любое неизвестное изменение останавливает применение.</span>
             </div>
             <div class="rule-row">
-              <label class="rule-toggle"><input id="rule-freshness-enabled" type="checkbox" checked><span>Freshness и watermarks</span></label>
-              <label><span>Direct ≤, мин</span><input id="rule-direct-freshness" type="number" min="1" max="30" value="30"></label>
+              <label class="rule-toggle"><input id="rule-freshness-enabled" type="checkbox" checked><span>Актуальность данных</span></label>
+              <label><span>Директ: задержка ≤, мин</span><input id="rule-direct-freshness" type="number" min="1" max="30" value="30"></label>
               <label><span>Метрика ≤, мин</span><input id="rule-metrika-freshness" type="number" min="1" max="360" value="360"></label>
-              <label><span>Watermark ≤, мин</span><input id="rule-watermark-freshness" type="number" min="1" max="360" value="360"></label>
+              <label><span>Разница времени ≤, мин</span><input id="rule-watermark-freshness" type="number" min="1" max="360" value="360"></label>
             </div>
           </div>
 
           <p class="safety-note">
-            Редактируемые правила могут только ужесточать Gate 0.
-            В тестовом режиме применение выполняется исключительно через sealed fake.
+            Настройки ограничены безопасными пределами.
+            В тестовом режиме реальные рекламные кампании не изменяются.
           </p>
           <div class="automation-actions">
             <button class="secondary-button" id="save-automation" type="button">
@@ -533,18 +547,22 @@
         </section>
       </div>
 
-      <section class="recommendation-guide" aria-labelledby="recommendation-guide-title">
+      <section class="page recommendation-guide" data-page="rules" aria-labelledby="recommendation-guide-title">
         <div class="guide-head">
           <div>
-            <p class="eyebrow">Логика тестового решения</p>
-            <h2 id="recommendation-guide-title">Справочник рекомендаций</h2>
+            <p class="eyebrow">Логика решений</p>
+            <h2 id="recommendation-guide-title">Правила автопилота</h2>
           </div>
           <p>
-            Пороговые значения участвуют в следующем ручном или автоматическом цикле.
-            Gate 0 проверяет предложенное действие отдельно и может остановить применение.
+            Настройте, когда запускать анализ и при каких показателях менять кампанию.
           </p>
         </div>
 
+        <div class="trigger-rules-host" id="trigger-rules-host">
+          <h3>Когда запускать цикл</h3>
+        </div>
+
+        <h3 class="threshold-title">Как выбирать решение</h3>
         <div class="threshold-editor">
           <label>
             <span>Минимум кликов</span>
@@ -582,8 +600,7 @@
 
         <div class="guide-actions">
           <p>
-            Значения можно только ужесточать относительно Gate 0.
-            Изменённая логика действует только в тестовом контуре.
+            Значения не могут выходить за безопасные ограничения системы.
           </p>
           <button class="secondary-button" id="save-recommendation-rules" type="button">
             Сохранить логику
@@ -606,7 +623,7 @@
         </div>
       </section>
 
-      <section class="history-panel" aria-labelledby="history-title">
+      <section class="page history-panel" data-page="history" aria-labelledby="history-title">
         <div class="panel-head">
           <div>
             <p class="eyebrow">Журнал решений</p>
@@ -620,15 +637,14 @@
       </section>
     </section>
 
-    <section class="workflow-console" aria-labelledby="workflow-title">
+    <section class="page workflow-console" data-page="workflows" aria-labelledby="workflow-title">
       <div class="operator-console-head">
         <div>
-          <p class="eyebrow">Controlled workflows</p>
-          <h2 id="workflow-title">Campaign и Goal lifecycle</h2>
+          <p class="eyebrow">Тестовые сценарии</p>
+          <h2 id="workflow-title">Кампания и цель Метрики</h2>
         </div>
         <p>
-          Подготовка структуры, точный diff, reservation, readback и cleanup.
-          Без production authority выполняется только локальная симуляция.
+          Отдельно проверьте создание кампании и настройку цели на безопасных данных.
         </p>
       </div>
 
@@ -642,7 +658,7 @@
             <span class="panel-index">01</span>
           </div>
           <p class="panel-copy">
-            Campaign → ad group → два объявления → keyword → moderation → launch → readback.
+            Создание структуры, модерация, запуск и проверка результата.
           </p>
           <div class="workflow-steps" id="campaign-workflow-steps"></div>
           <button class="secondary-button" id="run-campaign-workflow" type="button">
@@ -659,7 +675,7 @@
             <span class="panel-index">02</span>
           </div>
           <p class="panel-copy">
-            Candidate → test counter → site event → reachGoal → polling → human semantic decision.
+            Создание цели, тестовое событие и подтверждение бизнес-смысла.
           </p>
           <div class="workflow-steps" id="goal-workflow-steps"></div>
           <div class="inline-actions">
@@ -678,14 +694,14 @@
       <p class="automation-message" id="workflow-message" aria-live="polite"></p>
     </section>
 
-    <section class="impact-console" aria-labelledby="impact-title">
+    <section class="page impact-console" data-page="history" aria-labelledby="impact-title">
       <div class="operator-console-head">
         <div>
-          <p class="eyebrow">Post-change observation</p>
-          <h2 id="impact-title">Impact evaluation</h2>
+          <p class="eyebrow">Проверка результата</p>
+          <h2 id="impact-title">Что изменилось после решения</h2>
         </div>
         <p>
-          Сравнение baseline и post-change периода с confidence, evidence и одним следующим решением.
+          Сравните период до и после изменения и выберите следующий шаг.
         </p>
       </div>
       <div class="impact-layout">
@@ -703,24 +719,24 @@
         </button>
         <div class="impact-result" id="impact-result" aria-live="polite">
           <span>Следующее решение</span>
-          <strong>Ожидает observation window</strong>
+          <strong>Ожидает данных после изменения</strong>
           <p>Запустите один из фиксированных сценариев.</p>
         </div>
       </div>
     </section>
 
-    <section class="evidence-console" aria-labelledby="evidence-title">
+    <section class="page evidence-console" data-page="control" aria-labelledby="evidence-title">
       <div class="operator-console-head">
         <div>
-          <p class="eyebrow">Acceptance evidence</p>
-          <h2 id="evidence-title">Evidence и готовность Gate</h2>
+          <p class="eyebrow">Самопроверка</p>
+          <h2 id="evidence-title">Готовность системы</h2>
         </div>
         <div class="evidence-actions">
           <button class="secondary-button" id="refresh-evidence" type="button">
-            Обновить evidence
+            Обновить статус
           </button>
           <button class="run-button compact" id="run-full-evidence" type="button">
-            Запустить полный тестовый контур
+            Проверить весь тестовый цикл
           </button>
         </div>
       </div>
@@ -757,7 +773,7 @@
 
     <footer>
       <span>127.0.0.1 · локальный операторский интерфейс</span>
-      <span>Основной режим · только чтение</span>
+      <span>Директ + Метрика · единый цикл управления</span>
     </footer>
   </body>
 </html>

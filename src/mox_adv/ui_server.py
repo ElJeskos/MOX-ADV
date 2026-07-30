@@ -19,6 +19,13 @@ from mox_adv.ui_workflows import DashboardWorkflowRejected
 ASSET_ROOT = Path(__file__).with_name("ui")
 _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
+    "/overview": ("index.html", "text/html; charset=utf-8"),
+    "/cycle": ("index.html", "text/html; charset=utf-8"),
+    "/autopilot": ("index.html", "text/html; charset=utf-8"),
+    "/rules": ("index.html", "text/html; charset=utf-8"),
+    "/history": ("index.html", "text/html; charset=utf-8"),
+    "/workflows": ("index.html", "text/html; charset=utf-8"),
+    "/control": ("index.html", "text/html; charset=utf-8"),
     "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
@@ -149,6 +156,7 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             "/api/control-plane/kill-switch",
             "/api/control-plane/mandates",
             "/api/control-plane/approvals",
+            "/api/proposals/revise",
             "/api/workflows/campaign",
             "/api/workflows/goal",
             "/api/workflows/impact",
@@ -165,45 +173,19 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/runs":
                 payload = self._read_json()
                 mode = str(payload.get("mode", ""))
-                operating_mode = payload.get("operating_mode")
-                mandate_id = None
-                if operating_mode == "BOUNDED_AUTONOMY":
-                    mandate_id = next(
-                        (
-                            str(item["mandate_id"])
-                            for item in self.server.dashboard.control_overview()[
-                                "mandates"
-                            ]
-                            if item["status"] == "ACTIVE"
-                        ),
-                        None,
-                    )
                 if mode == "test":
-                    if operating_mode is None:
-                        report = self.server.service.run(
-                            mode,
-                            scenario=payload.get("scenario"),
-                            rules=payload.get("rules"),
-                            recommendation_rules=payload.get("recommendation_rules"),
-                        )
-                    else:
-                        report = self.server.service.run(
-                            mode,
-                            scenario=payload.get("scenario"),
-                            rules=payload.get("rules"),
-                            recommendation_rules=payload.get("recommendation_rules"),
-                            operating_mode=str(operating_mode),
-                            mandate_id=mandate_id,
-                        )
+                    report = self.server.service.run(
+                        mode,
+                        scenario=payload.get("scenario"),
+                        rules=payload.get("rules"),
+                        recommendation_rules=payload.get("recommendation_rules"),
+                        operating_mode="APPROVAL_REQUIRED",
+                    )
                 else:
-                    if operating_mode is None:
-                        report = self.server.service.run(mode)
-                    else:
-                        report = self.server.service.run(
-                            mode,
-                            operating_mode=str(operating_mode),
-                            mandate_id=mandate_id,
-                        )
+                    report = self.server.service.run(
+                        mode,
+                        operating_mode="RECOMMEND",
+                    )
                 self._send_json(HTTPStatus.CREATED, report)
                 return
             if path == "/api/control-plane/mode":
@@ -250,6 +232,15 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                     )
                 else:
                     raise ValueError("APPROVAL_ACTION_INVALID")
+            elif path == "/api/proposals/revise":
+                payload = self._read_json()
+                step = payload.get("relative_step_percent")
+                if isinstance(step, bool) or not isinstance(step, int):
+                    raise ValueError("PROPOSAL_REVISION_STEP_REQUIRED")
+                result = self.server.dashboard.revise_pending_proposal(
+                    str(payload.get("run_id", "")),
+                    step,
+                )
             elif path == "/api/workflows/campaign":
                 result = self.server.dashboard.run_campaign_simulation()
             elif path == "/api/workflows/goal":
@@ -310,7 +301,9 @@ class UiRequestHandler(BaseHTTPRequestHandler):
         if not self._allow_json_mutation():
             return
         try:
-            settings = self.server.service.configure_automation(self._read_json())
+            settings = self.server.dashboard.configure_test_automation(
+                self._read_json()
+            )
         except UiRunRejected as error:
             self._send_error(
                 HTTPStatus.BAD_REQUEST,

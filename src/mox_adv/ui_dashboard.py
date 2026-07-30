@@ -145,7 +145,7 @@ class DashboardApplication:
                 self.mandate_authority,
             )
             self.run_service.configure_operating_mode_provider(
-                lambda: str(self.control.operating_mode()["selected"])
+                lambda: "BOUNDED_AUTONOMY"
             )
         self.workflows = DashboardWorkflowFacade(
             runs_root=self.runs_root,
@@ -239,6 +239,32 @@ class DashboardApplication:
             now,
         )
 
+    def configure_test_automation(
+        self,
+        value: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Enable one autonomous policy without exposing authority modes."""
+
+        if self.run_service is None:
+            raise ValueError("UI_RUN_SERVICE_UNAVAILABLE")
+        normalized = dict(value)
+        normalized["mode"] = "test"
+        normalized["operating_mode"] = "BOUNDED_AUTONOMY"
+        if bool(normalized.get("enabled")):
+            active = next(
+                (
+                    item
+                    for item in self.control.list_mandates(
+                        now=datetime.now(timezone.utc)
+                    )
+                    if item["status"] == "ACTIVE"
+                ),
+                None,
+            )
+            if active is None:
+                self.issue_test_mandate()
+        return self.run_service.configure_automation(normalized)
+
     def revoke_latest_mandate(self) -> dict[str, Any]:
         mandates = self.control.list_mandates(now=datetime.now(timezone.utc))
         active = next(
@@ -264,6 +290,18 @@ class DashboardApplication:
             reason="Dashboard operator approved the exact immutable proposal.",
             principal=self.authenticator.authenticate(),
             now=datetime.now(timezone.utc),
+        )
+
+    def revise_pending_proposal(
+        self,
+        run_id: str,
+        relative_step_percent: int,
+    ) -> dict[str, Any]:
+        if self.run_service is None:
+            raise ValueError("UI_RUN_SERVICE_UNAVAILABLE")
+        return self.run_service.revise_pending_run(
+            run_id,
+            relative_step_percent=relative_step_percent,
         )
 
     def revoke_approval(self, approval_id: str) -> dict[str, Any]:

@@ -6,7 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Page, sync_playwright
 
 from mox_adv.control_state import AuthenticatedPrincipal
 from mox_adv.ui_server import build_server
@@ -25,8 +25,19 @@ class StubDashboardAuthenticator:
         return cls.authenticate()
 
 
+def fill_autopilot_safe_scenario(page: Page) -> None:
+    page.locator("#scenario-spend").fill("12000")
+    page.locator("#scenario-conversions").fill("10")
+    page.locator("#scenario-budget").fill("20000")
+    page.locator(".advanced-metrics summary").click()
+    page.locator("#scenario-baseline-spend").fill("10000")
+    page.locator("#scenario-baseline-conversions").fill("10")
+
+
 class UiV2DashboardTests(unittest.TestCase):
-    def test_operator_can_see_every_v2_control_surface(self) -> None:
+    def test_dashboard_uses_separate_desktop_pages_without_operating_modes(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             server = build_server(
                 port=0,
@@ -38,53 +49,66 @@ class UiV2DashboardTests(unittest.TestCase):
             try:
                 with sync_playwright() as playwright:
                     browser = playwright.chromium.launch(headless=True)
-                    page = browser.new_page(viewport={"width": 1440, "height": 1100})
-                    page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
-                        wait_until="networkidle",
-                    )
+                    page = browser.new_page(viewport={"width": 1280, "height": 900})
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    page.goto(f"{base_url}/overview", wait_until="networkidle")
 
-                    self.assertEqual(
-                        [
-                            "OBSERVE",
-                            "RECOMMEND",
-                            "APPROVAL REQUIRED",
-                            "BOUNDED AUTONOMY",
-                        ],
-                        [
-                            value.strip()
-                            for value in page.locator(
-                                "#operating-modes button"
-                            ).all_inner_texts()
-                        ],
-                    )
                     self.assertTrue(
                         page.get_by_role(
                             "heading",
-                            name="Полномочия и аварийная остановка",
+                            name="Управление рекламой",
                         ).is_visible()
                     )
-                    self.assertTrue(
-                        page.get_by_role(
-                            "heading",
-                            name="Campaign и Goal lifecycle",
-                        ).is_visible()
-                    )
-                    self.assertTrue(
-                        page.get_by_role(
-                            "heading",
-                            name="Impact evaluation",
-                        ).is_visible()
-                    )
-                    self.assertTrue(
-                        page.get_by_role(
-                            "heading",
-                            name="Evidence и готовность Gate",
-                        ).is_visible()
-                    )
-                    self.assertEqual(
-                        14,
-                        page.locator("#capability-matrix [data-capability]").count(),
+                    self.assertEqual(7, page.locator(".main-nav a").count())
+                    self.assertEqual(0, page.locator("#operating-modes").count())
+
+                    expected_pages = {
+                        "Запуск цикла": (
+                            "/cycle",
+                            "Получить предложение",
+                        ),
+                        "Автопилот": ("/autopilot", "Автопилот"),
+                        "Правила": ("/rules", "Правила автопилота"),
+                        "История": (
+                            "/history",
+                            "Что было решено и почему",
+                        ),
+                        "Сценарии": (
+                            "/workflows",
+                            "Кампания и цель Метрики",
+                        ),
+                        "Контроль": ("/control", "Аварийная остановка"),
+                    }
+                    for link_name, (path, heading) in expected_pages.items():
+                        page.get_by_role("link", name=link_name, exact=True).click()
+                        self.assertEqual(f"{base_url}{path}", page.url)
+                        self.assertTrue(
+                            page.get_by_role(
+                                "heading",
+                                name=heading,
+                                exact=True,
+                            ).first.is_visible()
+                        )
+                        self.assertEqual(
+                            page.evaluate("window.innerWidth"),
+                            page.evaluate("document.documentElement.scrollWidth"),
+                        )
+
+                    visible_text = page.locator("body").inner_text()
+                    for forbidden in (
+                        "Approval Required",
+                        "Bounded Autonomy",
+                        "OBSERVE",
+                        "RECOMMEND",
+                    ):
+                        self.assertNotIn(forbidden, visible_text)
+                    self.assertLessEqual(
+                        page.locator(".main-nav").evaluate(
+                            "(node) => node.getBoundingClientRect().right"
+                        ),
+                        page.locator(".service-state").evaluate(
+                            "(node) => node.getBoundingClientRect().left"
+                        ),
                     )
                     browser.close()
             finally:
@@ -106,17 +130,6 @@ class UiV2DashboardTests(unittest.TestCase):
 
                     control = request.get("/api/control-plane")
                     self.assertTrue(control.ok)
-                    self.assertEqual(
-                        4,
-                        len(control.json()["operating_modes"]),
-                    )
-                    selected = request.post(
-                        "/api/control-plane/mode",
-                        data={"mode": "RECOMMEND"},
-                    )
-                    self.assertTrue(selected.ok)
-                    self.assertEqual("RECOMMEND", selected.json()["selected"])
-
                     hostile = request.post(
                         "/api/control-plane/mode",
                         headers={
@@ -136,7 +149,9 @@ class UiV2DashboardTests(unittest.TestCase):
                     campaign_run = campaign.json()
                     self.assertEqual("APPLIED", campaign_run["status"])
                     internal_result = request.get(
-                        "/api/evidence-runs/" + campaign_run["run_id"] + "/result.json"
+                        "/api/evidence-runs/"
+                        + campaign_run["run_id"]
+                        + "/result.json"
                     )
                     self.assertEqual(404, internal_result.status)
 
@@ -162,7 +177,7 @@ class UiV2DashboardTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
-    def test_operator_controls_modes_safety_workflows_and_evidence_in_browser(
+    def test_operator_uses_safety_workflows_and_evidence_on_their_pages(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -176,32 +191,18 @@ class UiV2DashboardTests(unittest.TestCase):
             try:
                 with sync_playwright() as playwright:
                     browser = playwright.chromium.launch(headless=True)
-                    page = browser.new_page(viewport={"width": 1440, "height": 1100})
-                    page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
-                        wait_until="networkidle",
-                    )
+                    page = browser.new_page(viewport={"width": 1440, "height": 1000})
+                    base_url = f"http://127.0.0.1:{server.server_port}"
 
-                    page.get_by_role("button", name="RECOMMEND", exact=True).click()
-                    page.get_by_text(
-                        "Proposal создаётся без применения",
-                        exact=False,
-                    ).wait_for()
-                    page.reload(wait_until="networkidle")
-                    self.assertEqual(
-                        "true",
-                        page.get_by_role(
-                            "button",
-                            name="RECOMMEND",
-                            exact=True,
-                        ).get_attribute("aria-pressed"),
-                    )
-
+                    page.goto(f"{base_url}/control", wait_until="networkidle")
                     page.get_by_role(
                         "button",
                         name="Аварийно остановить",
                     ).click()
-                    page.get_by_text("Kill switch активирован", exact=False).wait_for()
+                    page.locator("#control-plane-message").get_by_text(
+                        "Kill switch активирован",
+                        exact=False,
+                    ).wait_for()
                     page.locator("#kill-release-confirmation").fill("RELEASE")
                     page.get_by_role(
                         "button",
@@ -213,11 +214,16 @@ class UiV2DashboardTests(unittest.TestCase):
                     ).wait_for()
 
                     page.get_by_role(
+                        "link",
+                        name="Сценарии",
+                        exact=True,
+                    ).click()
+                    page.get_by_role(
                         "button",
                         name="Запустить безопасную симуляцию",
                     ).click()
                     page.get_by_text(
-                        "Campaign lifecycle завершён: APPLIED",
+                        "Проверка кампании завершена успешно.",
                         exact=True,
                     ).wait_for(timeout=15_000)
                     self.assertEqual(
@@ -230,45 +236,44 @@ class UiV2DashboardTests(unittest.TestCase):
                         name="Проверить технически",
                     ).click()
                     page.get_by_text(
-                        "Техническая проверка VERIFIED",
+                        "Техническая проверка завершена.",
                         exact=False,
                     ).wait_for(timeout=15_000)
-                    self.assertFalse(
-                        page.get_by_role(
-                            "button",
-                            name="Подтвердить смысл",
-                        ).is_disabled()
-                    )
                     page.get_by_role("button", name="Отклонить").click()
                     page.get_by_text(
-                        "Goal lifecycle завершён: REJECTED",
+                        "Проверка цели завершена: цель отклонена.",
                         exact=True,
                     ).wait_for(timeout=15_000)
-                    self.assertEqual(
-                        7,
-                        page.locator("#goal-workflow-steps .workflow-step").count(),
-                    )
 
+                    page.get_by_role(
+                        "link",
+                        name="История",
+                        exact=True,
+                    ).click()
                     page.get_by_label("Сценарий наблюдения").select_option(
                         "IMPACT_CPA_WORSE_ROLLBACK"
                     )
                     page.get_by_role("button", name="Оценить результат").click()
                     page.locator("#impact-result").get_by_text(
-                        "ROLLBACK CHANGE",
+                        "Откатить изменение",
                         exact=True,
                     ).wait_for()
 
                     page.get_by_role(
+                        "link",
+                        name="Контроль",
+                        exact=True,
+                    ).click()
+                    page.get_by_role(
                         "button",
-                        name="Запустить полный тестовый контур",
+                        name="Проверить весь тестовый цикл",
                     ).click()
                     page.get_by_text(
-                        "Полный тестовый контур завершён",
+                        "Самопроверка завершена.",
                         exact=False,
                     ).wait_for(timeout=30_000)
-                    self.assertEqual(
-                        14,
-                        page.locator("#capability-matrix [data-capability]").count(),
+                    self.assertTrue(
+                        page.locator("#evidence-report-download").is_visible()
                     )
                     browser.close()
             finally:
@@ -276,7 +281,82 @@ class UiV2DashboardTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
-    def test_operator_approves_exact_test_proposal_before_fake_execution(
+    def test_operator_edits_and_accepts_manual_proposal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            server = build_server(port=0, runs_root=Path(temporary))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with sync_playwright() as playwright:
+                    browser = playwright.chromium.launch(headless=True)
+                    page = browser.new_page(viewport={"width": 1440, "height": 1000})
+                    page.goto(
+                        f"http://127.0.0.1:{server.server_port}/cycle",
+                        wait_until="networkidle",
+                    )
+
+                    page.get_by_role(
+                        "button",
+                        name="Получить предложение",
+                    ).click()
+                    page.get_by_text(
+                        "Предложение готово и ещё не применено",
+                        exact=True,
+                    ).wait_for()
+                    self.assertEqual("10", page.locator("#proposal-step").input_value())
+                    self.assertEqual("+10%", page.locator("#change-value").inner_text())
+
+                    page.locator("#proposal-step").fill("5")
+                    page.get_by_role(
+                        "button",
+                        name="Сохранить правки",
+                    ).click()
+                    page.get_by_text(
+                        "Правки сохранены. Предложение обновлено.",
+                        exact=True,
+                    ).wait_for()
+                    self.assertEqual("+5%", page.locator("#change-value").inner_text())
+
+                    page.get_by_role(
+                        "button",
+                        name="Согласиться и применить",
+                    ).click()
+                    page.get_by_role(
+                        "heading",
+                        name="Предложение применено",
+                    ).wait_for()
+                    self.assertFalse(page.locator("#proposal-review").is_visible())
+                    self.assertIn(
+                        "2 000 ₽ → 2 100 ₽",
+                        page.locator("#execution-line")
+                        .inner_text()
+                        .replace("\N{NO-BREAK SPACE}", " "),
+                    )
+                    self.assertEqual(1, page.locator(".report-actions a").count())
+                    self.assertIn(
+                        "HTML",
+                        page.locator(".report-actions a").inner_text(),
+                    )
+                    page.get_by_role(
+                        "link",
+                        name="История",
+                        exact=True,
+                    ).click()
+                    latest_reason = (
+                        page.locator("#decision-history article").first.inner_text()
+                    )
+                    self.assertNotIn("Approval", latest_reason)
+                    self.assertIn(
+                        "Предложение подтверждено пользователем",
+                        latest_reason,
+                    )
+                    browser.close()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_autopilot_runs_and_applies_on_schedule_without_mode_switch(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -286,181 +366,41 @@ class UiV2DashboardTests(unittest.TestCase):
             try:
                 with sync_playwright() as playwright:
                     browser = playwright.chromium.launch(headless=True)
-                    page = browser.new_page(viewport={"width": 1440, "height": 1100})
+                    page = browser.new_page(viewport={"width": 1440, "height": 1000})
                     page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
+                        f"http://127.0.0.1:{server.server_port}/cycle",
                         wait_until="networkidle",
                     )
-                    self.assertTrue(
-                        page.get_by_role(
-                            "button",
-                            name="Подтвердить точный proposal",
-                        ).is_disabled()
-                    )
-                    page.get_by_role("tab", name="Тестовый").click()
+                    fill_autopilot_safe_scenario(page)
+
                     page.get_by_role(
-                        "button",
-                        name="APPROVAL REQUIRED",
+                        "link",
+                        name="Автопилот",
+                        exact=True,
                     ).click()
+                    page.get_by_label("Периодичность").select_option("60")
                     page.get_by_role(
                         "button",
-                        name="Запустить тестовый цикл",
+                        name="Включить автопилот",
                     ).click()
                     page.get_by_text(
-                        "Ожидает точного Approval",
+                        "Циклы будут запускаться и применяться автоматически.",
                         exact=False,
                     ).wait_for()
-                    first_proposal = page.locator(
-                        "#approval-facts dd"
-                    ).first.inner_text()
-                    self.assertEqual(
-                        "Не выполняется",
-                        page.locator('[data-step="apply"] .step-state').inner_text(),
-                    )
+                    page.get_by_text("Следующий запуск:", exact=False).wait_for()
 
                     page.get_by_role(
-                        "button",
-                        name="Подтвердить точный proposal",
-                    ).click()
-                    page.get_by_text(
-                        "Точный Approval выдан",
-                        exact=False,
-                    ).wait_for(timeout=15_000)
-                    self.assertEqual(
-                        "AVAILABLE",
-                        page.locator("#approval-state").inner_text(),
-                    )
-                    self.assertNotIn(
-                        "readback",
-                        page.locator("#execution-line").inner_text(),
-                    )
-
-                    page.get_by_role(
-                        "button",
-                        name="Запустить тестовый цикл",
-                    ).click()
-                    page.locator("#approval-state").get_by_text(
-                        "Ожидает решения",
+                        "link",
+                        name="История",
                         exact=True,
-                    ).wait_for(timeout=15_000)
-                    second_proposal = page.locator(
-                        "#approval-facts dd"
-                    ).first.inner_text()
-                    self.assertNotEqual(first_proposal, second_proposal)
-                    self.assertTrue(
-                        page.get_by_role(
-                            "button",
-                            name="Применить подтверждённое",
-                        ).is_disabled()
-                    )
-                    self.assertFalse(
-                        page.get_by_role(
-                            "button",
-                            name="Подтвердить точный proposal",
-                        ).is_disabled()
-                    )
-
-                    page.get_by_role(
-                        "button",
-                        name="Подтвердить точный proposal",
                     ).click()
-                    page.get_by_text(
-                        "Точный Approval выдан",
-                        exact=False,
-                    ).wait_for(timeout=15_000)
-                    page.locator("#revoke-approval").click()
-                    page.get_by_text(
-                        "Approval отозван",
-                        exact=False,
-                    ).wait_for(timeout=15_000)
-                    self.assertEqual(
-                        "REVOKED",
-                        page.locator("#approval-state").inner_text(),
-                    )
-
-                    page.get_by_role(
-                        "button",
-                        name="Подтвердить точный proposal",
-                    ).click()
-                    page.get_by_text(
-                        "Точный Approval выдан",
-                        exact=False,
-                    ).wait_for(timeout=15_000)
-                    page.get_by_role(
-                        "button",
-                        name="Применить подтверждённое",
-                    ).click()
-                    page.get_by_text(
-                        "Точный Approval использован",
-                        exact=False,
-                    ).wait_for(timeout=15_000)
-                    self.assertIn(
-                        "readback",
-                        page.locator("#execution-line").inner_text(),
-                    )
-                    browser.close()
-            finally:
-                server.shutdown()
-                thread.join(timeout=5)
-                server.server_close()
-
-    def test_operator_runs_bounded_test_cycle_with_active_mandate(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            server = build_server(port=0, runs_root=Path(temporary))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                with sync_playwright() as playwright:
-                    browser = playwright.chromium.launch(headless=True)
-                    page = browser.new_page(viewport={"width": 1440, "height": 1100})
-                    page.goto(
-                        f"http://127.0.0.1:{server.server_port}",
-                        wait_until="networkidle",
-                    )
-                    page.get_by_role("tab", name="Тестовый").click()
-                    page.get_by_role(
-                        "button",
-                        name="Выдать тестовый Mandate",
-                    ).click()
-                    page.get_by_text("Mandate активирован", exact=False).wait_for()
-                    page.get_by_role(
-                        "button",
-                        name="BOUNDED AUTONOMY",
-                    ).click()
-
-                    values = {
-                        "scenario-impressions": "5000",
-                        "scenario-clicks": "100",
-                        "scenario-conversions": "3",
-                        "scenario-visits": "100",
-                        "scenario-spend": "4000",
-                        "scenario-budget": "10000",
-                        "scenario-baseline-spend": "3000",
-                        "scenario-baseline-conversions": "3",
-                    }
-                    for element_id, value in values.items():
-                        page.locator(f"#{element_id}").fill(value)
-
-                    page.get_by_role(
-                        "button",
-                        name="Запустить тестовый цикл",
-                    ).click()
-                    page.locator("#execution-line").get_by_text(
-                        "readback",
-                        exact=False,
-                    ).wait_for(timeout=15_000)
-                    self.assertIn(
-                        "Уменьшить поисковую ставку",
-                        page.locator("#decision-title").inner_text(),
-                    )
-                    self.assertIn(
-                        "readback",
-                        page.locator("#execution-line").inner_text(),
-                    )
-                    self.assertIn(
-                        "1 / 1",
-                        page.locator("#mandate-facts").inner_text(),
-                    )
+                    latest = page.locator("#decision-history article").first
+                    latest.wait_for(timeout=10_000)
+                    latest_text = latest.inner_text()
+                    self.assertIn("По расписанию", latest_text)
+                    self.assertIn("Уменьшить поисковую ставку", latest_text)
+                    self.assertIn("Применено", latest_text)
+                    self.assertEqual(0, page.locator("#operating-modes").count())
                     browser.close()
             finally:
                 server.shutdown()

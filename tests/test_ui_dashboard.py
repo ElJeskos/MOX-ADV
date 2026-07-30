@@ -29,6 +29,38 @@ class StubDashboardAuthenticator:
 
 
 class DashboardApplicationTests(unittest.TestCase):
+    def test_enabling_autopilot_issues_authority_and_fixes_autonomous_mode(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            service = UiRunService(root)
+            app = DashboardApplication(
+                root,
+                service,
+                authenticator=StubDashboardAuthenticator(),
+            )
+            settings = service.automation()
+            settings.update(
+                {
+                    "enabled": True,
+                    "mode": "test",
+                    "operating_mode": "OBSERVE",
+                    "interval_minutes": 60,
+                }
+            )
+
+            saved = app.configure_test_automation(settings)
+
+            self.assertTrue(saved["enabled"])
+            self.assertEqual("BOUNDED_AUTONOMY", saved["operating_mode"])
+            active = [
+                item
+                for item in app.control_overview()["mandates"]
+                if item["status"] == "ACTIVE"
+            ]
+            self.assertEqual(1, len(active))
+
     def test_empty_dashboard_does_not_claim_gate_one_ready(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             overview = DashboardApplication(Path(temporary)).evidence_overview()
@@ -132,7 +164,9 @@ class DashboardApplicationTests(unittest.TestCase):
             )
             self.assertNotIn(".result.json.crash-tmp", manifest["artifacts"])
 
-    def test_scheduler_uses_current_global_mode_not_stale_saved_mode(self) -> None:
+    def test_scheduler_uses_autopilot_authority_without_visible_mode_switch(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             service = UiRunService(root)
@@ -141,18 +175,26 @@ class DashboardApplicationTests(unittest.TestCase):
                 service,
                 authenticator=StubDashboardAuthenticator(),
             )
-            app.select_operating_mode("RECOMMEND")
             settings = service.automation()
-            settings.update({"enabled": True, "operating_mode": "RECOMMEND"})
-            service.configure_automation(settings)
-
-            app.select_operating_mode("OBSERVE")
+            settings.update({"enabled": True, "operating_mode": "OBSERVE"})
+            settings["scenario"].update(
+                {
+                    "spend_rub": 12_000,
+                    "conversions": 10,
+                    "weekly_budget_rub": 20_000,
+                    "baseline_spend_rub": 10_000,
+                    "baseline_conversions": 10,
+                }
+            )
+            configured = app.configure_test_automation(settings)
             report = service.run_due_automation()
 
+            self.assertEqual("BOUNDED_AUTONOMY", configured["operating_mode"])
             self.assertIsNotNone(report)
             assert report is not None
-            self.assertEqual("OBSERVE", report["operating_mode"])
-            self.assertFalse(report["execution"]["executor_invoked"])
+            self.assertEqual("BOUNDED_AUTONOMY", report["operating_mode"])
+            self.assertEqual("APPLIED", report["execution"]["status"])
+            self.assertTrue(report["execution"]["executor_invoked"])
 
     def test_kill_switch_release_requires_elevated_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
