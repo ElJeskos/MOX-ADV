@@ -11,6 +11,12 @@ from mox_adv.control_state import (
     ControlRejected,
     MacOSLocalPrincipalAuthenticator,
 )
+from mox_adv.environment import (
+    ExecutionEnvironment,
+    EnvironmentWriteDenied,
+    parse_execution_environment,
+    require_test_write_environment,
+)
 from mox_adv.goal_adapters import (
     FakeAdapterTimeout,
     FakeMetrikaGoalAdapter,
@@ -47,13 +53,19 @@ class GoalLifecycleService:
         goal_adapter: FakeMetrikaGoalAdapter,
         site_adapter: FakeSitePublishAdapter,
         semantic_authenticator: Any = None,
+        *,
+        environment: ExecutionEnvironment,
     ) -> None:
-        if not goal_adapter.is_fake or not site_adapter.is_fake:
+        if not isinstance(
+            goal_adapter,
+            FakeMetrikaGoalAdapter,
+        ) or not isinstance(site_adapter, FakeSitePublishAdapter):
             raise GoalLifecycleRejected("FAKE_ADAPTER_REQUIRED")
         self.policy = policy
         self.store = store
         self.goal_adapter = goal_adapter
         self.site_adapter = site_adapter
+        self.environment = parse_execution_environment(environment)
         self.semantic_authenticator = (
             MacOSLocalPrincipalAuthenticator(
                 expected_identity=str(
@@ -75,6 +87,7 @@ class GoalLifecycleService:
         payload: Mapping[str, Any],
         now: datetime,
     ) -> GoalCandidateRecord:
+        self._require_write_environment()
         normalized = validate_candidate(payload, self.policy)
         scope_binding = self._counter_scope(counter_id)
         site_zone = self._site_zone_for_counter(counter_id)
@@ -191,6 +204,7 @@ class GoalLifecycleService:
         expected_version: str,
         now: datetime,
     ) -> SitePublication:
+        self._require_write_environment()
         candidate = self.store.load_candidate(candidate_id)
         if site_zone != self._site_zone_for_counter(candidate.counter_id):
             raise GoalLifecycleRejected("SITE_ZONE_NOT_BOUND_TO_COUNTER")
@@ -389,6 +403,7 @@ class GoalLifecycleService:
         candidate_id: str,
         run_id: str,
     ) -> None:
+        self._require_write_environment()
         candidate = self.store.load_candidate(candidate_id)
         if candidate.run_id != run_id:
             raise GoalLifecycleRejected("CLEANUP_RUN_MISMATCH")
@@ -401,6 +416,12 @@ class GoalLifecycleService:
             candidate_id,
             "goal-create:" + candidate.candidate_id,
         )
+
+    def _require_write_environment(self) -> None:
+        try:
+            require_test_write_environment(self.environment)
+        except EnvironmentWriteDenied as error:
+            raise GoalLifecycleRejected(str(error)) from error
 
     def _reconcile_goal_creation(
         self,

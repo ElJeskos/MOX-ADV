@@ -7,6 +7,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
+from mox_adv.environment import (
+    ExecutionEnvironment,
+    EnvironmentWriteDenied,
+    parse_execution_environment,
+    require_test_write_environment,
+)
+
 
 class DirectStateTransitionRejected(RuntimeError):
     """A management request failed before reaching the adapter."""
@@ -122,11 +129,14 @@ class DirectManagementConnectorV1:
         adapter: DirectManagementAdapter,
         registry: RunObjectRegistry,
         authority: Optional[ProductionPilotAuthority] = None,
+        *,
+        environment: ExecutionEnvironment,
     ) -> None:
         self._policy = policy
         self._adapter = adapter
         self._registry = registry
         self._authority = authority
+        self._environment = parse_execution_environment(environment)
         self._allowed = {
             (str(item["service"]), str(item["method"]))
             for item in policy["api_matrix"]
@@ -394,12 +404,14 @@ class DirectManagementConnectorV1:
         self,
         run_id: str,
         operation_key: str,
-        service: DirectService,
-        method: DirectMethod,
+        service: DirectService | str,
+        method: DirectMethod | str,
         payload: Mapping[str, Any],
     ) -> DirectMethodResult:
         typed_service = DirectService(service)
         typed_method = DirectMethod(method)
+        if typed_method is not DirectMethod.GET:
+            self._require_write_environment()
         if (typed_service.value, typed_method.value) not in self._allowed:
             raise DirectStateTransitionRejected(
                 "DIRECT_METHOD_NOT_ALLOWLISTED: "
@@ -407,7 +419,8 @@ class DirectManagementConnectorV1:
                 + "."
                 + typed_method.value
             )
-        self._require_adapter_authority()
+        if typed_method is not DirectMethod.GET:
+            self._require_adapter_authority()
         result = self._adapter.invoke(
             DirectMethodRequest(
                 run_id=run_id,
@@ -422,7 +435,7 @@ class DirectManagementConnectorV1:
         return result
 
     def _require_adapter_authority(self) -> None:
-        if getattr(self._adapter, "is_fake", False) is True:
+        if type(self._adapter) is FakeDirectManagementAdapter:
             return
         pilot = self._policy["bindings"]["pilot"]
         record = self._policy["record"]
@@ -464,9 +477,10 @@ class DirectManagementConnectorV1:
         self,
         service: str,
         object_id: str,
-        allowed_states: set[DirectState],
+        allowed_states: set[str],
         operation: str,
     ) -> None:
+        self._require_write_environment()
         self._require_adapter_authority()
         state = self._adapter.inspect(service, object_id).get("state")
         if DirectState(state) not in allowed_states:
@@ -478,6 +492,12 @@ class DirectManagementConnectorV1:
                 + " from "
                 + str(state)
             )
+
+    def _require_write_environment(self) -> None:
+        try:
+            require_test_write_environment(self._environment)
+        except EnvironmentWriteDenied as error:
+            raise DirectStateTransitionRejected(str(error)) from error
 
     @staticmethod
     def _normalize_ids(value: Any) -> Tuple[str, ...]:

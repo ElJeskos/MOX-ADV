@@ -23,6 +23,7 @@ from mox_adv.egress import (
     HttpEgressGuard,
     MatrixAccessClass,
 )
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.trust_boundary import (
     CapabilityEvidence,
     SimulationAuditAnchorSigner,
@@ -158,7 +159,10 @@ class ReadOnlyEgressRecorder:
     """Authorize and record only an exact external Direct Reports read."""
 
     def __init__(self, policy: Mapping[str, Any]) -> None:
-        self._guard = HttpEgressGuard(policy)
+        self._guard = HttpEgressGuard(
+            policy,
+            environment=ExecutionEnvironment.PRODUCTION,
+        )
         self._matrix = tuple(policy["api_matrix"])
         self._records: list[ExternalReadRecord] = []
         self._blocked_non_read_attempts = 0

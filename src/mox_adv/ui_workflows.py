@@ -30,6 +30,7 @@ from mox_adv.direct_management import (
     DirectManagementConnectorV1,
     FakeDirectManagementAdapter,
 )
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.goal_adapters import (
     FakeMetrikaGoalAdapter,
     FakeSitePublishAdapter,
@@ -280,7 +281,12 @@ class DashboardWorkflowFacade:
         service = CampaignLifecycleService(
             self.policy,
             store,
-            DirectManagementConnectorV1(self.policy, adapter, store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                store,
+                environment=ExecutionEnvironment.TEST,
+            ),
             self.campaign_safety,
         )
         saga = service.execute(request, now)
@@ -633,6 +639,7 @@ class DashboardWorkflowFacade:
             goal_adapter,
             site_adapter,
             _SimulatedPrincipalAuthenticator(self.policy),
+            environment=ExecutionEnvironment.TEST,
         )
         store.register_reservation(
             GoalCreationReservation(
@@ -872,6 +879,7 @@ class DashboardWorkflowFacade:
             goal_adapter,
             site_adapter,
             _SimulatedPrincipalAuthenticator(self.policy),
+            environment=ExecutionEnvironment.TEST,
         )
         session = {
             "result": result,

@@ -23,6 +23,13 @@ from mox_adv.control_state import (
     PreparedChange,
 )
 from mox_adv.egress import EgressDenied, HttpEgressGuard
+from mox_adv.environment import (
+    PRODUCTION_WRITE_FORBIDDEN,
+    ExecutionEnvironment,
+    EnvironmentWriteDenied,
+    parse_execution_environment,
+    require_test_write_environment,
+)
 from mox_adv.fake_write_adapter import AdapterTimeout, FakeWriteAdapter
 from mox_adv.mandate_store import DurableMandateAuthority
 from mox_adv.trust_boundary import (
@@ -47,6 +54,8 @@ class BoundedAutonomyService:
         clock: Callable[[], datetime],
         before_dispatch: Optional[Callable[[], None]] = None,
         pre_write_audit: Optional[PreWriteAudit] = None,
+        *,
+        environment: ExecutionEnvironment,
     ) -> None:
         self.policy = BoundedAutonomyPolicy(policy)
         self.control_state = control_state
@@ -54,7 +63,11 @@ class BoundedAutonomyService:
         self.adapter = adapter
         self.clock = clock
         self.before_dispatch = before_dispatch
-        self.egress_guard = HttpEgressGuard(policy)
+        self.environment = parse_execution_environment(environment)
+        self.egress_guard = HttpEgressGuard(
+            policy,
+            environment=self.environment,
+        )
         self.write_window = DurableWriteWindowCoordinator(
             control_state.path,
             policy,
@@ -80,6 +93,7 @@ class BoundedAutonomyService:
         request: BoundedAutonomyRequest,
     ) -> BoundedAutonomyOutcome:
         try:
+            require_test_write_environment(self.environment)
             prepared = self._prepare(request)
             before = self.adapter.readback(prepared.target_key())
             if before not in {prepared.current_value, prepared.target_value}:
@@ -114,6 +128,12 @@ class BoundedAutonomyService:
             return self._dispatch(prepared, request.mandate_id)
         except AdapterTimeout:
             return self._reconcile_request(request, "TARGET_STATE_NOT_APPLIED")
+        except EnvironmentWriteDenied:
+            return BoundedAutonomyOutcome(
+                ExecutionStatus.BLOCKED,
+                PRODUCTION_WRITE_FORBIDDEN,
+                None,
+            )
         except CommandRejected as error:
             reason = (
                 "OUT_OF_BOUNDS" if "OUT_OF_BOUNDS" in str(error) else "INVALID_INPUT"

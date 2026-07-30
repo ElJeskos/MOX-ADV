@@ -23,6 +23,13 @@ from mox_adv.control_state import (
     TrustedScope,
 )
 from mox_adv.egress import EgressDenied, HttpEgressGuard
+from mox_adv.environment import (
+    PRODUCTION_WRITE_FORBIDDEN,
+    ExecutionEnvironment,
+    EnvironmentWriteDenied,
+    parse_execution_environment,
+    require_test_write_environment,
+)
 from mox_adv.fake_write_adapter import AdapterTimeout, FakeWriteAdapter
 from mox_adv.trust_boundary import (
     DurablePreWriteAudit,
@@ -278,12 +285,18 @@ class ApprovalExecutionService:
         adapter: Any,
         clock: Callable[[], Any],
         pre_write_audit: Optional[PreWriteAudit] = None,
+        *,
+        environment: ExecutionEnvironment,
     ) -> None:
         self.policy = ApprovalRequiredPolicy(policy)
         self.state = state
         self.adapter = adapter
         self.clock = clock
-        self.egress_guard = HttpEgressGuard(policy)
+        self.environment = parse_execution_environment(environment)
+        self.egress_guard = HttpEgressGuard(
+            policy,
+            environment=self.environment,
+        )
         self.write_window = DurableWriteWindowCoordinator(
             state.path,
             policy,
@@ -306,6 +319,7 @@ class ApprovalExecutionService:
 
     def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
         try:
+            require_test_write_environment(self.environment)
             prepared = self.state.load_prepared_change(request.proposal_id)
             decision = self.policy.evaluate(prepared, request)
             if not decision.allowed:
@@ -400,6 +414,12 @@ class ApprovalExecutionService:
                 "OUT_OF_BOUNDS" if "OUT_OF_BOUNDS" in str(error) else "INVALID_INPUT"
             )
             return ExecutionOutcome(ExecutionStatus.BLOCKED, reason, None)
+        except EnvironmentWriteDenied:
+            return ExecutionOutcome(
+                ExecutionStatus.BLOCKED,
+                PRODUCTION_WRITE_FORBIDDEN,
+                None,
+            )
         except EgressDenied:
             return ExecutionOutcome(
                 ExecutionStatus.BLOCKED,

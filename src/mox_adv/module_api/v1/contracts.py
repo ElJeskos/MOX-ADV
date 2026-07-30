@@ -7,6 +7,8 @@ from datetime import date, datetime
 from typing import Any, Dict, Literal, Mapping, Optional, Sequence, Tuple, Union, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from mox_adv.environment import PRODUCTION_WRITE_FORBIDDEN
+
 
 MODULE_REQUEST_SCHEMA_VERSION = "module-request-v1"
 MODULE_RESULT_SCHEMA_VERSION = "module-result-v1"
@@ -1091,6 +1093,48 @@ class ModuleResultV1:
                 ),
             ),
             decision_record_ref=None,
+        )
+
+    @classmethod
+    def blocked_production_write(
+        cls,
+        *,
+        module: ModuleIdentityV1,
+        request: ModuleRequestV1,
+        decision_record_ref: str,
+    ) -> "ModuleResultV1":
+        run_id = decision_record_ref.removeprefix(
+            "decision-records/"
+        ).removesuffix(".json")
+        return cls(
+            schema_version=MODULE_RESULT_SCHEMA_VERSION,
+            run_id="blocked-" + run_id,
+            module=module,
+            status="BLOCKED",
+            metrics=(),
+            assessment=None,
+            recommendations=(),
+            proposal=None,
+            execution_result=ModuleExecutionResultV1(
+                execution_id="blocked-" + run_id,
+                operation_type=request.operation.operation_type,
+                status="BLOCKED",
+                applied=False,
+            ),
+            provenance=(),
+            warnings=(),
+            errors=(
+                ModuleErrorV1(
+                    code=PRODUCTION_WRITE_FORBIDDEN,
+                    message=(
+                        "Changing commands are available only in the TEST "
+                        "environment."
+                    ),
+                    field="environment",
+                    retryable=False,
+                ),
+            ),
+            decision_record_ref=decision_record_ref,
         )
 
     def as_dict(self) -> Dict[str, Any]:

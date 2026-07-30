@@ -30,6 +30,11 @@ from mox_adv.module_api.v1.contracts import (
     ModuleWarningV1,
     StoredConnectionRefV1,
 )
+from mox_adv.module_api.v1.decision_records import (
+    MODULE_DECISION_RECORD_SCHEMA_VERSION,
+    InMemoryDecisionRecordStoreV1,
+    ModuleDecisionRecordStoreV1,
+)
 
 __all__ = [
     "EXTERNAL_EVIDENCE_SCHEMA_VERSION",
@@ -42,11 +47,14 @@ __all__ = [
     "HttpJsonModuleAdapterV1",
     "HttpJsonResponseV1",
     "InProcessModuleAdapterV1",
+    "InMemoryDecisionRecordStoreV1",
+    "MODULE_DECISION_RECORD_SCHEMA_VERSION",
     "MetricValueV1",
     "ModuleAssessmentV1",
     "ModuleErrorV1",
     "ModuleExecutionResultV1",
     "ModuleIdentityV1",
+    "ModuleDecisionRecordStoreV1",
     "ModuleObjectiveV1",
     "ModuleOperationV1",
     "ModuleProposalV1",

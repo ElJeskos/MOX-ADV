@@ -9,6 +9,12 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
 from mox_adv.commands import ACTION_SPECS, OptimizationAction
+from mox_adv.environment import (
+    ExecutionEnvironment,
+    EnvironmentWriteDenied,
+    parse_execution_environment,
+    require_test_write_environment,
+)
 from mox_adv.fake_write_adapter import FakeWriteAdapter
 
 
@@ -133,7 +139,13 @@ class EgressAuthority:
 class HttpEgressGuard:
     """Authorize only an exact matrix entry and reject every redirect."""
 
-    def __init__(self, policy: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        policy: Mapping[str, Any],
+        *,
+        environment: ExecutionEnvironment,
+    ) -> None:
+        self._environment = parse_execution_environment(environment)
         record = policy.get("record")
         self._production_write_authorized = bool(
             isinstance(record, Mapping)
@@ -216,6 +228,11 @@ class HttpEgressGuard:
             raise EgressDenied(
                 "EXTERNAL_EGRESS_DENIED: endpoint is absent from the Gate 0 matrix."
             )
+        if not endpoint.is_read:
+            try:
+                require_test_write_environment(self._environment)
+            except EnvironmentWriteDenied as error:
+                raise EgressDenied(str(error)) from error
         if not self._credential_matches(endpoint, authority, parsed):
             raise EgressDenied(
                 "EXTERNAL_EGRESS_DENIED: credential profile does not match endpoint."
@@ -268,6 +285,10 @@ class HttpEgressGuard:
         """Bind every non-fake adapter to its exact approved matrix operation."""
 
         if type(adapter) is FakeWriteAdapter:
+            try:
+                require_test_write_environment(self._environment)
+            except EnvironmentWriteDenied as error:
+                raise EgressDenied(str(error)) from error
             return
         try:
             spec = ACTION_SPECS[OptimizationAction(command.action)]

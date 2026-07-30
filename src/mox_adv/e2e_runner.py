@@ -55,6 +55,7 @@ from mox_adv.e2e_evidence import (
     ReadOnlyEgressRecorder,
     write_final_e2e_artifacts,
 )
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.fake_write_adapter import FakeWriteAdapter
 from mox_adv.goal_lifecycle import (
     AuthorityKind,
@@ -473,6 +474,7 @@ def _analytics_optimization_workflow(
         approval_state,
         approval_adapter,
         clock=tests_now,
+        environment=ExecutionEnvironment.TEST,
     )
     first = approval_service.execute(_approval_request(prepared))
     repeated = approval_service.execute(_approval_request(prepared))
@@ -509,6 +511,7 @@ def _analytics_optimization_workflow(
         approval_state,
         blocked_adapter,
         clock=tests_now,
+        environment=ExecutionEnvironment.TEST,
     ).execute(_approval_request(blocked_prepared))
     if blocked.status != "BLOCKED" or blocked_adapter.write_calls != 0:
         raise AssertionError("Kill switch did not block before fake dispatch.")
@@ -535,6 +538,7 @@ def _analytics_optimization_workflow(
         authority,
         autonomy_adapter,
         clock=tests_now,
+        environment=ExecutionEnvironment.TEST,
     ).execute(_autonomy_request(autonomy_prepared, mandate))
     if autonomy_result.status != "APPLIED" or autonomy_adapter.write_calls != 1:
         raise AssertionError("Bounded autonomy fake readback failed.")
@@ -667,6 +671,7 @@ def _campaign_goal_workflow(
             policy,
             campaign_adapter,
             campaign_store,
+            environment=ExecutionEnvironment.TEST,
         ),
         _campaign_safety(),
     )
@@ -688,6 +693,7 @@ def _campaign_goal_workflow(
             policy,
             rollback_adapter,
             rollback_store,
+            environment=ExecutionEnvironment.TEST,
         ),
         _campaign_safety(),
     ).execute(request, CAMPAIGN_NOW)
@@ -713,6 +719,7 @@ def _campaign_goal_workflow(
         goal_adapter,
         site_adapter,
         _FixedAuthenticator(),
+        environment=ExecutionEnvironment.TEST,
     )
     run_id = "goal-run-e2e"
     proposal_id = "goal-proposal-e2e"

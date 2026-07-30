@@ -25,6 +25,7 @@ from mox_adv.direct_management import (
     FakeDirectManagementAdapter,
     ProductionPilotAuthority,
 )
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.recommend_contracts import CampaignDraftV1
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -217,6 +218,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 CampaignSagaStore(self.database),
+                environment=ExecutionEnvironment.TEST,
             ),
             safety_bindings=safety_bindings(),
         )
@@ -311,6 +313,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 expired_store,
+                environment=ExecutionEnvironment.TEST,
             ),
             safety_bindings=safety_bindings(),
         )
@@ -323,7 +326,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                environment=ExecutionEnvironment.TEST,
+            ),
             safety_bindings(),
         )
 
@@ -363,7 +371,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                environment=ExecutionEnvironment.TEST,
+            ),
             safety_bindings(),
         )
 
@@ -388,7 +401,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                environment=ExecutionEnvironment.TEST,
+            ),
             safety_bindings(),
         )
 
@@ -404,7 +422,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             store,
-            DirectManagementConnectorV1(self.policy, self.adapter, store),
+            DirectManagementConnectorV1(
+                self.policy,
+                self.adapter,
+                store,
+                environment=ExecutionEnvironment.TEST,
+            ),
             safety_bindings(),
         )
 
@@ -433,6 +456,7 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 unbound_store,
+                environment=ExecutionEnvironment.TEST,
             ),
             safety_bindings(),
         )
@@ -465,7 +489,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                environment=ExecutionEnvironment.TEST,
+            ),
             safety_bindings(),
         )
 
@@ -492,6 +521,7 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
             self.policy,
             self.adapter,
             self.store,
+            environment=ExecutionEnvironment.TEST,
         )
         self.run_id = "matrix-run-1"
 
@@ -733,6 +763,7 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
                 binding_hash="sha256:" + "1" * 64,
                 armed=True,
             ),
+            environment=ExecutionEnvironment.PRODUCTION,
         )
 
         with self.assertRaises(DirectStateTransitionRejected):

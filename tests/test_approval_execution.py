@@ -42,6 +42,7 @@ from mox_adv.egress import (
     HttpEgressGuard,
 )
 from mox_adv.fake_write_adapter import FakeWriteAdapter
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.monitoring import DurableWriteWindowGate
 from mox_adv.trust_boundary import (
     DurablePreWriteAudit,
@@ -256,6 +257,7 @@ class ApprovalExecutionTests(unittest.TestCase):
             adapter=adapter,
             clock=lambda: now,
             pre_write_audit=pre_write_audit,
+            environment=ExecutionEnvironment.TEST,
         )
 
     def test_happy_path_is_applied_only_after_exact_fake_readback(self) -> None:
@@ -330,6 +332,7 @@ class ApprovalExecutionTests(unittest.TestCase):
                     adapter,
                     clock=lambda: NOW,
                     pre_write_audit=RejectingPreWriteAudit(reason),
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(make_request(prepared))
 
                 self.assertEqual("BLOCKED", result.status)
@@ -383,6 +386,7 @@ class ApprovalExecutionTests(unittest.TestCase):
                     state,
                     adapter,
                     clock=lambda: NOW,
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(make_request(prepared))
 
                 self.assertEqual(expected_status, result.status)
@@ -461,6 +465,7 @@ class ApprovalExecutionTests(unittest.TestCase):
                     state,
                     adapter,
                     clock=lambda: NOW,
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(request)
                 self.assertEqual("BLOCKED", result.status)
                 self.assertEqual(0, adapter.write_calls)
@@ -502,6 +507,7 @@ class ApprovalExecutionTests(unittest.TestCase):
             state,
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).execute(request)
         self.assertEqual("BLOCKED", result.status)
         self.assertEqual(0, adapter.write_calls)
@@ -539,6 +545,7 @@ class ApprovalExecutionTests(unittest.TestCase):
                     state,
                     adapter,
                     clock=lambda: NOW,
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(request)
                 self.assertEqual("BLOCKED", result.status)
                 self.assertEqual(0, adapter.write_calls)
@@ -594,6 +601,7 @@ class ApprovalExecutionTests(unittest.TestCase):
             DurableControlState(self.database),
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).reconcile(self.prepared.execution_key())
         self.assertEqual("APPLIED", reconciled.status)
         self.assertEqual(1, adapter.write_calls)
@@ -627,6 +635,7 @@ class ApprovalExecutionTests(unittest.TestCase):
                     state,
                     adapter,
                     clock=lambda: NOW,
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(make_request(self.prepared))
                 self.assertEqual(expected, result.status)
                 reopened = DurableControlState(state.path)
@@ -652,6 +661,7 @@ class ApprovalExecutionTests(unittest.TestCase):
                         reopened,
                         FakeWriteAdapter(),
                         clock=lambda: NOW,
+                        environment=ExecutionEnvironment.TEST,
                     ).execute(make_request(next_prepared))
                     self.assertEqual("BLOCKED", blocked.status)
 
@@ -669,6 +679,7 @@ class ApprovalExecutionTests(unittest.TestCase):
             reopened,
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         )
         result = service.reconcile(self.prepared.execution_key())
 
@@ -863,6 +874,7 @@ class KillSwitchAndCliTests(unittest.TestCase):
             self.state,
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).execute(make_request(prepared))
         elapsed = time.monotonic() - started
         self.assertEqual("BLOCKED", result.status)
@@ -907,7 +919,10 @@ class EgressGuardTests(unittest.TestCase):
         assert isinstance(pilot, dict)
         pilot["direct_account"] = "pilot-account"
         pilot["test_counter"] = "test-counter"
-        guard = HttpEgressGuard(policy)
+        guard = HttpEgressGuard(
+            policy,
+            environment=ExecutionEnvironment.PRODUCTION,
+        )
         guard.authorize(
             "POST",
             "https://api.direct.yandex.com/json/v501/campaigns",
@@ -941,7 +956,10 @@ class EgressGuardTests(unittest.TestCase):
         pilot = policy["bindings"]["pilot"]
         assert isinstance(pilot, dict)
         pilot["direct_account"] = "pilot-account"
-        guard = HttpEgressGuard(policy)
+        guard = HttpEgressGuard(
+            policy,
+            environment=ExecutionEnvironment.TEST,
+        )
         guard.authorize(
             "POST",
             "https://api.direct.yandex.com/json/v501/campaigns",
@@ -1043,6 +1061,7 @@ class EgressGuardTests(unittest.TestCase):
                 state,
                 adapter,
                 clock=lambda: NOW,
+                environment=ExecutionEnvironment.TEST,
             ).execute(make_request(prepared))
         self.assertEqual("BLOCKED", result.status)
         self.assertEqual("EXTERNAL_WRITE_EGRESS_DENIED", result.reason_code)
@@ -1075,6 +1094,7 @@ class EgressGuardTests(unittest.TestCase):
                 state,
                 adapter,
                 clock=lambda: NOW,
+                environment=ExecutionEnvironment.TEST,
             ).execute(make_request(prepared))
 
         self.assertEqual("BLOCKED", result.status)

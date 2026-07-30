@@ -30,6 +30,7 @@ from mox_adv.control_state import (
     TrustedScope,
 )
 from mox_adv.fake_write_adapter import FakeWriteAdapter
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.monitoring import DurableWriteWindowGate
 from mox_adv.trust_boundary import PreWriteAudit
 
@@ -367,6 +368,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             write_adapter,
             clock=lambda: now,
             pre_write_audit=pre_write_audit,
+            environment=ExecutionEnvironment.TEST,
         )
         return service.execute(
             make_request(prepared, self.mandate) if request is None else request
@@ -455,6 +457,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
                     authority,
                     adapter,
                     clock=lambda: NOW,
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(make_request(prepared, mandate))
 
                 self.assertEqual(expected_status, result.status)
@@ -504,6 +507,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
                     self.authority,
                     adapter,
                     clock=lambda: NOW,
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(make_request(prepared, self.mandate))
                 self.assertEqual("BLOCKED", result.status)
                 self.assertEqual("UNSUPPORTED_ACTION", result.reason_code)
@@ -543,6 +547,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
                     self.authority,
                     adapter,
                     clock=lambda: NOW,
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(request_factory())
                 self.assertEqual("BLOCKED", result.status)
                 self.assertEqual(0, adapter.write_calls)
@@ -566,6 +571,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             revoked_adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).execute(make_request(revoked_prepared, self.mandate))
         self.assertEqual("BLOCKED", revoked.status)
         self.assertEqual("MANDATE_REVOKED", revoked.reason_code)
@@ -615,6 +621,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
                     ),
                     adapter,
                     clock=lambda elapsed=elapsed: NOW + elapsed,
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(make_request(prepared, effective_mandate))
                 self.assertEqual("BLOCKED", result.status)
                 self.assertEqual(reason, result.reason_code)
@@ -651,6 +658,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             expired_authority,
             expired_adapter,
             clock=lambda: NOW + timedelta(hours=1),
+            environment=ExecutionEnvironment.TEST,
         ).execute(make_request(expired_prepared, expired_mandate))
         self.assertEqual("BLOCKED", expired.status)
         self.assertEqual("MANDATE_EXPIRED", expired.reason_code)
@@ -672,6 +680,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             over_limit_adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).execute(make_request(over_limit_prepared, self.mandate))
         self.assertEqual("BLOCKED", over_limit.status)
         self.assertEqual("MONETARY_CAP_REACHED", over_limit.reason_code)
@@ -722,6 +731,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
                     authority,
                     adapter,
                     clock=lambda: NOW,
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(request)
                 self.assertEqual("BLOCKED", result.status)
                 self.assertEqual(0, adapter.write_calls)
@@ -741,6 +751,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         )
         barrier = threading.Barrier(2)
         results: list[str] = []
@@ -783,6 +794,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             reopened_authority,
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).reconcile(prepared.execution_key())
         self.assertEqual("ALREADY_PROCESSED", reconciled.status)
         self.assertEqual(1, adapter.write_calls)
@@ -829,6 +841,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             reopened_authority,
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).reconcile(prepared.execution_key())
 
         self.assertEqual("FAILED", result.status)
@@ -884,6 +897,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
                     authority,
                     adapter,
                     clock=lambda: NOW,
+                    environment=ExecutionEnvironment.TEST,
                 ).execute(make_request(prepared, mandate))
                 elapsed = time.monotonic() - started
                 self.assertEqual("BLOCKED", result.status)
@@ -940,6 +954,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         )
         with mock.patch.object(
             self.control,
@@ -960,6 +975,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             DurableMandateAuthority(self.database, self.policy, self.signer),
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).reconcile(prepared.execution_key())
         self.assertEqual("APPLIED", reconciled.status)
         self.assertEqual(1, adapter.write_calls)
@@ -1007,6 +1023,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
                     adapter,
                     clock=lambda: NOW,
                     before_dispatch=before_dispatch,
+                    environment=ExecutionEnvironment.TEST,
                 )
                 results = []
 
@@ -1082,6 +1099,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         )
         request = make_request(prepared, self.mandate)
 
@@ -1114,6 +1132,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             first_adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).execute(request)
         self.assertEqual("FAILED", first.status)
 
@@ -1124,6 +1143,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             unknown_adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).recheck(request)
         self.assertEqual("UNKNOWN_RESULT", rechecked.status)
         self.assertEqual(
@@ -1142,6 +1162,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             blocked_adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).execute(make_request(next_prepared, self.mandate))
         self.assertEqual("BLOCKED", blocked.status)
         self.assertEqual("UNKNOWN_RESULT", blocked.reason_code)
@@ -1162,6 +1183,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             first_adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).execute(request)
         self.assertEqual("FAILED", first.status)
 
@@ -1174,6 +1196,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             readback_adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         ).recheck(request)
 
         self.assertEqual("APPLIED", rechecked.status)
@@ -1196,6 +1219,7 @@ class BoundedAutonomyExecutionTests(unittest.TestCase):
             self.authority,
             adapter,
             clock=lambda: NOW,
+            environment=ExecutionEnvironment.TEST,
         )
         with mock.patch.object(
             self.authority,

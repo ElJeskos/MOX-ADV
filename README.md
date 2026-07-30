@@ -79,6 +79,16 @@ The Python operation mapping is canonical for the closed operation vocabulary, a
 Generating the complete OpenAPI document from code is intentionally deferred to a dedicated contract-tooling slice.
 The existing paired runtime and Dashboard continue to use the legacy composition until their dedicated migration slice.
 
+## Environment safety
+
+Every legacy execution service and provider egress guard requires an explicit trusted `ExecutionEnvironment`.
+`PRODUCTION` permits observation, analysis, recommendation, and read-class provider operations only.
+Every Direct, Metrika-goal, and site-changing operation is rejected before credential matching, state preparation, or provider dispatch with the stable reason code `PRODUCTION_WRITE_FORBIDDEN`.
+Approval, Mandate, retry, restart, external evidence, pilot flags, and adapter selection do not override this environment restriction.
+Existing simulated Dashboard and E2E flows explicitly select `TEST` and keep their sealed fake-adapter behavior.
+Public `ModuleRequestV1` execution requests use the same rule through both adapters.
+A blocked public request returns `ModuleResultV1.status = BLOCKED`, an unapplied blocked execution result, and a Decision Record reference containing the same stable reason code.
+
 ## Tests
 
 Run the complete standard-library test suite.

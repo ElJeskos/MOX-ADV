@@ -36,6 +36,7 @@ from mox_adv.control_state import (
     TrustedScope,
 )
 from mox_adv.fake_write_adapter import FakeWriteAdapter
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.mandate_store import DurableMandateAuthority
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.observe import run_observe_fixture
@@ -397,6 +398,7 @@ def _execute_simulated_change(
         state,
         adapter,
         clock=lambda: now,
+        environment=ExecutionEnvironment.TEST,
     ).execute(request)
     return (
         {
@@ -486,6 +488,7 @@ def _execute_bounded_simulated_change(
         mandate_authority,
         adapter,
         clock=lambda: now,
+        environment=ExecutionEnvironment.TEST,
     ).execute(request)
     return {
         "status": outcome.status.value,

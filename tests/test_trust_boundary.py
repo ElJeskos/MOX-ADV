@@ -33,6 +33,7 @@ from mox_adv.egress import (
     EgressDenied,
     HttpEgressGuard,
 )
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.proposal_store import ImmutableProposalStore
 from mox_adv.recommend_service import RecommendationService
@@ -273,7 +274,10 @@ class ExactEgressBoundaryTests(unittest.TestCase):
         pilot["pilot_counter"] = "pilot-counter"
         pilot["test_site_zone"] = "test-site-zone"
         pilot["pilot_site_zone"] = "pilot-site-zone"
-        self.guard = HttpEgressGuard(policy)
+        self.guard = HttpEgressGuard(
+            policy,
+            environment=ExecutionEnvironment.PRODUCTION,
+        )
 
     def test_exact_read_and_write_profiles_are_bound_to_matrix_entries(self) -> None:
         self.guard.authorize(
@@ -419,7 +423,10 @@ class ExactEgressBoundaryTests(unittest.TestCase):
         pilot["pilot_counter"] = "pilot-counter"
         pilot["test_site_zone"] = "test-site-zone"
         pilot["pilot_site_zone"] = "pilot-site-zone"
-        guard = HttpEgressGuard(policy)
+        guard = HttpEgressGuard(
+            policy,
+            environment=ExecutionEnvironment.TEST,
+        )
 
         guard.authorize(
             "POST",
