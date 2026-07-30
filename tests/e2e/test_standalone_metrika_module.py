@@ -589,6 +589,8 @@ assert blocked == [], blocked
             self.assertEqual(1, len(wheels))
             with zipfile.ZipFile(wheels[0]) as archive:
                 names = set(archive.namelist())
+            self.assertIn("mox_adv/metrika_goal_lifecycle.py", names)
+            self.assertIn("mox_adv/goal_service.py", names)
             self.assertNotIn("mox_adv/modules/direct.py", names)
             self.assertFalse(
                 any(name.startswith("mox_adv/ui/") for name in names),

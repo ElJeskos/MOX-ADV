@@ -19,7 +19,11 @@ from typing import (
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mox_adv.environment import PRODUCTION_WRITE_FORBIDDEN
-
+from mox_adv.module_api.v1.goal_lifecycle_contracts import (
+    GoalLifecycleCommandV1,
+    GoalLifecycleContractError,
+    GoalLifecycleOutcomeV1,
+)
 
 MODULE_REQUEST_SCHEMA_VERSION = "module-request-v1"
 MODULE_RESULT_SCHEMA_VERSION = "module-result-v1"
@@ -55,6 +59,24 @@ MODULE_STATUSES = cast(Tuple[ModuleStatus, ...], get_args(ModuleStatus))
 
 class ContractValidationError(ValueError):
     """Raised when an object cannot cross the public module boundary."""
+
+
+def _goal_lifecycle_command(
+    value: Mapping[str, Any],
+) -> GoalLifecycleCommandV1:
+    try:
+        return GoalLifecycleCommandV1.from_dict(value)
+    except GoalLifecycleContractError as error:
+        raise ContractValidationError(str(error)) from error
+
+
+def _goal_lifecycle_outcome(
+    value: Mapping[str, Any],
+) -> GoalLifecycleOutcomeV1:
+    try:
+        return GoalLifecycleOutcomeV1.from_dict(value)
+    except GoalLifecycleContractError as error:
+        raise ContractValidationError(str(error)) from error
 
 
 def _object(value: Any, field: str) -> Mapping[str, Any]:
@@ -453,6 +475,7 @@ class ModuleRequestV1:
     external_evidence: Optional[ExternalEvidenceV1]
     operation: ModuleOperationV1
     idempotency_key: str
+    goal_lifecycle_command: Optional[GoalLifecycleCommandV1] = None
 
     def __post_init__(self) -> None:
         _one_of(
@@ -485,6 +508,31 @@ class ModuleRequestV1:
             raise ContractValidationError(
                 "external_evidence must be an ExternalEvidenceV1"
             )
+        is_goal_lifecycle = (
+            self.operation.kind == "EXECUTE"
+            and self.operation.operation_type == "MANAGE_GOAL_CANDIDATE"
+        )
+        if self.goal_lifecycle_command is not None and not is_goal_lifecycle:
+            raise ContractValidationError(
+                "goal_lifecycle_command is accepted only for an EXECUTE "
+                "MANAGE_GOAL_CANDIDATE operation"
+            )
+        if self.goal_lifecycle_command is not None:
+            if not isinstance(
+                self.goal_lifecycle_command,
+                GoalLifecycleCommandV1,
+            ):
+                raise ContractValidationError(
+                    "goal_lifecycle_command must be a GoalLifecycleCommandV1"
+                )
+            if self.external_evidence is not None:
+                raise ContractValidationError(
+                    "goal lifecycle requests cannot contain external_evidence"
+                )
+            if self.scope.counter_id is None:
+                raise ContractValidationError(
+                    "goal lifecycle requests require scope.counter_id"
+                )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ModuleRequestV1":
@@ -502,9 +550,10 @@ class ModuleRequestV1:
                 "operation",
                 "idempotency_key",
             ),
-            optional=("external_evidence",),
+            optional=("external_evidence", "goal_lifecycle_command"),
         )
         external_evidence = value.get("external_evidence")
+        goal_lifecycle_command = value.get("goal_lifecycle_command")
         if "external_evidence" in value and external_evidence is None:
             raise ContractValidationError(
                 "external_evidence must be an object when present"
@@ -543,6 +592,16 @@ class ModuleRequestV1:
                 "idempotency_key",
                 maximum=128,
             ),
+            goal_lifecycle_command=(
+                None
+                if goal_lifecycle_command is None
+                else _goal_lifecycle_command(
+                    _object(
+                        goal_lifecycle_command,
+                        "goal_lifecycle_command",
+                    )
+                )
+            ),
         )
 
     def as_dict(self) -> Dict[str, Any]:
@@ -558,6 +617,10 @@ class ModuleRequestV1:
         }
         if self.external_evidence is not None:
             value["external_evidence"] = self.external_evidence.as_dict()
+        if self.goal_lifecycle_command is not None:
+            value["goal_lifecycle_command"] = (
+                self.goal_lifecycle_command.as_dict()
+            )
         return value
 
 
@@ -1004,6 +1067,7 @@ class ModuleResultV1:
     errors: Tuple[ModuleErrorV1, ...]
     decision_record_ref: Optional[str]
     hypotheses: Tuple[ModuleHypothesisV1, ...] = ()
+    lifecycle_outcome: Optional[GoalLifecycleOutcomeV1] = None
 
     def __post_init__(self) -> None:
         _one_of(
@@ -1065,10 +1129,16 @@ class ModuleResultV1:
                 "errors",
                 "decision_record_ref",
             ),
-            optional=("proposal", "execution_result", "hypotheses"),
+            optional=(
+                "proposal",
+                "execution_result",
+                "hypotheses",
+                "lifecycle_outcome",
+            ),
         )
         proposal_value = value.get("proposal")
         execution_value = value.get("execution_result")
+        lifecycle_outcome = value.get("lifecycle_outcome")
         errors = tuple(
             ModuleErrorV1.from_dict(
                 _object(item, f"errors[{index}]"),
@@ -1158,6 +1228,13 @@ class ModuleResultV1:
                     _array(value.get("hypotheses", ()), "hypotheses")
                 )
             ),
+            lifecycle_outcome=(
+                None
+                if lifecycle_outcome is None
+                else _goal_lifecycle_outcome(
+                    _object(lifecycle_outcome, "lifecycle_outcome")
+                )
+            ),
         )
 
     @classmethod
@@ -1230,7 +1307,7 @@ class ModuleResultV1:
         )
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        value = {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
             "module": self.module.as_dict(),
@@ -1254,3 +1331,6 @@ class ModuleResultV1:
             "errors": [item.as_dict() for item in self.errors],
             "decision_record_ref": self.decision_record_ref,
         }
+        if self.lifecycle_outcome is not None:
+            value["lifecycle_outcome"] = self.lifecycle_outcome.as_dict()
+        return value

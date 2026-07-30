@@ -6,25 +6,24 @@ import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
+from mox_adv.environment import ExecutionEnvironment
 from mox_adv.module_api.v1 import (
+    OPERATION_TYPES_BY_KIND,
     ContractValidationError,
     HttpJsonModuleAdapterV1,
     InProcessModuleAdapterV1,
     ModuleExecutionResultV1,
+    ModuleHypothesisV1,
     ModuleIdentityV1,
     ModuleOperationV1,
     ModuleProposalV1,
     ModuleRequestV1,
     ModuleResultV1,
-    ModuleHypothesisV1,
-    OPERATION_TYPES_BY_KIND,
 )
-from mox_adv.environment import ExecutionEnvironment
 from mox_adv.modules.direct import DirectModuleV1
 from mox_adv.modules.metrika import MetrikaModuleV1
-
 
 ROOT = Path(__file__).resolve().parents[1]
 OPENAPI_PATH = ROOT / "openapi" / "module-api-v1.openapi.json"
@@ -344,7 +343,10 @@ class ModuleAdapterContractTests(unittest.TestCase):
         self.assertEqual(400, response.status_code)
         self.assertEqual("module-result-v1", response.body["schema_version"])
         self.assertEqual("REJECTED", response.body["status"])
-        self.assertEqual("CONTRACT_VALIDATION_FAILED", response.body["errors"][0]["code"])
+        self.assertEqual(
+            "CONTRACT_VALIDATION_FAILED",
+            response.body["errors"][0]["code"],
+        )
         self.assertEqual([], module.requests)
         self.assertNotIn("must-not-cross-the-boundary", json.dumps(response.body))
 
@@ -438,6 +440,46 @@ class OpenAPIContractTests(unittest.TestCase):
         self.assertIn(
             "hypotheses",
             schemas["ModuleResultV1"]["required"],
+        )
+
+    def test_openapi_publishes_the_typed_goal_lifecycle_contract(self) -> None:
+        document = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+        schemas = document["components"]["schemas"]
+        request_properties = schemas["ModuleRequestV1"]["properties"]
+        result_properties = schemas["ModuleResultV1"]["properties"]
+        actions = {
+            branch["properties"]["action"]["const"]
+            for branch in schemas["GoalLifecycleCommandV1"]["oneOf"]
+        }
+
+        self.assertEqual(
+            {
+                "$ref": "#/components/schemas/GoalLifecycleCommandV1",
+            },
+            request_properties["goal_lifecycle_command"],
+        )
+        self.assertEqual(
+            {
+                "$ref": "#/components/schemas/GoalLifecycleOutcomeV1",
+            },
+            result_properties["lifecycle_outcome"],
+        )
+        self.assertEqual(
+            {
+                "CREATE_CANDIDATE",
+                "PUBLISH_EVENT",
+                "VERIFY_DELIVERY",
+                "DECIDE_BUSINESS_SEMANTICS",
+                "EVALUATE_OPTIMIZATION_ELIGIBILITY",
+                "CLEANUP_REJECTED_CANDIDATE",
+            },
+            actions,
+        )
+        self.assertEqual(
+            "^[0-9a-f]{64}$",
+            schemas["GoalLifecycleOutcomeV1"]["properties"][
+                "evidence_digest"
+            ]["pattern"],
         )
 
     def test_result_proposal_and_execution_are_optional_inputs(self) -> None:

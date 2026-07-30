@@ -14,8 +14,9 @@ from mox_adv.environment import (
     ExecutionEnvironment,
 )
 from mox_adv.module_api.v1.contracts import (
-    ContractValidationError,
     MODULE_STATUSES,
+    ContractValidationError,
+    GoalLifecycleOutcomeV1,
     MetricValueV1,
     ModuleAssessmentV1,
     ModuleHypothesisV1,
@@ -46,15 +47,19 @@ class ModuleDecisionFactsV1:
     recommendations: Tuple[ModuleRecommendationV1, ...]
     provenance: Tuple[ModuleProvenanceV1, ...]
     hypotheses: Tuple[ModuleHypothesisV1, ...] = ()
+    lifecycle_outcome: GoalLifecycleOutcomeV1 | None = None
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        value = {
             "metrics": [item.as_dict() for item in self.metrics],
             "assessment": self.assessment.as_dict(),
             "recommendations": [item.as_dict() for item in self.recommendations],
             "hypotheses": [item.as_dict() for item in self.hypotheses],
             "provenance": [item.as_dict() for item in self.provenance],
         }
+        if self.lifecycle_outcome is not None:
+            value["lifecycle_outcome"] = self.lifecycle_outcome.as_dict()
+        return value
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,7 @@ PACKAGE_MODULES = {
         "adapters",
         "contracts",
         "decision_records",
+        "goal_lifecycle_contracts",
     },
     "mox_adv.modules": {"__init__", "_bound", "direct"},
 }

@@ -11,9 +11,18 @@ SOURCE_ROOT = REPOSITORY_ROOT / "src"
 PACKAGE_MODULES = {
     "mox_adv": {
         "__init__",
+        "commands",
         "contracts",
+        "control_state",
         "environment",
+        "goal_adapters",
+        "goal_contracts",
+        "goal_evidence",
+        "goal_service",
+        "goal_store",
+        "interrupt_state",
         "metrika_analysis",
+        "metrika_goal_lifecycle",
         "metrika_metrics",
         "metrika_provider",
         "module_analysis",
@@ -24,6 +33,7 @@ PACKAGE_MODULES = {
         "adapters",
         "contracts",
         "decision_records",
+        "goal_lifecycle_contracts",
     },
     "mox_adv.modules": {"__init__", "_bound", "metrika"},
 }

@@ -10,6 +10,12 @@ from mox_adv.metrika_analysis import (
     StandaloneMetrikaAnalysisV1,
     utc_now,
 )
+from mox_adv.metrika_goal_lifecycle import (
+    AuthorizedMetrikaGoalLifecycleProviderV1,
+    BoundMetrikaGoalLifecycleProviderV1,
+    MetrikaGoalLifecycleAuthorizationError,
+    StandaloneMetrikaGoalLifecycleV1,
+)
 from mox_adv.metrika_provider import (
     AuthorizedMetrikaReadProviderV1,
     BoundMetrikaReadProviderV1,
@@ -36,11 +42,16 @@ class MetrikaModuleV1(BoundProviderModuleV1):
         clock: Callable[[], datetime] = utc_now,
         decision_records: Optional[ModuleDecisionRecordStoreV1] = None,
         provider_reader: Optional[AuthorizedMetrikaReadProviderV1] = None,
+        goal_lifecycle_provider: Optional[
+            AuthorizedMetrikaGoalLifecycleProviderV1
+        ] = None,
     ) -> None:
-        if implementation is not None and provider_reader is not None:
+        if implementation is not None and (
+            provider_reader is not None or goal_lifecycle_provider is not None
+        ):
             raise ContractValidationError(
                 "Metrika cannot combine a legacy implementation "
-                "with a standalone provider reader."
+                "with standalone providers."
             )
         self.decision_records = (
             InMemoryDecisionRecordStoreV1()
@@ -53,7 +64,25 @@ class MetrikaModuleV1(BoundProviderModuleV1):
                 decision_records=self.decision_records,
                 provider_reader=provider_reader,
             )
-            implementation = service.invoke
+            if goal_lifecycle_provider is None:
+                implementation = service.invoke
+            else:
+                lifecycle = StandaloneMetrikaGoalLifecycleV1(
+                    identity=METRIKA_IDENTITY,
+                    provider=goal_lifecycle_provider,
+                    decision_records=self.decision_records,
+                    clock=clock,
+                )
+
+                def invoke(request: ModuleRequestV1) -> ModuleResultV1:
+                    if (
+                        request.operation.operation_type
+                        == "MANAGE_GOAL_CANDIDATE"
+                    ):
+                        return lifecycle.invoke(request)
+                    return service.invoke(request)
+
+                implementation = invoke
         super().__init__(
             identity=METRIKA_IDENTITY,
             implementation=implementation,
@@ -62,8 +91,11 @@ class MetrikaModuleV1(BoundProviderModuleV1):
 
 __all__ = [
     "AuthorizedMetrikaReadProviderV1",
+    "AuthorizedMetrikaGoalLifecycleProviderV1",
+    "BoundMetrikaGoalLifecycleProviderV1",
     "BoundMetrikaReadProviderV1",
     "MetrikaModuleV1",
     "MetrikaReadAuthorizationError",
+    "MetrikaGoalLifecycleAuthorizationError",
     "MetrikaReportReaderV1",
 ]

@@ -350,6 +350,281 @@
           }
         }
       },
+      "GoalCandidateInputV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "name",
+          "event",
+          "site_location",
+          "type",
+          "business_meaning",
+          "priority",
+          "duplicate_signals"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "goal-candidate-v1"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "event": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "site_location": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "business_meaning": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "duplicate_signals": {
+            "type": "array",
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          }
+        }
+      },
+      "GoalEventEvidenceV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "event",
+          "selector",
+          "trigger_selector",
+          "counter_id",
+          "http_method",
+          "request_url",
+          "emitted_count",
+          "intercepted_locally",
+          "real_network_requests"
+        ],
+        "properties": {
+          "event": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "selector": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "trigger_selector": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "counter_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "http_method": {
+            "const": "POST"
+          },
+          "request_url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "emitted_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "intercepted_locally": {
+            "type": "boolean"
+          },
+          "real_network_requests": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "GoalLifecycleCommandV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "action"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "goal-lifecycle-command-v1"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "CREATE_CANDIDATE",
+              "PUBLISH_EVENT",
+              "VERIFY_DELIVERY",
+              "DECIDE_BUSINESS_SEMANTICS",
+              "EVALUATE_OPTIMIZATION_ELIGIBILITY",
+              "CLEANUP_REJECTED_CANDIDATE"
+            ]
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "proposal_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "reservation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "authority_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "candidate_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/GoalCandidateInputV1"
+          },
+          "site_zone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "expected_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "event_evidence": {
+            "$ref": "#/components/schemas/GoalEventEvidenceV1"
+          },
+          "approved": {
+            "type": "boolean"
+          },
+          "reviewer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sample_clicks": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sample_conversions": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "CREATE_CANDIDATE"
+              }
+            },
+            "required": [
+              "run_id",
+              "proposal_id",
+              "reservation_id",
+              "authority_id",
+              "candidate"
+            ]
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "PUBLISH_EVENT"
+              }
+            },
+            "required": [
+              "candidate_id",
+              "authority_id",
+              "site_zone",
+              "expected_version"
+            ]
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "VERIFY_DELIVERY"
+              }
+            },
+            "required": [
+              "candidate_id",
+              "event_evidence"
+            ]
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "DECIDE_BUSINESS_SEMANTICS"
+              }
+            },
+            "required": [
+              "candidate_id",
+              "approved",
+              "reviewer"
+            ]
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "EVALUATE_OPTIMIZATION_ELIGIBILITY"
+              }
+            },
+            "required": [
+              "candidate_id",
+              "observed_at",
+              "sample_clicks",
+              "sample_conversions"
+            ]
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "CLEANUP_REJECTED_CANDIDATE"
+              }
+            },
+            "required": [
+              "candidate_id",
+              "run_id"
+            ]
+          }
+        ]
+      },
       "ModuleOperationV1": {
         "type": "object",
         "additionalProperties": false,
@@ -461,6 +736,9 @@
           },
           "external_evidence": {
             "$ref": "#/components/schemas/ExternalEvidenceV1"
+          },
+          "goal_lifecycle_command": {
+            "$ref": "#/components/schemas/GoalLifecycleCommandV1"
           },
           "operation": {
             "$ref": "#/components/schemas/ModuleOperationV1"
@@ -745,6 +1023,152 @@
           }
         }
       },
+      "GoalLifecycleEvidenceOutcomeV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "event",
+          "counter_id",
+          "emitted_count",
+          "duplicate_event_absent",
+          "intercepted_locally",
+          "real_network_requests",
+          "delivery_observed",
+          "virtual_elapsed_minutes",
+          "poll_count",
+          "checked_at"
+        ],
+        "properties": {
+          "event": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "counter_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "emitted_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "duplicate_event_absent": {
+            "type": "boolean"
+          },
+          "intercepted_locally": {
+            "type": "boolean"
+          },
+          "real_network_requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "delivery_observed": {
+            "type": "boolean"
+          },
+          "virtual_elapsed_minutes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "poll_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "GoalLifecycleOutcomeV1": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "lifecycle_status",
+          "candidate_id",
+          "goal_id",
+          "candidate_status",
+          "technical_status",
+          "optimization_eligible",
+          "cleaned_up",
+          "event_evidence",
+          "evidence_digest"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "CREATE_CANDIDATE",
+              "PUBLISH_EVENT",
+              "VERIFY_DELIVERY",
+              "DECIDE_BUSINESS_SEMANTICS",
+              "EVALUATE_OPTIMIZATION_ELIGIBILITY",
+              "CLEANUP_REJECTED_CANDIDATE"
+            ]
+          },
+          "lifecycle_status": {
+            "type": "string",
+            "enum": [
+              "CANDIDATE",
+              "EVENT_PUBLISHED",
+              "TECHNICALLY_VERIFIED",
+              "TECHNICALLY_INCONCLUSIVE",
+              "APPROVED",
+              "REJECTED",
+              "OPTIMIZATION_ELIGIBLE",
+              "OPTIMIZATION_INELIGIBLE",
+              "CLEANED_UP"
+            ]
+          },
+          "candidate_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "goal_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "candidate_status": {
+            "type": "string",
+            "enum": [
+              "CANDIDATE",
+              "APPROVED",
+              "REJECTED"
+            ]
+          },
+          "technical_status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "VERIFIED",
+              "INCONCLUSIVE"
+            ]
+          },
+          "optimization_eligible": {
+            "type": "boolean"
+          },
+          "cleaned_up": {
+            "type": "boolean"
+          },
+          "event_evidence": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GoalLifecycleEvidenceOutcomeV1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
       "ModuleResultV1": {
         "type": "object",
         "additionalProperties": false,
@@ -832,6 +1256,9 @@
                 "type": "null"
               }
             ]
+          },
+          "lifecycle_outcome": {
+            "$ref": "#/components/schemas/GoalLifecycleOutcomeV1"
           },
           "provenance": {
             "type": "array",

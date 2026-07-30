@@ -40,15 +40,29 @@ from mox_adv.module_api.v1.decision_records import (
     ModuleDecisionRecordStoreV1,
     ModuleDecisionV1,
 )
+from mox_adv.module_api.v1.goal_lifecycle_contracts import (
+    GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION,
+    GoalCandidateInputV1,
+    GoalEventEvidenceV1,
+    GoalLifecycleCommandV1,
+    GoalLifecycleEvidenceOutcomeV1,
+    GoalLifecycleOutcomeV1,
+)
 
 __all__ = [
     "EXTERNAL_EVIDENCE_SCHEMA_VERSION",
+    "GOAL_LIFECYCLE_COMMAND_SCHEMA_VERSION",
     "MODULE_REQUEST_SCHEMA_VERSION",
     "MODULE_RESULT_SCHEMA_VERSION",
     "OPERATION_TYPES_BY_KIND",
     "ClosedPeriodV1",
     "ContractValidationError",
     "ExternalEvidenceV1",
+    "GoalCandidateInputV1",
+    "GoalEventEvidenceV1",
+    "GoalLifecycleCommandV1",
+    "GoalLifecycleEvidenceOutcomeV1",
+    "GoalLifecycleOutcomeV1",
     "HttpJsonModuleAdapterV1",
     "HttpJsonResponseV1",
     "InProcessModuleAdapterV1",
