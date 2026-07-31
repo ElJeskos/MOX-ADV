@@ -1,0 +1,12 @@
+{
+  "schema_version": "mox-adv-production-read-v1",
+  "organization": "payplaine",
+  "connection": "yandex-production",
+  "direct_account": null,
+  "direct_client_login": null,
+  "campaign_id": null,
+  "metrika_counter_id": null,
+  "metrika_goal_id": null,
+  "currency": "RUB",
+  "lookback_days": 7
+}

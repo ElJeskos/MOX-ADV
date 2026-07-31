@@ -23,6 +23,94 @@ Every artifact contains the run schema and approved Gate 0 policy version.
 The hidden SQLite journal in the run directory is the transactional source for the monotonic event sequence and SHA-256 hash chain.
 A run identifier is single-use, so rerunning the same identifier leaves the completed run unchanged.
 
+## Local operator UI
+
+Start the local operator interface.
+
+```shell
+.venv/bin/mox-adv ui
+```
+
+The command opens `http://127.0.0.1:8878` and keeps the server bound to loopback.
+Test mode runs one linked Direct and Metrika fixture, calculates metrics, creates a typed recommendation, applies the exact change to a sealed fake adapter, verifies readback, and writes a standalone HTML report under `runs/ui-*/`.
+The test lab lets the operator enter impressions, clicks, spend, visits, conversions, weekly budget, and baseline values while the analytics layer derives CTR, CPC, conversion rate, CPA, and budget utilization.
+The test autopilot supports intervals from five minutes to one day, editable deterministic trigger thresholds, an immediate first run when enabled, and a decision history that records which trigger matched and why.
+Editable trigger values can only tighten the approved Gate 0 thresholds.
+Test automation settings and the decision ledger are stored in `runs/ui-test-automation.sqlite3`.
+The dashboard exposes exactly one report download action, and it produces a standalone HTML file.
+The main mode reads real production data through three allowlisted operations: Direct Reports `get`, Direct Campaigns `get`, and Metrika Statistics `get`.
+The main dashboard streams confirmed backend stage transitions so the operator sees Direct, Metrika, analytics, recommendation, and the disabled execution boundary as they complete.
+The current production reader accepts a unified campaign whose search strategy exposes a real weekly spend limit.
+It reads the campaign time zone from Direct and queries Metrika with the matching UTC offset so daily rows use the same calendar boundary.
+It calculates metrics, creates a recommendation, and writes JSON and standalone HTML reports under `runs/ui-*/`.
+Because the read-only APIs do not establish a trusted optimization baseline or change author, the main report marks this first snapshot as partial and routes the recommendation to human review instead of proposing a financial change.
+The main mode does not create an approval, invoke an executor, expose a write-capable transport method, or permit write requests.
+If any trusted binding or read credential is missing, the main mode fails closed and does not fall back to fixture data.
+
+Copy the non-secret configuration template to the local user configuration directory and replace the campaign and goal identifiers.
+The Direct client login and the single Metrika counter ID come from `.env`.
+
+```shell
+mkdir -p ~/.config/mox-adv
+cp config/production-read.example.json ~/.config/mox-adv/production-read.json
+```
+
+Copy the local binding template, fill all four original Yandex variables, and restrict the file to the current user.
+The dashboard reads only `YANDEX_DIRECT_OAUTH_TOKEN`, `YANDEX_DIRECT_CLIENT_LOGIN`, `YANDEX_METRICA_OAUTH_TOKEN`, and `YANDEX_METRICA_COUNTER_IDS` directly from `.env`; it does not import the file into the process environment.
+The current linked analysis accepts exactly one positive counter ID in `YANDEX_METRICA_COUNTER_IDS` and fails closed if the variable contains a list.
+The repository ignores `.env` and `.env.*`, while `.env.example` remains tracked without values.
+The Metrika token must have the `metrika:read` scope.
+
+```shell
+cp .env.example .env
+chmod 600 .env
+```
+
+Use `Ctrl+C` in the terminal to stop the UI.
+
+## Temporary client demo
+
+Start the complete Dashboard and publish it through an on-demand HTTPS tunnel.
+
+```shell
+scripts/mox-adv-demo-site
+```
+
+The command prints a temporary public URL that can be shared with a client.
+The public page uses the same local Dashboard state and keeps every configured Yandex integration available, including the read-only Direct campaign view.
+There is no separate login or isolated demo database, so every visitor shares the current local state.
+The Python server remains bound to `127.0.0.1`; only the selected port is forwarded by the SSH tunnel.
+Press `Ctrl+C` to stop both processes and invalidate the public URL.
+A new URL is generated the next time the command starts.
+If the free tunnel renews its address while running, the command prints the replacement URL.
+
+## Vercel client demo
+
+Link the repository to a Vercel project and create a private Blob store in the same region as the Python Function.
+
+```shell
+vercel link
+vercel blob create-store mox-adv-state \
+  --access private \
+  --region iad1 \
+  --yes \
+  --environment production \
+  --environment preview
+```
+
+Add `YANDEX_DIRECT_OAUTH_TOKEN`, `YANDEX_DIRECT_CLIENT_LOGIN`, `YANDEX_METRICA_OAUTH_TOKEN`, `YANDEX_METRICA_COUNTER_IDS`, and `MOX_ADV_PRODUCTION_READ_JSON` as encrypted Production and Preview variables.
+The Blob integration injects `BLOB_READ_WRITE_TOKEN`; never commit or print any of these values.
+Deploy the production version.
+
+```shell
+vercel --prod
+```
+
+The Vercel runtime restores the shared Dashboard snapshot from private Blob storage before API requests and stores a new snapshot after state-changing requests.
+This preserves test campaigns, decision history, and other local file-backed state across Python Function instances.
+All visitors use the same unauthenticated demonstration state.
+The Yandex integration remains read-only and continues to reject external write requests.
+
 ## Docker run
 
 Build the local image.

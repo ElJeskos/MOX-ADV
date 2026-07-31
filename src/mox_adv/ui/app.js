@@ -13,12 +13,51 @@ const state = {
   currentApprovalId: null,
   controlPlane: null,
   evidence: null,
+  campaignSource: "test",
+  campaignDraft: null,
+  campaignCatalog: [],
+  directCampaignCatalog: [],
+  selectedDirectCampaignId: null,
+  directCampaignFetchedAt: null,
+  directCampaignAccount: null,
+  directCampaignBusy: false,
+  campaignDirty: false,
+  campaignBusy: false,
+  campaignLaunch: null,
+  campaignGoalLifecycle: null,
+  campaignGoalBusy: false,
+  campaignPrimaryEvent: "",
+  campaignLandingPageValue: "",
+  campaignGoals: [],
+  campaignAdGroups: [],
+  selectedAdGroupId: null,
+  selectedAdId: null,
+  historyCompact: true,
+  historyPage: 1,
+  historyPages: 1,
+  historyEntries: [],
+  historyTotal: 0,
+  historyPageCache: new Map(),
+  historyCacheSignature: "",
+  selectedOutcomeRunId: null,
 };
+
+const campaignLifecycleSteps = Object.freeze([
+  "CAMPAIGN_ADD",
+  "AD_GROUP_ADD",
+  "ADS_ADD",
+  "KEYWORD_ADD",
+  "MODERATION_SUBMIT",
+  "MODERATION_READBACK",
+  "CAMPAIGN_LAUNCH",
+  "FULL_READBACK",
+]);
 
 const elements = {
   pages: Array.from(document.querySelectorAll("[data-page]")),
   navigationLinks: Array.from(document.querySelectorAll("[data-nav]")),
   pageLinks: Array.from(document.querySelectorAll("[data-page-link]")),
+  publicDemoBanner: document.querySelector("#public-demo-banner"),
   overviewAutomationState: document.querySelector(
     "#overview-automation-state",
   ),
@@ -44,6 +83,15 @@ const elements = {
   metrics: document.querySelector("#metrics"),
   reportRunId: document.querySelector("#report-run-id"),
   reportPeriod: document.querySelector("#report-period"),
+  campaignGoalSummary: document.querySelector("#campaign-goal-summary"),
+  reportCampaignGoal: document.querySelector("#report-campaign-goal"),
+  reportGoalUsage: document.querySelector("#report-goal-usage"),
+  reportGoalTarget: document.querySelector("#report-goal-target"),
+  reportGoalActual: document.querySelector("#report-goal-actual"),
+  reportGoalAchievement: document.querySelector(
+    "#report-goal-achievement",
+  ),
+  reportGoalStatus: document.querySelector("#report-goal-status"),
   decisionTitle: document.querySelector("#decision-title"),
   decisionCopy: document.querySelector("#decision-copy"),
   changeLabel: document.querySelector("#change-label"),
@@ -198,6 +246,17 @@ const elements = {
   recommendationMessage: document.querySelector("#recommendation-message"),
   triggerRulesHost: document.querySelector("#trigger-rules-host"),
   decisionHistory: document.querySelector("#decision-history"),
+  historyDecisionsTab: document.querySelector("#history-decisions-tab"),
+  historyOutcomesTab: document.querySelector("#history-outcomes-tab"),
+  historyDecisionsPanel: document.querySelector("#history-decisions-panel"),
+  historyOutcomesPanel: document.querySelector("#history-outcomes-panel"),
+  historyExpand: document.querySelector("#history-expand"),
+  historyPagination: document.querySelector("#history-pagination"),
+  historyPrevious: document.querySelector("#history-previous"),
+  historyNext: document.querySelector("#history-next"),
+  historyPageStatus: document.querySelector("#history-page-status"),
+  historyTotal: document.querySelector("#history-total"),
+  decisionOutcome: document.querySelector("#decision-outcome"),
   operatingModes: Array.from(
     document.querySelectorAll("#operating-modes button"),
   ),
@@ -219,16 +278,159 @@ const elements = {
   engageKillSwitch: document.querySelector("#engage-kill-switch"),
   releaseKillSwitch: document.querySelector("#release-kill-switch"),
   controlPlaneMessage: document.querySelector("#control-plane-message"),
-  runCampaignWorkflow: document.querySelector("#run-campaign-workflow"),
-  campaignWorkflowSteps: document.querySelector("#campaign-workflow-steps"),
-  runGoalWorkflow: document.querySelector("#run-goal-workflow"),
-  approveGoal: document.querySelector("#approve-goal"),
-  rejectGoal: document.querySelector("#reject-goal"),
-  goalWorkflowSteps: document.querySelector("#goal-workflow-steps"),
-  workflowMessage: document.querySelector("#workflow-message"),
-  impactFixture: document.querySelector("#impact-fixture"),
-  runImpact: document.querySelector("#run-impact"),
-  impactResult: document.querySelector("#impact-result"),
+  campaignDraftStatus: document.querySelector("#campaign-draft-status"),
+  campaignDraftMeta: document.querySelector("#campaign-draft-meta"),
+  campaignMessage: document.querySelector("#campaign-message"),
+  campaignConsoleDescription: document.querySelector(
+    "#campaign-console-description",
+  ),
+  campaignSourceButtons: Array.from(
+    document.querySelectorAll("[data-campaign-source]"),
+  ),
+  campaignSourceNote: document.querySelector("#campaign-source-note"),
+  campaignCount: document.querySelector("#campaign-count"),
+  campaignCountLabel: document.querySelector("#campaign-count-label"),
+  campaignFilterCount: document.querySelector("#campaign-filter-count"),
+  campaignSearch: document.querySelector("#campaign-search"),
+  campaignList: document.querySelector("#campaign-list"),
+  campaignEmpty: document.querySelector("#campaign-empty"),
+  campaignRegistryEyebrow: document.querySelector(
+    "#campaign-registry-eyebrow",
+  ),
+  campaignRegistryTitle: document.querySelector("#campaign-registry-title"),
+  campaignBudgetHeading: document.querySelector(
+    "#campaign-budget-heading",
+  ),
+  campaignMetricHeading: document.querySelector(
+    "#campaign-metric-heading",
+  ),
+  campaignEditorTitle: document.querySelector("#campaign-editor-title"),
+  campaignStatusBadge: document.querySelector("#campaign-status-badge"),
+  newCampaign: document.querySelector("#new-campaign"),
+  refreshDirectCampaigns: document.querySelector(
+    "#refresh-direct-campaigns",
+  ),
+  saveCampaign: document.querySelector("#save-campaign"),
+  launchCampaign: document.querySelector("#launch-campaign"),
+  deleteCampaign: document.querySelector("#delete-campaign"),
+  campaignInspectorActions: document.querySelector(
+    "#campaign-inspector-actions",
+  ),
+  campaignLaunchStatus: document.querySelector("#campaign-launch-status"),
+  campaignLaunchTitle: document.querySelector("#campaign-launch-title"),
+  campaignLaunchCopy: document.querySelector("#campaign-launch-copy"),
+  campaignLaunchSteps: document.querySelector("#campaign-launch-steps"),
+  campaignLaunchSafety: document.querySelector("#campaign-launch-safety"),
+  campaignLaunchTime: document.querySelector("#campaign-launch-time"),
+  campaignLaunchRunId: document.querySelector("#campaign-launch-run-id"),
+  campaignGoalLifecycle: document.querySelector(
+    "#campaign-goal-lifecycle",
+  ),
+  campaignGoalLifecycleTitle: document.querySelector(
+    "#campaign-goal-lifecycle-title",
+  ),
+  campaignGoalLifecycleCopy: document.querySelector(
+    "#campaign-goal-lifecycle-copy",
+  ),
+  campaignGoalBadge: document.querySelector("#campaign-goal-badge"),
+  campaignGoalCandidate: document.querySelector(
+    "#campaign-goal-candidate",
+  ),
+  campaignGoalEvent: document.querySelector("#campaign-goal-event"),
+  campaignGoalDelivery: document.querySelector(
+    "#campaign-goal-delivery",
+  ),
+  campaignGoalOptimization: document.querySelector(
+    "#campaign-goal-optimization",
+  ),
+  campaignGoalSafety: document.querySelector("#campaign-goal-safety"),
+  campaignGoalRunId: document.querySelector("#campaign-goal-run-id"),
+  campaignGoalEvidenceDetails: document.querySelector(
+    "#campaign-goal-evidence-details",
+  ),
+  campaignGoalEvidenceId: document.querySelector(
+    "#campaign-goal-evidence-id",
+  ),
+  campaignGoalEvidenceType: document.querySelector(
+    "#campaign-goal-evidence-type",
+  ),
+  campaignGoalEvidenceEvent: document.querySelector(
+    "#campaign-goal-evidence-event",
+  ),
+  campaignGoalEvidenceSelector: document.querySelector(
+    "#campaign-goal-evidence-selector",
+  ),
+  campaignGoalEvidenceScenario: document.querySelector(
+    "#campaign-goal-evidence-scenario",
+  ),
+  campaignGoalEvidenceCheckedAt: document.querySelector(
+    "#campaign-goal-evidence-checked-at",
+  ),
+  campaignGoalEvidenceAuthor: document.querySelector(
+    "#campaign-goal-evidence-author",
+  ),
+  campaignGoalEvidenceVersion: document.querySelector(
+    "#campaign-goal-evidence-version",
+  ),
+  verifyCampaignGoal: document.querySelector("#verify-campaign-goal"),
+  approveCampaignGoal: document.querySelector("#approve-campaign-goal"),
+  rejectCampaignGoal: document.querySelector("#reject-campaign-goal"),
+  campaignGoalMessage: document.querySelector("#campaign-goal-message"),
+  campaignDeleteDialog: document.querySelector("#campaign-delete-dialog"),
+  campaignDeleteName: document.querySelector("#campaign-delete-name"),
+  cancelCampaignDelete: document.querySelector("#cancel-campaign-delete"),
+  confirmCampaignDelete: document.querySelector(
+    "#confirm-campaign-delete",
+  ),
+  campaignEditor: document.querySelector("#campaign-editor"),
+  directCampaignInspector: document.querySelector(
+    "#direct-campaign-inspector",
+  ),
+  directCampaignFacts: {
+    campaign_id: document.querySelector("#direct-campaign-id"),
+    type: document.querySelector("#direct-campaign-type"),
+    state: document.querySelector("#direct-campaign-state"),
+    status: document.querySelector("#direct-campaign-status"),
+    status_payment: document.querySelector("#direct-campaign-payment"),
+    daily_budget_micros: document.querySelector("#direct-campaign-budget"),
+    start_date: document.querySelector("#direct-campaign-start"),
+    end_date: document.querySelector("#direct-campaign-end"),
+    timezone: document.querySelector("#direct-campaign-timezone"),
+    client_info: document.querySelector("#direct-campaign-client"),
+  },
+  campaignInputs: {
+    name: document.querySelector("#campaign-name"),
+    weekly_budget_rub: document.querySelector("#campaign-weekly-budget"),
+    keyword: document.querySelector("#campaign-keyword"),
+    landing_page: document.querySelector("#campaign-landing-page"),
+    business_goal: document.querySelector("#campaign-business-goal"),
+    target_cpa_rub: document.querySelector("#campaign-target-cpa"),
+    goal_strategy: document.querySelector("#campaign-goal-strategy"),
+    payment_model: document.querySelector("#campaign-payment-model"),
+    attribution_model: document.querySelector("#campaign-attribution-model"),
+    counter_id: document.querySelector("#campaign-counter-id"),
+  },
+  campaignGoals: document.querySelector("#campaign-goals"),
+  addCampaignGoal: document.querySelector("#add-campaign-goal"),
+  campaignAdGroupSelect: document.querySelector(
+    "#campaign-ad-group-select",
+  ),
+  addAdGroup: document.querySelector("#add-ad-group"),
+  deleteAdGroup: document.querySelector("#delete-ad-group"),
+  campaignPilotGroup: document.querySelector("#campaign-pilot-group"),
+  campaignAdGroupName: document.querySelector("#campaign-ad-group-name"),
+  campaignAdGroupKeywords: document.querySelector(
+    "#campaign-ad-group-keywords",
+  ),
+  campaignAdGroupNegativeKeywords: document.querySelector(
+    "#campaign-ad-group-negative-keywords",
+  ),
+  campaignAutotargeting: Array.from(
+    document.querySelectorAll("[data-autotargeting]"),
+  ),
+  addCampaignAd: document.querySelector("#add-campaign-ad"),
+  campaignAdTabs: document.querySelector("#campaign-ad-tabs"),
+  campaignAdEditor: document.querySelector("#campaign-ad-editor"),
   refreshEvidence: document.querySelector("#refresh-evidence"),
   runFullEvidence: document.querySelector("#run-full-evidence"),
   evidenceReportDownload: document.querySelector(
@@ -534,6 +736,28 @@ const progressCopy = {
   apply: "Проверяем границу исполнения",
 };
 
+const executionReasonLabels = {
+  MONETARY_LIMIT_EXCEEDED: "Лимит денежных изменений превышен",
+  DAILY_CHANGE_LIMIT_EXCEEDED: "Суточный лимит изменений превышен",
+  ACTION_QUOTA_REACHED: "Лимит действий исчерпан",
+  COOLDOWN_ACTIVE: "Период ожидания после прошлого изменения ещё не завершён",
+  KILL_SWITCH_UNAVAILABLE: "Аварийная остановка недоступна",
+  SNAPSHOT_NOT_COMPARABLE: "Данные нельзя безопасно сопоставить",
+  DIRECT_SNAPSHOT_STALE: "Данные Директа устарели",
+  METRIKA_SNAPSHOT_STALE: "Данные Метрики устарели",
+  WATERMARK_SKEW_EXCEEDED: "Источники обновлены в несовместимое время",
+  FINGERPRINT_MISMATCH: "Кампания изменилась после подготовки предложения",
+};
+
+function executionReason(execution) {
+  const reasonCode = String(execution?.reason_code || "");
+  return (
+    executionReasonLabels[reasonCode] ||
+    reasonCode ||
+    "Безопасная проверка остановила применение"
+  );
+}
+
 function setText(element, value) {
   if (!element) return;
   element.textContent = String(value);
@@ -545,12 +769,13 @@ const pageTitles = {
   autopilot: "Автопилот",
   rules: "Правила",
   history: "История",
-  workflows: "Сценарии",
+  campaign: "Рекламная кампания",
   control: "Контроль",
 };
 
 function pageFromPath(pathname) {
   const candidate = pathname.replace(/^\/+|\/+$/g, "") || "overview";
+  if (candidate === "workflows") return "campaign";
   return Object.hasOwn(pageTitles, candidate) ? candidate : "overview";
 }
 
@@ -825,6 +1050,49 @@ function renderMetrics(metrics) {
     item.append(name, value, suffix);
     elements.metrics.append(item);
   });
+}
+
+function renderCampaignGoal(goal) {
+  const statusLabels = {
+    ACHIEVED: "Достигнута",
+    NOT_ACHIEVED: "Не достигнута",
+    INSUFFICIENT_DATA: "Недостаточно данных",
+    NEEDS_REVIEW: "Нужна проверка",
+    NOT_EVALUABLE: "Нельзя оценить",
+  };
+  setText(elements.reportCampaignGoal, goal.business_goal.meaning);
+  setText(
+    elements.reportGoalUsage,
+    goal.used_in_decision
+      ? "Учитывается при выборе решения"
+      : "Не используется в решении",
+  );
+  setText(
+    elements.reportGoalTarget,
+    `≤ ${formatRuleNumber(goal.target_kpi.target_maximum)} ₽`,
+  );
+  setText(
+    elements.reportGoalActual,
+    goal.target_kpi.actual === "NOT_APPLICABLE"
+      ? "Недоступно"
+      : `${formatRuleNumber(goal.target_kpi.actual)} ₽`,
+  );
+  setText(
+    elements.reportGoalStatus,
+    statusLabels[goal.achievement_status] || goal.achievement_status,
+  );
+  elements.reportGoalAchievement.classList.toggle(
+    "is-achieved",
+    goal.achievement_status === "ACHIEVED",
+  );
+  elements.reportGoalAchievement.classList.toggle(
+    "is-not-achieved",
+    goal.achievement_status === "NOT_ACHIEVED",
+  );
+  elements.reportGoalAchievement.classList.toggle(
+    "is-pending",
+    !["ACHIEVED", "NOT_ACHIEVED"].includes(goal.achievement_status),
+  );
 }
 
 function rublesFromMicros(value) {
@@ -1218,13 +1486,8 @@ function historyOrigin(value) {
   return value === "SCHEDULED" ? "По расписанию" : "Ручной запуск";
 }
 
-function renderHistory(items) {
-  elements.decisionHistory.replaceChildren();
+function updateHistoryOverview(items) {
   if (!items.length) {
-    const empty = document.createElement("p");
-    empty.className = "history-empty";
-    setText(empty, "История появится после первого тестового цикла.");
-    elements.decisionHistory.append(empty);
     setText(elements.overviewLastDecision, "Решений пока нет");
     setText(elements.overviewLastRun, "Запустите первый цикл вручную");
     return;
@@ -1238,6 +1501,268 @@ function renderHistory(items) {
     elements.overviewLastRun,
     `${historyOrigin(latest.origin)} · ${formatMoment(latest.created_at)}`,
   );
+}
+
+function showHistoryTab(tab) {
+  const outcomes = tab === "outcomes";
+  elements.historyDecisionsTab.setAttribute(
+    "aria-selected",
+    String(!outcomes),
+  );
+  elements.historyOutcomesTab.setAttribute(
+    "aria-selected",
+    String(outcomes),
+  );
+  elements.historyDecisionsTab.tabIndex = outcomes ? -1 : 0;
+  elements.historyOutcomesTab.tabIndex = outcomes ? 0 : -1;
+  elements.historyDecisionsPanel.hidden = outcomes;
+  elements.historyOutcomesPanel.hidden = !outcomes;
+}
+
+function impactSnapshotMetrics(snapshot) {
+  const metrics = snapshot?.metrics || {};
+  const conversions = Number(metrics.goal_visits || 0);
+  const spendRub = Number(metrics.cost_micros || 0) / 1_000_000;
+  return {
+    conversions,
+    spendRub,
+    cpa: conversions > 0 ? spendRub / conversions : null,
+  };
+}
+
+function outcomeFact(label, value, detail = "") {
+  const row = document.createElement("div");
+  const name = document.createElement("span");
+  const result = document.createElement("strong");
+  setText(name, label);
+  setText(result, value);
+  row.append(name, result);
+  if (detail) {
+    const note = document.createElement("small");
+    setText(note, detail);
+    row.append(note);
+  }
+  return row;
+}
+
+function periodLabel(snapshot) {
+  if (!snapshot?.period_start || !snapshot?.period_end) return "Период не указан";
+  return `${snapshot.period_start} — ${snapshot.period_end}`;
+}
+
+function executionChange(report) {
+  const execution = report?.execution || {};
+  if (
+    typeof execution.before_micros === "number" &&
+    typeof execution.after_micros === "number"
+  ) {
+    return (
+      `${formatRuleNumber(execution.before_micros / 1_000_000)} ₽ → ` +
+      `${formatRuleNumber(execution.after_micros / 1_000_000)} ₽`
+    );
+  }
+  if (execution.status === "NO_CHANGE") return "Настройки сохранены без изменений";
+  return "Решение зафиксировано в журнале";
+}
+
+function renderDecisionOutcome(payload, entry, report) {
+  const workflow = payload?.outcome || null;
+  const executionLabels = {
+    APPLIED: "Применено",
+    NO_CHANGE: "Без изменений",
+    PENDING_APPROVAL: "Ждёт решения",
+    BLOCKED: "Остановлено",
+    NOT_STARTED: "Не применялось",
+  };
+  const heading = document.createElement("div");
+  const eyebrow = document.createElement("p");
+  const title = document.createElement("h3");
+  const accepted = document.createElement("section");
+  const acceptedLabel = document.createElement("p");
+  const acceptedTitle = document.createElement("h4");
+  const acceptedReason = document.createElement("p");
+  const acceptedFacts = document.createElement("div");
+
+  heading.className = "decision-outcome-head";
+  eyebrow.className = "eyebrow";
+  accepted.className = "accepted-decision";
+  acceptedLabel.className = "accepted-decision-label";
+  acceptedReason.className = "accepted-decision-reason";
+  acceptedFacts.className = "accepted-decision-facts";
+  setText(
+    eyebrow,
+    `Решение от ${formatMoment(entry.created_at)}`,
+  );
+  setText(title, actionLabels[entry.action] || entry.action);
+  heading.append(eyebrow, title);
+  setText(acceptedLabel, "Принятое решение");
+  setText(acceptedTitle, actionLabels[entry.action] || entry.action);
+  setText(acceptedReason, operatorReason(entry.reason));
+  acceptedFacts.append(
+    outcomeFact(
+      "Статус",
+      executionLabels[entry.execution_status] || entry.execution_status,
+    ),
+    outcomeFact("Фактическое изменение", executionChange(report)),
+  );
+  accepted.append(
+    acceptedLabel,
+    acceptedTitle,
+    acceptedReason,
+    acceptedFacts,
+  );
+
+  if (!workflow) {
+    const pending = document.createElement("section");
+    const pendingLabel = document.createElement("p");
+    const pendingTitle = document.createElement("h4");
+    const pendingCopy = document.createElement("p");
+    pending.className = "outcome-pending";
+    pendingLabel.className = "eyebrow";
+    setText(pendingLabel, "Наблюдение после изменения");
+    setText(pendingTitle, "Исход ещё формируется");
+    setText(
+      pendingCopy,
+      "Данные за сопоставимый период «после» ещё не собраны. " +
+        "Когда наблюдение завершится, здесь появятся CPA, конверсии и следующий шаг.",
+    );
+    pending.append(pendingLabel, pendingTitle, pendingCopy);
+    elements.decisionOutcome.replaceChildren(heading, accepted, pending);
+    return;
+  }
+
+  const before = impactSnapshotMetrics(workflow.exact_diff?.before);
+  const after = impactSnapshotMetrics(workflow.exact_diff?.after);
+  const decisionLabels = {
+    KEEP_CHANGE: "Сохранить изменение",
+    ROLLBACK_CHANGE: "Откатить изменение",
+    ADJUST_CHANGE: "Скорректировать изменение",
+    ESCALATE_TO_HUMAN: "Передать решение человеку",
+  };
+  const confidenceLabels = {
+    READY: "Данных достаточно для решения",
+    INSUFFICIENT_DATA: "Недостаточно данных",
+    STALE_DATA: "Данные устарели",
+  };
+  const resultHeading = document.createElement("div");
+  const resultLabel = document.createElement("p");
+  const resultTitle = document.createElement("h4");
+  const grid = document.createElement("div");
+  const baseline = document.createElement("section");
+  const observed = document.createElement("section");
+  const baselineTitle = document.createElement("h5");
+  const observedTitle = document.createElement("h5");
+  const recommendation = document.createElement("section");
+  const recommendationLabel = document.createElement("p");
+  const recommendationTitle = document.createElement("h4");
+  const recommendationCopy = document.createElement("p");
+
+  resultHeading.className = "outcome-result-heading";
+  resultLabel.className = "eyebrow";
+  grid.className = "decision-outcome-grid";
+  recommendation.className = "decision-outcome-recommendation";
+  recommendationLabel.className = "eyebrow";
+  setText(resultLabel, "Измеренный результат");
+  setText(resultTitle, "Сравнение до и после");
+  resultHeading.append(resultLabel, resultTitle);
+  setText(baselineTitle, "До изменения");
+  baseline.append(
+    baselineTitle,
+    outcomeFact(
+      "CPA",
+      before.cpa === null
+        ? "Недоступно"
+        : `${formatRuleNumber(before.cpa)} ₽`,
+    ),
+    outcomeFact("Конверсии", formatRuleNumber(before.conversions)),
+    outcomeFact("Расход", `${formatRuleNumber(before.spendRub)} ₽`),
+    outcomeFact("Период", periodLabel(workflow.exact_diff?.before)),
+  );
+  setText(observedTitle, "После изменения");
+  observed.append(
+    observedTitle,
+    outcomeFact(
+      "CPA",
+      after.cpa === null
+        ? "Недоступно"
+        : `${formatRuleNumber(after.cpa)} ₽`,
+    ),
+    outcomeFact("Конверсии", formatRuleNumber(after.conversions)),
+    outcomeFact("Расход", `${formatRuleNumber(after.spendRub)} ₽`),
+    outcomeFact("Период", periodLabel(workflow.exact_diff?.after)),
+  );
+  grid.append(baseline, observed);
+  setText(recommendationLabel, "Следующий шаг");
+  setText(
+    recommendationTitle,
+    decisionLabels[workflow.recommended_next_decision] ||
+      workflow.recommended_next_decision ||
+      "Требуется проверка",
+  );
+  setText(
+    recommendationCopy,
+    confidenceLabels[workflow.impact_report?.confidence] ||
+      workflow.impact_report?.confidence ||
+      "Уверенность не определена",
+  );
+  recommendation.append(
+    recommendationLabel,
+    recommendationTitle,
+    recommendationCopy,
+  );
+  elements.decisionOutcome.replaceChildren(
+    heading,
+    accepted,
+    resultHeading,
+    grid,
+    recommendation,
+  );
+}
+
+async function loadDecisionOutcome(entry) {
+  state.selectedOutcomeRunId = entry.run_id;
+  showHistoryTab("outcomes");
+  elements.decisionOutcome.replaceChildren();
+  const loading = document.createElement("p");
+  loading.className = "history-empty";
+  setText(loading, "Загружаем связанный исход…");
+  elements.decisionOutcome.append(loading);
+  try {
+    const [report, outcomeResponse] = await Promise.all([
+      requestJson(`/api/runs/${encodeURIComponent(entry.run_id)}`),
+      fetch(
+        `/api/test-history/${encodeURIComponent(entry.run_id)}/outcome`,
+      ),
+    ]);
+    let payload = null;
+    if (outcomeResponse.ok) {
+      payload = await outcomeResponse.json();
+    } else if (outcomeResponse.status !== 404) {
+      const errorPayload = await outcomeResponse.json();
+      throw new Error(
+        errorPayload.message ||
+          errorPayload.reason_code ||
+          "Не удалось загрузить исход.",
+      );
+    }
+    if (state.selectedOutcomeRunId !== entry.run_id) return;
+    renderDecisionOutcome(payload, entry, report);
+  } catch (error) {
+    loading.classList.add("is-error");
+    setText(loading, error.message);
+  }
+}
+
+function renderHistory(items) {
+  state.historyEntries = items;
+  elements.decisionHistory.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "history-empty";
+    setText(empty, "История появится после первого тестового цикла.");
+    elements.decisionHistory.append(empty);
+    return;
+  }
   items.forEach((entry) => {
     const item = document.createElement("article");
     const origin = document.createElement("div");
@@ -1264,6 +1789,7 @@ function renderHistory(items) {
     const result = document.createElement("div");
     const status = document.createElement("strong");
     const link = document.createElement("a");
+    const outcomeButton = document.createElement("button");
     result.className = "history-status";
     const executionLabels = {
       APPLIED: "Применено",
@@ -1287,23 +1813,123 @@ function renderHistory(items) {
       setText(noReport, "Отчёт не создан");
       result.append(noReport);
     }
+    outcomeButton.type = "button";
+    outcomeButton.className = "history-outcome-link";
+    setText(outcomeButton, "Посмотреть исход");
+    outcomeButton.addEventListener("click", () => {
+      loadDecisionOutcome(entry);
+    });
+    result.append(outcomeButton);
     item.append(origin, trigger, reason, result);
     elements.decisionHistory.append(item);
   });
+}
+
+function updateHistoryPagination(page) {
+  state.historyPage = page.page;
+  state.historyPages = page.pages;
+  state.historyTotal = page.total;
+  setText(elements.historyTotal, page.total);
+  setText(
+    elements.historyPageStatus,
+    `Страница ${page.page} из ${page.pages}`,
+  );
+  elements.historyPrevious.disabled = page.page <= 1;
+  elements.historyNext.disabled = page.page >= page.pages;
+}
+
+function renderHistoryPage(result) {
+  state.historyCompact = false;
+  renderHistory(result.items);
+  updateHistoryPagination(result);
+  elements.historyExpand.hidden = false;
+  setText(elements.historyExpand, "Свернуть до последних 3");
+  elements.historyPagination.hidden = result.pages <= 1;
+  showHistoryTab("decisions");
+}
+
+function primeHistoryPage(page) {
+  const cached = state.historyPageCache.get(page);
+  if (cached) return Promise.resolve(cached);
+  return requestJson(`/api/test-history?page=${page}&page_size=10`).then(
+    (result) => {
+      state.historyPageCache.set(result.page, result);
+      return result;
+    },
+  );
+}
+
+async function loadHistoryPage(page) {
+  const cached = state.historyPageCache.get(page);
+  if (cached) {
+    renderHistoryPage(cached);
+    if (page < cached.pages && !state.historyPageCache.has(page + 1)) {
+      elements.historyNext.disabled = true;
+      primeHistoryPage(page + 1).then(() => {
+        if (state.historyPage === page) {
+          elements.historyNext.disabled = false;
+        }
+      });
+    }
+    return;
+  }
+  try {
+    const result = await primeHistoryPage(page);
+    renderHistoryPage(result);
+  } catch (error) {
+    elements.decisionHistory.replaceChildren();
+    const message = document.createElement("p");
+    message.className = "history-empty is-error";
+    setText(message, error.message);
+    elements.decisionHistory.append(message);
+  }
+}
+
+async function collapseHistory() {
+  state.historyCompact = true;
+  state.historyPage = 1;
+  await refreshTestState(false);
+  showHistoryTab("decisions");
 }
 
 async function refreshTestState(autoRenderLatest = false) {
   try {
     const [settingsResponse, historyResponse] = await Promise.all([
       fetch("/api/test-automation"),
-      fetch("/api/test-history"),
+      fetch("/api/test-history?page=1&page_size=3"),
     ]);
     if (!settingsResponse.ok || !historyResponse.ok) return;
     const settings = await settingsResponse.json();
     const history = await historyResponse.json();
     state.automation = settings;
     renderAutomationState(settings);
-    renderHistory(history.items);
+    updateHistoryOverview(history.items);
+    state.historyTotal = history.total;
+    setText(elements.historyTotal, history.total);
+    const signature = `${history.total}:${history.items[0]?.run_id || ""}`;
+    if (signature !== state.historyCacheSignature) {
+      state.historyPageCache.clear();
+      state.historyCacheSignature = signature;
+    }
+    if (state.historyCompact) {
+      renderHistory(history.items);
+      setText(elements.historyExpand, "Показать весь журнал");
+      elements.historyPagination.hidden = true;
+      if (history.total <= 3) {
+        elements.historyExpand.hidden = true;
+      } else {
+        elements.historyExpand.hidden = true;
+        primeHistoryPage(1)
+          .then(() => {
+            if (state.historyCompact) {
+              elements.historyExpand.hidden = false;
+            }
+          })
+          .catch(() => {
+            elements.historyExpand.hidden = false;
+          });
+      }
+    }
     const latest = history.items[0];
     const isNew = latest && latest.run_id !== state.knownHistoryRun;
     if (
@@ -1331,6 +1957,7 @@ function renderReport(report) {
   state.currentReport = report;
   state.currentProposalId = report.recommendation.proposal_id || null;
   const readOnly = report.mode === "PRODUCTION_READ_ONLY";
+  const blocked = report.execution.status === "BLOCKED";
   elements.emptyState.hidden = true;
   elements.blockedPanel.hidden = true;
   elements.report.hidden = false;
@@ -1339,23 +1966,33 @@ function renderReport(report) {
   setText(elements.proposalMessage, "");
   setText(
     elements.workspaceTitle,
-    readOnly && report.recommendation.status === "NEEDS_HUMAN"
-      ? "Анализ завершён · нужна проверка"
-      : readOnly
-        ? "Анализ завершён"
-        : "Цикл завершён",
+    blocked
+      ? "Предложение заблокировано"
+      : report.execution.status === "APPLIED"
+        ? "Предложение применено"
+      : readOnly && report.recommendation.status === "NEEDS_HUMAN"
+        ? "Анализ завершён · нужна проверка"
+        : readOnly
+          ? "Анализ завершён"
+          : "Цикл завершён",
   );
   setStatus(
-    readOnly && report.recommendation.status === "NEEDS_HUMAN"
+    blocked
+      ? "Заблокировано"
+      : readOnly && report.recommendation.status === "NEEDS_HUMAN"
       ? "Нужна проверка"
       : "Успешно",
-    "is-running",
+    blocked ? "is-blocked" : "is-running",
   );
   setText(elements.reportRunId, report.run_id);
   setText(
     elements.reportPeriod,
     `${report.period.start} — ${report.period.end}`,
   );
+  elements.campaignGoalSummary.hidden = !report.campaign_goal;
+  if (report.campaign_goal) {
+    renderCampaignGoal(report.campaign_goal);
+  }
   renderMetrics(report.metrics);
   setText(
     elements.decisionTitle,
@@ -1464,7 +2101,7 @@ function renderReport(report) {
     );
     setText(
       elements.safetyCopy,
-      "Реальная кампания не изменена",
+      `${executionReason(report.execution)}. Реальная кампания не изменена`,
     );
   }
   elements.downloadReport.href = report.artifacts.html;
@@ -1635,7 +2272,6 @@ async function acceptCurrentProposal() {
     });
     renderConfirmedPipeline(report.steps);
     renderReport(report);
-    setText(elements.workspaceTitle, "Предложение применено");
     await Promise.all([refreshTestState(false), refreshControlPlane()]);
   } catch (error) {
     elements.proposalMessage.classList.add("is-error");
@@ -1907,181 +2543,1899 @@ async function applyLatestApproval() {
   }
 }
 
-function renderWorkflowSteps(container, steps) {
-  const labels = {
-    CAMPAIGN_ADD: "Создание кампании",
-    AD_GROUP_ADD: "Создание группы объявлений",
-    ADS_ADD: "Добавление объявлений",
-    KEYWORD_ADD: "Добавление ключевых фраз",
-    MODERATION_SUBMIT: "Отправка на модерацию",
-    MODERATION_READBACK: "Проверка модерации",
-    CAMPAIGN_LAUNCH: "Запуск кампании",
-    FULL_READBACK: "Проверка результата",
-    GOAL_CANDIDATE: "Подготовка цели",
-    METRIKA_GOAL_ADD: "Создание цели в Метрике",
-    SITE_EVENT_PUBLISH: "Публикация события на сайте",
-    REACH_GOAL_VERIFY: "Проверка достижения цели",
-    DELIVERY_POLLING: "Проверка поступления данных",
-    HUMAN_APPROVE: "Смысл цели подтверждён",
-    HUMAN_REJECT: "Смысл цели отклонён",
-    CLEANUP: "Удаление тестовой цели",
-    ACTIVATE_PRIMARY: "Назначение основной цели",
-  };
-  container.replaceChildren();
-  steps.forEach((label, index) => {
-    const row = document.createElement("div");
-    const number = document.createElement("span");
-    const name = document.createElement("span");
-    const status = document.createElement("strong");
-    row.className = "workflow-step";
-    setText(number, String(index + 1).padStart(2, "0"));
-    setText(name, labels[label] || label.replaceAll("_", " "));
-    setText(status, "Готово");
-    row.append(number, name, status);
-    container.append(row);
+function campaignLocalId(prefix) {
+  if (window.crypto?.randomUUID) {
+    return `${prefix.slice(0, 18)}-${window.crypto.randomUUID().slice(0, 12)}`;
+  }
+  return `${prefix.slice(0, 18)}-${Date.now().toString(36)}-${Math.random()
+    .toString(16)
+    .slice(2, 10)}`;
+}
+
+function cloneCampaignValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function campaignLines(value) {
+  return value
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function primaryCampaignGoal() {
+  return (
+    state.campaignGoals.find((goal) => goal.primary) ||
+    state.campaignGoals[0] ||
+    null
+  );
+}
+
+function markCampaignDirty() {
+  state.campaignDirty = true;
+  elements.launchCampaign.disabled = true;
+  setText(elements.campaignDraftStatus, "Есть несохранённые изменения");
+  setText(
+    elements.campaignDraftMeta,
+    "Сохраните, чтобы применить в следующем цикле",
+  );
+  renderCampaignLaunchStatus({
+    ...state.campaignLaunch,
+    launch_status: "DIRTY",
+  });
+  renderCampaignGoalLifecycle({
+    ...state.campaignGoalLifecycle,
+    lifecycle_status: "DIRTY",
   });
 }
 
-async function runCampaignWorkflow() {
-  elements.runCampaignWorkflow.disabled = true;
-  setText(elements.workflowMessage, "Проверяем создание и запуск кампании…");
-  try {
-    const result = await requestJson("/api/workflows/campaign", {
-      method: "POST",
-    });
-    renderWorkflowSteps(
-      elements.campaignWorkflowSteps,
-      result.completed_steps,
-    );
-    setText(
-      elements.workflowMessage,
-      result.status === "APPLIED"
-        ? "Проверка кампании завершена успешно."
-        : "Проверка кампании завершена с ограничениями.",
-    );
-    await refreshEvidence();
-  } catch (error) {
-    elements.workflowMessage.classList.add("is-error");
-    setText(elements.workflowMessage, error.message);
-  } finally {
-    elements.runCampaignWorkflow.disabled = false;
-  }
+function campaignLabel(title, control, className = "") {
+  const label = document.createElement("label");
+  const caption = document.createElement("span");
+  if (className) label.className = className;
+  setText(caption, title);
+  label.append(caption, control);
+  return label;
 }
 
-async function runGoalTechnical() {
-  [elements.runGoalWorkflow, elements.approveGoal, elements.rejectGoal].forEach(
-    (button) => {
-      button.disabled = true;
+function campaignSelect(options, selected) {
+  const select = document.createElement("select");
+  options.forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    setText(option, label);
+    select.append(option);
+  });
+  select.value = selected;
+  return select;
+}
+
+function renderCampaignGoals() {
+  elements.campaignGoals.replaceChildren();
+  state.campaignGoals.forEach((goal, index) => {
+    const item = document.createElement("article");
+    const head = document.createElement("div");
+    const identity = document.createElement("div");
+    const primaryLabel = document.createElement("label");
+    const primary = document.createElement("input");
+    const primaryText = document.createElement("span");
+    const title = document.createElement("strong");
+    const meta = document.createElement("small");
+    const remove = document.createElement("button");
+    const fields = document.createElement("div");
+
+    item.className = "campaign-goal-item";
+    item.dataset.goalId = goal.id;
+    head.className = "campaign-goal-head";
+    identity.className = "campaign-goal-identity";
+    primaryLabel.className = "campaign-goal-primary";
+    primary.type = "radio";
+    primary.name = "campaign-primary-goal";
+    primary.checked = goal.primary;
+    setText(primaryText, "Основная цель");
+    primaryLabel.append(primary, primaryText);
+    setText(title, goal.name || `Цель ${index + 1}`);
+    setText(
+      meta,
+      `${goal.event || "Событие не задано"} · ${
+        goal.value_mode === "DYNAMIC"
+          ? "динамическая ценность"
+          : `${formatRuleNumber(goal.value_rub || 0)} ₽`
+      }`,
+    );
+    identity.append(title, meta);
+    remove.type = "button";
+    remove.className = "text-button danger-text";
+    setText(remove, "Удалить цель");
+    remove.disabled = state.campaignGoals.length <= 1 || goal.primary;
+    head.append(primaryLabel, identity, remove);
+
+    const name = document.createElement("input");
+    name.type = "text";
+    name.maxLength = 128;
+    name.value = goal.name;
+    name.addEventListener("input", () => {
+      goal.name = name.value;
+      setText(title, name.value || `Цель ${index + 1}`);
+    });
+
+    const event = document.createElement("input");
+    event.type = "text";
+    event.maxLength = 128;
+    event.value = goal.event;
+    event.readOnly = goal.primary;
+    event.setAttribute("aria-readonly", String(goal.primary));
+    event.addEventListener("input", () => {
+      goal.event = event.value;
+    });
+
+    const selector = document.createElement("input");
+    selector.type = "text";
+    selector.maxLength = 500;
+    selector.value = goal.site_location;
+    selector.addEventListener("input", () => {
+      goal.site_location = selector.value;
+    });
+
+    const type = campaignSelect(
+      [
+        ["ACTION", "Действие на сайте"],
+        ["ECOMMERCE", "Ecommerce"],
+        ["COMPOSITE", "Составная"],
+        ["OFFLINE", "Офлайн-конверсия"],
+      ],
+      goal.type,
+    );
+    type.addEventListener("change", () => {
+      goal.type = type.value;
+    });
+
+    const source = campaignSelect(
+      [
+        ["METRIKA", "Яндекс Метрика"],
+        ["AUTO", "Автоцель"],
+        ["OFFLINE", "Офлайн-конверсии"],
+      ],
+      goal.source,
+    );
+    source.addEventListener("change", () => {
+      goal.source = source.value;
+    });
+
+    const valueMode = campaignSelect(
+      [
+        ["FIXED", "Задать вручную"],
+        ["DYNAMIC", "Из Метрики (динамическая)"],
+      ],
+      goal.value_mode,
+    );
+    valueMode.addEventListener("change", () => {
+      goal.value_mode = valueMode.value;
+      goal.value_rub = valueMode.value === "DYNAMIC"
+        ? null
+        : Math.max(1, Number(goal.value_rub) || 1);
+      renderCampaignGoals();
+      markCampaignDirty();
+    });
+
+    const value = document.createElement("input");
+    value.type = "number";
+    value.min = "1";
+    value.max = "1000000000";
+    value.value = goal.value_rub === null ? "" : String(goal.value_rub);
+    value.disabled = goal.value_mode === "DYNAMIC";
+    value.addEventListener("input", () => {
+      goal.value_rub = Number(value.value);
+    });
+
+    fields.className = "campaign-goal-fields";
+    fields.append(
+      campaignLabel("Название цели", name, "campaign-goal-name"),
+      campaignLabel("Событие", event),
+      campaignLabel("Селектор на сайте", selector),
+      campaignLabel("Тип цели", type),
+      campaignLabel("Источник", source),
+      campaignLabel("Ценность", valueMode),
+      campaignLabel("Ценность, ₽", value),
+    );
+
+    primary.addEventListener("change", () => {
+      if (!primary.checked) return;
+      state.campaignGoals.forEach((candidate) => {
+        candidate.primary = candidate.id === goal.id;
+      });
+      goal.event = state.campaignPrimaryEvent;
+      renderCampaignGoals();
+      markCampaignDirty();
+    });
+    remove.addEventListener("click", () => {
+      state.campaignGoals = state.campaignGoals.filter(
+        (candidate) => candidate.id !== goal.id,
+      );
+      renderCampaignGoals();
+      markCampaignDirty();
+    });
+    item.append(head, fields);
+    elements.campaignGoals.append(item);
+  });
+  elements.addCampaignGoal.disabled = state.campaignGoals.length >= 30;
+}
+
+function addCampaignGoal() {
+  if (state.campaignGoals.length >= 30) return;
+  state.campaignGoals.push({
+    id: campaignLocalId("goal"),
+    name: "Новая цель",
+    event: "new_goal_event",
+    site_location: "#target",
+    type: "ACTION",
+    source: "METRIKA",
+    value_mode: "FIXED",
+    value_rub: 100,
+    primary: false,
+  });
+  renderCampaignGoals();
+  markCampaignDirty();
+}
+
+function selectedCampaignAdGroup() {
+  return (
+    state.campaignAdGroups.find(
+      (group) => group.id === state.selectedAdGroupId,
+    ) || state.campaignAdGroups[0] || null
+  );
+}
+
+function selectedCampaignAd() {
+  const group = selectedCampaignAdGroup();
+  if (!group) return null;
+  return (
+    group.ads.find((ad) => ad.id === state.selectedAdId) ||
+    group.ads[0] ||
+    null
+  );
+}
+
+function defaultCampaignAd(groupId, index, pilotRole = null) {
+  const landing =
+    elements.campaignInputs.landing_page.value ||
+    state.campaignDraft?.campaign.landing_page ||
+    "https://allowlisted.example/lead";
+  return {
+    id: campaignLocalId(`${groupId}-ad`),
+    pilot_role: pilotRole,
+    titles: [`Новое объявление ${index}`],
+    texts: ["Расскажите пользователю о вашем предложении"],
+    href: landing,
+    display_url_path: "offer",
+    image_references: [
+      pilotRole === "B" ? "prepared-media-2" : "prepared-media-1",
+    ],
+    sitelinks: [],
+    callouts: [],
+  };
+}
+
+function defaultCampaignAdGroup() {
+  const id = campaignLocalId("group");
+  return {
+    id,
+    name: `Группа ${state.campaignAdGroups.length + 1}`,
+    selected_for_pilot: false,
+    keywords: [
+      elements.campaignInputs.keyword.value.trim() || "консультация",
+    ],
+    negative_keywords: [],
+    autotargeting: {
+      EXACT: true,
+      ALTERNATIVE: true,
+      COMPETITOR: false,
+      BROADER: true,
+      ACCESSORY: false,
     },
+    ads: [
+      defaultCampaignAd(id, 1),
+      defaultCampaignAd(id, 2),
+    ],
+  };
+}
+
+function assignPilotGroup(group) {
+  state.campaignAdGroups.forEach((candidate) => {
+    candidate.selected_for_pilot = candidate.id === group.id;
+    candidate.ads.forEach((ad) => {
+      ad.pilot_role = null;
+    });
+  });
+  while (group.ads.length < 2) {
+    group.ads.push(defaultCampaignAd(group.id, group.ads.length + 1));
+  }
+  group.ads[0].pilot_role = "A";
+  group.ads[1].pilot_role = "B";
+}
+
+function renderCampaignAdGroups() {
+  const group = selectedCampaignAdGroup();
+  elements.campaignAdGroupSelect.replaceChildren();
+  state.campaignAdGroups.forEach((candidate, index) => {
+    const option = document.createElement("option");
+    option.value = candidate.id;
+    setText(
+      option,
+      `${candidate.name || `Группа ${index + 1}`}${
+        candidate.selected_for_pilot ? " · пилот" : ""
+      }`,
+    );
+    elements.campaignAdGroupSelect.append(option);
+  });
+  if (!group) {
+    elements.campaignAdEditor.replaceChildren();
+    return;
+  }
+  state.selectedAdGroupId = group.id;
+  elements.campaignAdGroupSelect.value = group.id;
+  elements.campaignAdGroupName.value = group.name;
+  elements.campaignAdGroupKeywords.value = group.keywords.join("\n");
+  elements.campaignAdGroupNegativeKeywords.value =
+    group.negative_keywords.join("\n");
+  elements.campaignPilotGroup.checked = group.selected_for_pilot;
+  elements.campaignAutotargeting.forEach((input) => {
+    input.checked = Boolean(group.autotargeting[input.dataset.autotargeting]);
+  });
+  elements.deleteAdGroup.disabled = state.campaignAdGroups.length <= 1;
+  renderCampaignAdTabs();
+}
+
+function addCampaignAdGroup() {
+  if (state.campaignAdGroups.length >= 20) return;
+  const group = defaultCampaignAdGroup();
+  state.campaignAdGroups.push(group);
+  state.selectedAdGroupId = group.id;
+  state.selectedAdId = group.ads[0].id;
+  renderCampaignAdGroups();
+  markCampaignDirty();
+}
+
+function deleteCampaignAdGroup() {
+  if (state.campaignAdGroups.length <= 1) return;
+  const deleted = selectedCampaignAdGroup();
+  state.campaignAdGroups = state.campaignAdGroups.filter(
+    (group) => group.id !== deleted.id,
+  );
+  const replacement = state.campaignAdGroups[0];
+  if (deleted.selected_for_pilot) assignPilotGroup(replacement);
+  state.selectedAdGroupId = replacement.id;
+  state.selectedAdId = replacement.ads[0].id;
+  renderCampaignAdGroups();
+  markCampaignDirty();
+}
+
+function renderCampaignAdTabs() {
+  const group = selectedCampaignAdGroup();
+  elements.campaignAdTabs.replaceChildren();
+  if (!group) return;
+  const selected = selectedCampaignAd();
+  state.selectedAdId = selected?.id || null;
+  group.ads.forEach((ad, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "campaign-ad-tab";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(ad.id === state.selectedAdId));
+    setText(
+      button,
+      ad.pilot_role
+        ? `Вариант ${ad.pilot_role}`
+        : `Объявление ${index + 1}`,
+    );
+    button.addEventListener("click", () => {
+      state.selectedAdId = ad.id;
+      renderCampaignAdTabs();
+    });
+    elements.campaignAdTabs.append(button);
+  });
+  elements.addCampaignAd.disabled = group.ads.length >= 50;
+  renderCampaignAdEditor();
+}
+
+function addCampaignAd() {
+  const group = selectedCampaignAdGroup();
+  if (!group || group.ads.length >= 50) return;
+  const ad = defaultCampaignAd(group.id, group.ads.length + 1);
+  group.ads.push(ad);
+  state.selectedAdId = ad.id;
+  renderCampaignAdTabs();
+  markCampaignDirty();
+}
+
+function removeCampaignAd() {
+  const group = selectedCampaignAdGroup();
+  const ad = selectedCampaignAd();
+  if (
+    !group ||
+    !ad ||
+    group.ads.length <= 1 ||
+    ad.pilot_role
+  ) {
+    return;
+  }
+  group.ads = group.ads.filter((candidate) => candidate.id !== ad.id);
+  state.selectedAdId = group.ads[0].id;
+  renderCampaignAdTabs();
+  markCampaignDirty();
+}
+
+function renderAdPreview(host, ad) {
+  host.replaceChildren();
+  const label = document.createElement("span");
+  const title = document.createElement("strong");
+  const text = document.createElement("p");
+  const link = document.createElement("small");
+  setText(label, "Предпросмотр на поиске");
+  setText(title, ad.titles.filter(Boolean).slice(0, 2).join(" — "));
+  setText(text, ad.texts.filter(Boolean)[0] || "");
+  setText(
+    link,
+    `${new URL(ad.href).hostname}/${ad.display_url_path || ""}`,
+  );
+  host.append(label, title, text, link);
+}
+
+function renderCampaignAdEditor() {
+  const group = selectedCampaignAdGroup();
+  const ad = selectedCampaignAd();
+  elements.campaignAdEditor.replaceChildren();
+  if (!group || !ad) return;
+
+  const head = document.createElement("div");
+  const title = document.createElement("div");
+  const eyebrow = document.createElement("p");
+  const heading = document.createElement("h5");
+  const actions = document.createElement("div");
+  const pilotRole = campaignSelect(
+    [
+      ["", "Не участвует"],
+      ["A", "Вариант A"],
+      ["B", "Вариант B"],
+    ],
+    ad.pilot_role || "",
+  );
+  const remove = document.createElement("button");
+  const layout = document.createElement("div");
+  const fields = document.createElement("div");
+  const preview = document.createElement("aside");
+
+  head.className = "campaign-ad-editor-head";
+  eyebrow.className = "eyebrow";
+  setText(eyebrow, "Комбинаторное объявление");
+  setText(
+    heading,
+    ad.pilot_role ? `Вариант ${ad.pilot_role}` : "Черновик объявления",
+  );
+  title.append(eyebrow, heading);
+  pilotRole.setAttribute("aria-label", "Роль в пилоте");
+  pilotRole.disabled = !group.selected_for_pilot;
+  pilotRole.addEventListener("change", () => {
+    const nextRole = pilotRole.value || null;
+    if (nextRole) {
+      const currentRole = ad.pilot_role;
+      const occupied = group.ads.find(
+        (candidate) =>
+          candidate.id !== ad.id && candidate.pilot_role === nextRole,
+      );
+      if (occupied) occupied.pilot_role = currentRole;
+    }
+    ad.pilot_role = nextRole;
+    renderCampaignAdTabs();
+    markCampaignDirty();
+  });
+  remove.type = "button";
+  remove.className = "text-button danger-text";
+  remove.disabled = group.ads.length <= 1 || Boolean(ad.pilot_role);
+  setText(remove, "Удалить объявление");
+  remove.addEventListener("click", removeCampaignAd);
+  actions.className = "campaign-ad-editor-actions";
+  actions.append(campaignLabel("Роль в пилоте", pilotRole), remove);
+  head.append(title, actions);
+
+  fields.className = "campaign-ad-fields";
+  const titlesSection = document.createElement("section");
+  const titlesHead = document.createElement("div");
+  const titlesTitle = document.createElement("h6");
+  const addTitle = document.createElement("button");
+  titlesSection.className = "campaign-ad-copy-section";
+  setText(titlesTitle, `Заголовки · ${ad.titles.length}/7`);
+  addTitle.type = "button";
+  addTitle.className = "text-button";
+  addTitle.disabled = ad.titles.length >= 7;
+  setText(addTitle, "Добавить заголовок");
+  addTitle.addEventListener("click", () => {
+    ad.titles.push("");
+    renderCampaignAdEditor();
+    markCampaignDirty();
+  });
+  titlesHead.append(titlesTitle, addTitle);
+  titlesSection.append(titlesHead);
+  ad.titles.forEach((value, index) => {
+    const row = document.createElement("div");
+    const input = document.createElement("input");
+    const removeTitle = document.createElement("button");
+    row.className = "campaign-ad-copy-row";
+    input.type = "text";
+    input.maxLength = 56;
+    input.value = value;
+    input.setAttribute("aria-label", `Заголовок ${index + 1}`);
+    input.addEventListener("input", () => {
+      ad.titles[index] = input.value;
+      renderAdPreview(preview, ad);
+    });
+    removeTitle.type = "button";
+    removeTitle.className = "text-button danger-text";
+    removeTitle.disabled = ad.titles.length <= 1;
+    removeTitle.setAttribute(
+      "aria-label",
+      `Убрать вариант заголовка № ${index + 1}`,
+    );
+    setText(removeTitle, "×");
+    removeTitle.addEventListener("click", () => {
+      ad.titles.splice(index, 1);
+      renderCampaignAdEditor();
+      markCampaignDirty();
+    });
+    row.append(input, removeTitle);
+    titlesSection.append(row);
+  });
+
+  const textsSection = document.createElement("section");
+  const textsHead = document.createElement("div");
+  const textsTitle = document.createElement("h6");
+  const addText = document.createElement("button");
+  textsSection.className = "campaign-ad-copy-section";
+  setText(textsTitle, `Тексты · ${ad.texts.length}/3`);
+  addText.type = "button";
+  addText.className = "text-button";
+  addText.disabled = ad.texts.length >= 3;
+  setText(addText, "Добавить текст");
+  addText.addEventListener("click", () => {
+    ad.texts.push("");
+    renderCampaignAdEditor();
+    markCampaignDirty();
+  });
+  textsHead.append(textsTitle, addText);
+  textsSection.append(textsHead);
+  ad.texts.forEach((value, index) => {
+    const row = document.createElement("div");
+    const input = document.createElement("textarea");
+    const removeText = document.createElement("button");
+    row.className = "campaign-ad-copy-row";
+    input.rows = 2;
+    input.maxLength = 81;
+    input.value = value;
+    input.setAttribute("aria-label", `Текст ${index + 1}`);
+    input.addEventListener("input", () => {
+      ad.texts[index] = input.value;
+      renderAdPreview(preview, ad);
+    });
+    removeText.type = "button";
+    removeText.className = "text-button danger-text";
+    removeText.disabled = ad.texts.length <= 1;
+    removeText.setAttribute(
+      "aria-label",
+      `Убрать текстовый вариант № ${index + 1}`,
+    );
+    setText(removeText, "×");
+    removeText.addEventListener("click", () => {
+      ad.texts.splice(index, 1);
+      renderCampaignAdEditor();
+      markCampaignDirty();
+    });
+    row.append(input, removeText);
+    textsSection.append(row);
+  });
+
+  const href = document.createElement("input");
+  href.type = "url";
+  href.maxLength = 2048;
+  href.value = ad.href;
+  href.addEventListener("input", () => {
+    ad.href = href.value;
+    try {
+      renderAdPreview(preview, ad);
+    } catch {
+      preview.replaceChildren();
+    }
+  });
+  const displayPath = document.createElement("input");
+  displayPath.type = "text";
+  displayPath.maxLength = 20;
+  displayPath.value = ad.display_url_path;
+  displayPath.addEventListener("input", () => {
+    ad.display_url_path = displayPath.value;
+    renderAdPreview(preview, ad);
+  });
+  const callouts = document.createElement("textarea");
+  callouts.rows = 3;
+  callouts.value = ad.callouts.join("\n");
+  callouts.placeholder = "Одно уточнение на строку";
+  callouts.addEventListener("input", () => {
+    ad.callouts = campaignLines(callouts.value);
+  });
+  const sitelinks = document.createElement("textarea");
+  sitelinks.rows = 3;
+  sitelinks.value = ad.sitelinks
+    .map((item) => `${item.title} | ${item.href}`)
+    .join("\n");
+  sitelinks.placeholder = "Название | https://example.ru/page";
+  sitelinks.addEventListener("input", () => {
+    ad.sitelinks = campaignLines(sitelinks.value)
+      .map((line) => line.split("|").map((item) => item.trim()))
+      .filter(([linkTitle, linkHref]) => linkTitle && linkHref)
+      .map(([linkTitle, linkHref]) => ({
+        title: linkTitle,
+        href: linkHref,
+      }));
+  });
+
+  const media = document.createElement("fieldset");
+  const mediaLegend = document.createElement("legend");
+  setText(mediaLegend, "Изображения");
+  media.className = "campaign-ad-media";
+  media.append(mediaLegend);
+  ["prepared-media-1", "prepared-media-2"].forEach((reference, index) => {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    const caption = document.createElement("span");
+    input.type = "checkbox";
+    input.checked = ad.image_references.includes(reference);
+    input.addEventListener("change", () => {
+      if (input.checked) {
+        ad.image_references = [...ad.image_references, reference];
+      } else {
+        ad.image_references = ad.image_references.filter(
+          (item) => item !== reference,
+        );
+      }
+    });
+    setText(caption, `Подготовленное изображение ${index + 1}`);
+    label.append(input, caption);
+    media.append(label);
+  });
+
+  fields.append(
+    titlesSection,
+    textsSection,
+    campaignLabel("Посадочная страница объявления", href),
+    campaignLabel("Отображаемая ссылка", displayPath),
+    campaignLabel("Быстрые ссылки", sitelinks),
+    campaignLabel("Уточнения", callouts),
+    media,
+  );
+  layout.className = "campaign-ad-editor-layout";
+  preview.className = "campaign-ad-preview";
+  renderAdPreview(preview, ad);
+  layout.append(fields, preview);
+  elements.campaignAdEditor.append(head, layout);
+}
+
+function updateCampaignGoalActions() {
+  const status =
+    state.campaignGoalLifecycle?.lifecycle_status || "NOT_STARTED";
+  const pending = status === "AWAITING_SEMANTIC_DECISION";
+  const canReject = state.campaignGoalLifecycle?.can_reject === true;
+  const outdatedPending = status === "OUTDATED" && canReject;
+  const unavailable =
+    state.campaignBusy ||
+    state.campaignGoalBusy ||
+    state.campaignDirty ||
+    state.campaignSource !== "test" ||
+    !state.campaignDraft;
+  elements.verifyCampaignGoal.hidden =
+    pending || outdatedPending || status === "APPROVED";
+  elements.verifyCampaignGoal.disabled = unavailable;
+  elements.approveCampaignGoal.hidden = !pending;
+  elements.rejectCampaignGoal.hidden = !pending && !outdatedPending;
+  setText(
+    elements.rejectCampaignGoal,
+    outdatedPending ? "Очистить устаревшую проверку" : "Отклонить цель",
+  );
+  elements.approveCampaignGoal.disabled = unavailable;
+  elements.rejectCampaignGoal.disabled = unavailable;
+}
+
+function renderCampaignGoalLifecycle(lifecycle) {
+  state.campaignGoalLifecycle = lifecycle;
+  const status = lifecycle?.lifecycle_status || "NOT_STARTED";
+  const evidence = lifecycle?.technical_evidence || {};
+  const candidate = lifecycle?.candidate || {};
+  const classes = [
+    "is-idle",
+    "is-running",
+    "is-pending",
+    "is-approved",
+    "is-rejected",
+    "is-outdated",
+    "is-error",
+  ];
+  elements.campaignGoalLifecycle.classList.remove(...classes);
+  const className = {
+    LOADING: "is-running",
+    RUNNING: "is-running",
+    AWAITING_SEMANTIC_DECISION: "is-pending",
+    APPROVED: "is-approved",
+    REJECTED: "is-rejected",
+    OUTDATED: "is-outdated",
+    FAILED: "is-error",
+  }[status] || "is-idle";
+  elements.campaignGoalLifecycle.classList.add(className);
+
+  if (status === "LOADING") {
+    setText(elements.campaignGoalBadge, "Проверяется");
+    setText(elements.campaignGoalLifecycleTitle, "Проверяем статус цели");
+    setText(
+      elements.campaignGoalLifecycleCopy,
+      "Сверяем выбранную версию цели с журналом Goal Lifecycle.",
+    );
+  } else if (status === "RUNNING") {
+    setText(elements.campaignGoalBadge, "Проверяется");
+    setText(
+      elements.campaignGoalLifecycleTitle,
+      "Выполняется техническая проверка",
+    );
+    setText(
+      elements.campaignGoalLifecycleCopy,
+      "Создаём кандидатную цель, устанавливаем событие и проверяем его доставку в изолированном контуре.",
+    );
+  } else if (status === "AWAITING_SEMANTIC_DECISION") {
+    setText(elements.campaignGoalBadge, "Нужна оценка");
+    setText(
+      elements.campaignGoalLifecycleTitle,
+      "Симуляция технической проверки завершена",
+    );
+    setText(
+      elements.campaignGoalLifecycleCopy,
+      "Изолированные адаптеры смоделировали одно событие без дублей. Реальная Метрика и сайт не изменялись. Подтвердите бизнес-смысл цели.",
+    );
+  } else if (status === "APPROVED") {
+    setText(elements.campaignGoalBadge, "Подтверждена");
+    setText(
+      elements.campaignGoalLifecycleTitle,
+      "Смысл тестовой цели подтверждён",
+    );
+    setText(
+      elements.campaignGoalLifecycleCopy,
+      "Бизнес-смысл подтверждён на симуляционных данных. Реальная техническая доставка ещё не доказана; до оптимизации нужны TEST_COUNTER-проверка, период обучения и минимальная выборка.",
+    );
+  } else if (status === "REJECTED") {
+    setText(elements.campaignGoalBadge, "Отклонена");
+    setText(elements.campaignGoalLifecycleTitle, "Цель отклонена");
+    setText(
+      elements.campaignGoalLifecycleCopy,
+      "Кандидат исключён из решений, а смоделированные цель и публикация события очищены.",
+    );
+  } else if (status === "OUTDATED") {
+    setText(
+      elements.campaignGoalBadge,
+      lifecycle?.can_reject ? "Устарела" : "Нужна проверка",
+    );
+    setText(
+      elements.campaignGoalLifecycleTitle,
+      "Цель изменена после проверки",
+    );
+    setText(
+      elements.campaignGoalLifecycleCopy,
+      lifecycle?.can_reject
+        ? "Сохранённая версия цели больше не совпадает с незавершённой проверкой. Сначала очистите устаревшую симуляцию."
+        : "Сохранённая версия цели больше не совпадает с доказательством. Запустите симуляцию заново.",
+    );
+  } else if (status === "DIRTY") {
+    setText(elements.campaignGoalBadge, "Не сохранено");
+    setText(
+      elements.campaignGoalLifecycleTitle,
+      "Сначала сохраните изменения цели",
+    );
+    setText(
+      elements.campaignGoalLifecycleCopy,
+      "Техническая проверка привязывается к точной сохранённой версии кампании и основной цели.",
+    );
+  } else if (status === "FAILED") {
+    setText(elements.campaignGoalBadge, "Ошибка");
+    setText(
+      elements.campaignGoalLifecycleTitle,
+      "Проверка цели не завершена",
+    );
+    setText(
+      elements.campaignGoalLifecycleCopy,
+      lifecycle.message || "Goal Lifecycle остановлен безопасной проверкой.",
+    );
+  } else {
+    setText(elements.campaignGoalBadge, "SIMULATED");
+    setText(elements.campaignGoalLifecycleTitle, "Проверка цели Метрики");
+    setText(
+      elements.campaignGoalLifecycleCopy,
+      "Проверьте кандидатную цель на изолированных адаптерах и отдельно подтвердите её бизнес-смысл.",
+    );
+  }
+
+  setText(
+    elements.campaignGoalCandidate,
+    candidate.name || primaryCampaignGoal()?.name || "—",
   );
   setText(
-    elements.workflowMessage,
-    "Проверяем цель, событие на сайте и поступление данных в Метрику…",
+    elements.campaignGoalEvent,
+    Number(evidence.emitted_count) === 1
+      ? "1 смоделированное событие · без дублей"
+      : "Не проверено",
   );
-  try {
-    const result = await requestJson("/api/workflows/goal", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "technical" }),
-    });
-    renderWorkflowSteps(elements.goalWorkflowSteps, [
-      "GOAL_CANDIDATE",
-      "METRIKA_GOAL_ADD",
-      "SITE_EVENT_PUBLISH",
-      "REACH_GOAL_VERIFY",
-      "DELIVERY_POLLING",
-    ]);
+  setText(
+    elements.campaignGoalDelivery,
+    lifecycle?.technical_status === "VERIFIED" &&
+      evidence.delivery_observed === true
+      ? "Симуляция доставки подтверждена"
+      : "Не проверена",
+  );
+  setText(
+    elements.campaignGoalOptimization,
+    status === "APPROVED"
+      ? "Период обучения · ожидает выборку"
+      : status === "REJECTED"
+        ? "Исключена из решений"
+        : "Не допущена",
+  );
+  setText(
+    elements.campaignGoalSafety,
+    lifecycle?.external_write_sent
+      ? "Выполнена внешняя запись"
+      : "SIMULATED · внешних изменений нет",
+  );
+  setText(elements.campaignGoalRunId, lifecycle?.run_id || "—");
+  const hasEvidence = Boolean(evidence.goal_id);
+  elements.campaignGoalEvidenceDetails.hidden = !hasEvidence;
+  if (hasEvidence) {
+    setText(elements.campaignGoalEvidenceId, evidence.goal_id);
     setText(
-      elements.workflowMessage,
-      "Техническая проверка завершена. Подтвердите бизнес-смысл цели.",
+      elements.campaignGoalEvidenceType,
+      `${evidence.goal_type || "—"} · ${evidence.classification || "—"}`,
     );
-    elements.approveGoal.disabled = false;
-    elements.rejectGoal.disabled = false;
+    setText(elements.campaignGoalEvidenceEvent, evidence.event || "—");
+    setText(elements.campaignGoalEvidenceSelector, evidence.selector || "—");
+    setText(
+      elements.campaignGoalEvidenceScenario,
+      `${evidence.http_method || "—"} · ${evidence.trigger_selector || "—"}`,
+    );
+    setText(
+      elements.campaignGoalEvidenceCheckedAt,
+      formatMoment(evidence.checked_at),
+    );
+    setText(elements.campaignGoalEvidenceAuthor, evidence.author || "—");
+    setText(
+      elements.campaignGoalEvidenceVersion,
+      evidence.configuration_version || "—",
+    );
+  }
+  setCampaignBusy(state.campaignBusy);
+}
+
+async function loadCampaignGoalLifecycle(draftId) {
+  if (!draftId) return;
+  renderCampaignGoalLifecycle({
+    draft_id: draftId,
+    lifecycle_status: "LOADING",
+    candidate: {
+      name: primaryCampaignGoal()?.name || "—",
+    },
+    external_write_sent: false,
+  });
+  try {
+    const lifecycle = await requestJson(
+      `/api/campaigns/${encodeURIComponent(draftId)}/goal`,
+    );
+    if (
+      state.campaignSource === "test" &&
+      state.campaignDraft?.draft_id === draftId &&
+      !state.campaignDirty
+    ) {
+      renderCampaignGoalLifecycle(lifecycle);
+    }
   } catch (error) {
-    elements.workflowMessage.classList.add("is-error");
-    setText(elements.workflowMessage, error.message);
-    elements.runGoalWorkflow.disabled = false;
+    if (state.campaignDraft?.draft_id === draftId) {
+      renderCampaignGoalLifecycle({
+        draft_id: draftId,
+        lifecycle_status: "FAILED",
+        message: error.message,
+        candidate: {
+          name: primaryCampaignGoal()?.name || "—",
+        },
+        external_write_sent: false,
+      });
+    }
   }
 }
 
-async function decideGoalWorkflow(semanticDecision) {
-  elements.approveGoal.disabled = true;
-  elements.rejectGoal.disabled = true;
+async function verifySelectedCampaignGoal() {
+  if (
+    !state.campaignDraft ||
+    state.campaignDirty ||
+    state.campaignSource !== "test"
+  ) {
+    return;
+  }
+  const draftId = state.campaignDraft.draft_id;
+  state.campaignGoalBusy = true;
+  setCampaignBusy(true);
+  elements.campaignGoalMessage.classList.remove("is-error");
+  setText(
+    elements.campaignGoalMessage,
+    "Проверяем создание цели, установку события и доставку…",
+  );
+  renderCampaignGoalLifecycle({
+    draft_id: draftId,
+    lifecycle_status: "RUNNING",
+    candidate: {
+      name: primaryCampaignGoal()?.name || "—",
+    },
+    external_write_sent: false,
+  });
   try {
-    const result = await requestJson("/api/workflows/goal", {
+    await requestJson(
+      `/api/campaigns/${encodeURIComponent(draftId)}/goal/technical`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision: state.campaignDraft.revision,
+        }),
+      },
+    );
+    await loadCampaignGoalLifecycle(draftId);
+    setText(
+      elements.campaignGoalMessage,
+      "Техническая проверка завершена. Требуется оценка бизнес-смысла.",
+    );
+  } catch (error) {
+    elements.campaignGoalMessage.classList.add("is-error");
+    setText(elements.campaignGoalMessage, error.message);
+    renderCampaignGoalLifecycle({
+      draft_id: draftId,
+      lifecycle_status: "FAILED",
+      message: error.message,
+      candidate: {
+        name: primaryCampaignGoal()?.name || "—",
+      },
+      external_write_sent: false,
+    });
+  } finally {
+    state.campaignGoalBusy = false;
+    setCampaignBusy(false);
+  }
+}
+
+async function decideSelectedCampaignGoal(semanticDecision) {
+  const lifecycleStatus =
+    state.campaignGoalLifecycle?.lifecycle_status || "NOT_STARTED";
+  const canRejectOutdated =
+    semanticDecision === "REJECT" &&
+    lifecycleStatus === "OUTDATED" &&
+    state.campaignGoalLifecycle?.can_reject === true;
+  if (
+    !state.campaignDraft ||
+    state.campaignDirty ||
+    state.campaignSource !== "test" ||
+    (lifecycleStatus !== "AWAITING_SEMANTIC_DECISION" &&
+      !canRejectOutdated)
+  ) {
+    return;
+  }
+  const draftId = state.campaignDraft.draft_id;
+  const runId = state.campaignGoalLifecycle.run_id;
+  state.campaignGoalBusy = true;
+  setCampaignBusy(true);
+  elements.campaignGoalMessage.classList.remove("is-error");
+  setText(
+    elements.campaignGoalMessage,
+    semanticDecision === "APPROVE"
+      ? "Сохраняем подтверждение бизнес-смысла…"
+      : "Отклоняем цель и очищаем тестовые изменения…",
+  );
+  try {
+    await requestJson(
+      `/api/campaigns/${encodeURIComponent(draftId)}/goal/decision`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision: state.campaignDraft.revision,
+          run_id: runId,
+          semantic_decision: semanticDecision,
+        }),
+      },
+    );
+    await loadCampaignGoalLifecycle(draftId);
+    setText(
+      elements.campaignGoalMessage,
+      semanticDecision === "APPROVE"
+        ? "Бизнес-смысл цели подтверждён."
+        : canRejectOutdated
+          ? "Устаревшая симуляция очищена. Цель можно проверить заново."
+          : "Цель отклонена и исключена из решений.",
+    );
+  } catch (error) {
+    elements.campaignGoalMessage.classList.add("is-error");
+    setText(elements.campaignGoalMessage, error.message);
+  } finally {
+    state.campaignGoalBusy = false;
+    setCampaignBusy(false);
+  }
+}
+
+function renderCampaignLaunchStatus(launch) {
+  state.campaignLaunch = launch;
+  const status = launch?.launch_status || "NOT_LAUNCHED";
+  const completed = Array.isArray(launch?.completed_steps)
+    ? launch.completed_steps.length
+    : 0;
+  const total = Number(launch?.total_steps) || 8;
+  const launched = status === "LAUNCHED";
+  const outdated = status === "OUTDATED" || status === "DIRTY";
+  const running = status === "RUNNING" || status === "LOADING";
+  const failed = status === "FAILED";
+
+  elements.campaignLaunchStatus.classList.toggle("is-launched", launched);
+  elements.campaignLaunchStatus.classList.toggle("is-outdated", outdated);
+  elements.campaignLaunchStatus.classList.toggle("is-running", running);
+  elements.campaignLaunchStatus.classList.toggle("is-error", failed);
+  elements.campaignLaunchStatus.classList.toggle(
+    "is-idle",
+    !launched && !outdated && !running && !failed,
+  );
+  elements.campaignStatusBadge.classList.toggle("is-launched", launched);
+  elements.campaignStatusBadge.classList.toggle(
+    "is-outdated",
+    outdated || failed,
+  );
+
+  if (launched) {
+    setText(elements.campaignStatusBadge, "Тест запущен");
+    setText(elements.campaignLaunchTitle, "Тестовая кампания запущена");
+    setText(
+      elements.campaignLaunchCopy,
+      "Campaign Lifecycle завершён и подтверждён полным чтением состояния.",
+    );
+  } else if (status === "OUTDATED") {
+    setText(elements.campaignStatusBadge, "Нужен перезапуск");
+    setText(elements.campaignLaunchTitle, "Кампания изменена после запуска");
+    setText(
+      elements.campaignLaunchCopy,
+      "Сохранённая версия отличается от последнего тестового запуска.",
+    );
+  } else if (status === "DIRTY") {
+    setText(elements.campaignStatusBadge, "Не сохранено");
+    setText(elements.campaignLaunchTitle, "Сначала сохраните изменения");
+    setText(
+      elements.campaignLaunchCopy,
+      "Тестовый запуск доступен только для сохранённой версии кампании.",
+    );
+  } else if (status === "RUNNING") {
+    setText(elements.campaignStatusBadge, "Запускается");
+    setText(elements.campaignLaunchTitle, "Выполняется тестовый запуск");
+    setText(
+      elements.campaignLaunchCopy,
+      "Создаём объекты, проверяем модерацию и состояние в sealed fake-контуре.",
+    );
+  } else if (status === "LOADING") {
+    setText(elements.campaignStatusBadge, "Проверяется");
+    setText(elements.campaignLaunchTitle, "Проверяем статус запуска");
+    setText(
+      elements.campaignLaunchCopy,
+      "Сверяем выбранную версию кампании с журналом Campaign Lifecycle.",
+    );
+  } else if (failed) {
+    setText(elements.campaignStatusBadge, "Ошибка запуска");
+    setText(elements.campaignLaunchTitle, "Тестовый запуск не завершён");
+    setText(
+      elements.campaignLaunchCopy,
+      launch.message || "Campaign Lifecycle остановлен безопасной проверкой.",
+    );
+  } else {
+    setText(elements.campaignStatusBadge, "Черновик");
+    setText(elements.campaignLaunchTitle, "Тестовая кампания не запускалась");
+    setText(
+      elements.campaignLaunchCopy,
+      "Запуск выполнит Campaign Lifecycle в изолированном контуре.",
+    );
+  }
+
+  setText(
+    elements.campaignLaunchSteps,
+    running && completed === 0 ? "Подготовка" : `${completed} из ${total} этапов`,
+  );
+  setText(
+    elements.campaignLaunchSafety,
+    launch?.external_write_sent
+      ? "Внешний write отправлен"
+      : "Внешних изменений нет",
+  );
+  setText(
+    elements.campaignLaunchTime,
+    launch?.requested_at ? formatMoment(launch.requested_at) : "—",
+  );
+  setText(elements.campaignLaunchRunId, launch?.run_id || "—");
+}
+
+async function loadCampaignLaunch(draftId) {
+  if (!draftId) return;
+  renderCampaignLaunchStatus({
+    draft_id: draftId,
+    launch_status: "LOADING",
+    completed_steps: [],
+    total_steps: campaignLifecycleSteps.length,
+    external_write_sent: false,
+  });
+  try {
+    const launch = await requestJson(
+      `/api/campaigns/${encodeURIComponent(draftId)}/launch`,
+    );
+    if (
+      state.campaignSource === "test" &&
+      state.campaignDraft?.draft_id === draftId &&
+      !state.campaignDirty
+    ) {
+      renderCampaignLaunchStatus(launch);
+      elements.launchCampaign.disabled = state.campaignBusy;
+    }
+  } catch (error) {
+    if (state.campaignDraft?.draft_id === draftId) {
+      renderCampaignLaunchStatus({
+        draft_id: draftId,
+        launch_status: "FAILED",
+        message: error.message,
+        completed_steps: [],
+        total_steps: 8,
+        external_write_sent: false,
+      });
+      elements.launchCampaign.disabled = true;
+    }
+  }
+}
+
+function renderCampaignDraft(draft) {
+  state.campaignDraft = draft;
+  state.campaignDirty = false;
+  state.campaignPrimaryEvent = draft.metrika_goal.event;
+  state.campaignGoals = cloneCampaignValue(draft.goal_settings.goals);
+  state.campaignAdGroups = cloneCampaignValue(draft.ad_groups);
+  state.selectedAdGroupId =
+    state.campaignAdGroups.find((group) => group.selected_for_pilot)?.id ||
+    state.campaignAdGroups[0]?.id ||
+    null;
+  state.selectedAdId =
+    selectedCampaignAdGroup()?.ads[0]?.id || null;
+  elements.campaignInputs.name.value = draft.campaign.name;
+  elements.campaignInputs.weekly_budget_rub.value = String(
+    draft.campaign.weekly_budget_rub,
+  );
+  elements.campaignInputs.keyword.value = draft.campaign.keyword;
+  elements.campaignInputs.landing_page.value = draft.campaign.landing_page;
+  state.campaignLandingPageValue = draft.campaign.landing_page;
+  elements.campaignInputs.business_goal.value = draft.business_goal.meaning;
+  elements.campaignInputs.target_cpa_rub.value = String(
+    draft.business_goal.target_cpa_rub,
+  );
+  elements.campaignInputs.goal_strategy.value = draft.goal_settings.strategy;
+  elements.campaignInputs.payment_model
+    .querySelector('option[value="CONVERSIONS"]')
+    .disabled = draft.goal_settings.strategy === "MAXIMIZE_CLICKS";
+  elements.campaignInputs.payment_model.value =
+    draft.goal_settings.payment_model;
+  elements.campaignInputs.attribution_model.value =
+    draft.goal_settings.attribution_model;
+  elements.campaignInputs.counter_id.value = draft.goal_settings.counter_id;
+  renderCampaignGoals();
+  renderCampaignAdGroups();
+  setText(elements.campaignEditorTitle, draft.campaign.name);
+  setText(
+    elements.campaignDraftStatus,
+    draft.revision > 0
+      ? `Версия ${draft.revision} · выбрана для следующего цикла`
+      : "Новый черновик · ещё не редактировался",
+  );
+  setText(
+    elements.campaignDraftMeta,
+    draft.updated_at
+      ? `Сохранено ${formatMoment(draft.updated_at)}`
+      : "Локальный черновик",
+  );
+  elements.campaignStatusBadge.classList.remove(
+    "is-launched",
+    "is-outdated",
+  );
+  setText(elements.campaignStatusBadge, "Черновик");
+}
+
+function setCampaignBusy(busy) {
+  state.campaignBusy = busy;
+  const localMode = state.campaignSource === "test";
+  const goalDecisionPending =
+    state.campaignGoalLifecycle?.lifecycle_status ===
+    "AWAITING_SEMANTIC_DECISION";
+  const editorLocked = busy || goalDecisionPending;
+  elements.campaignSourceButtons.forEach((button) => {
+    button.disabled = busy;
+  });
+  elements.campaignList
+    .querySelectorAll(".campaign-name-button")
+    .forEach((button) => {
+      button.disabled = busy;
+    });
+  elements.newCampaign.disabled = editorLocked || !localMode;
+  elements.saveCampaign.disabled = editorLocked || !state.campaignDraft;
+  elements.launchCampaign.disabled =
+    editorLocked ||
+    !state.campaignDraft ||
+    state.campaignDirty ||
+    !localMode;
+  elements.deleteCampaign.disabled =
+    editorLocked ||
+    !state.campaignDraft ||
+    state.campaignCatalog.length <= 1;
+  elements.campaignSearch.disabled = busy;
+  elements.campaignEditor
+    .querySelectorAll("input, textarea, select, button")
+    .forEach((field) => {
+      field.disabled = editorLocked;
+    });
+  updateCampaignGoalActions();
+}
+
+function setDirectCampaignBusy(busy) {
+  state.directCampaignBusy = busy;
+  elements.refreshDirectCampaigns.disabled = busy;
+  elements.refreshDirectCampaigns.setAttribute("aria-busy", String(busy));
+}
+
+const directStateLabels = {
+  ARCHIVED: "В архиве",
+  CONVERTED: "Преобразована",
+  ENDED: "Завершена",
+  OFF: "Показы остановлены",
+  ON: "Показы идут",
+  SUSPENDED: "Приостановлена",
+};
+
+const directStatusLabels = {
+  ACCEPTED: "Принята",
+  DRAFT: "Черновик",
+  MODERATION: "На модерации",
+  REJECTED: "Отклонена",
+};
+
+const directPaymentLabels = {
+  ALLOWED: "Оплата разрешена",
+  DISALLOWED: "Оплата недоступна",
+};
+
+const directTypeLabels = {
+  CPM_BANNER_CAMPAIGN: "Медийная кампания",
+  MOBILE_APP_CAMPAIGN: "Продвижение приложений",
+  TEXT_CAMPAIGN: "Текстово-графическая",
+  UNIFIED_CAMPAIGN: "Единая перфоманс-кампания",
+};
+
+function directLabel(value, labels) {
+  if (!value) return "—";
+  return labels[value] || value;
+}
+
+function formatDirectDate(value) {
+  if (!value) return "Не задано";
+  const [year, month, day] = String(value).split("-");
+  return `${day}.${month}.${year}`;
+}
+
+function formatDirectBudget(value) {
+  if (value === null || value === undefined) return "Не задан";
+  return `${formatRuleNumber(Number(value) / 1_000_000)} ₽ в день`;
+}
+
+function renderDirectCampaign(campaign) {
+  if (!campaign) {
+    state.selectedDirectCampaignId = null;
+    setText(elements.campaignEditorTitle, "Кампании не найдены");
+    setText(
+      elements.campaignDraftStatus,
+      "В доступном аккаунте нет кампаний Яндекс Директа.",
+    );
+    setText(elements.campaignDraftMeta, "Источник: Campaigns.get");
+    Object.values(elements.directCampaignFacts).forEach((element) => {
+      setText(element, "—");
+    });
+    return;
+  }
+  state.selectedDirectCampaignId = campaign.campaign_id;
+  setText(elements.campaignEditorTitle, campaign.name);
+  setText(
+    elements.campaignDraftStatus,
+    `${directLabel(campaign.state, directStateLabels)} · ` +
+      `${directLabel(campaign.status, directStatusLabels)}`,
+  );
+  setText(
+    elements.campaignDraftMeta,
+    state.directCampaignFetchedAt
+      ? `Обновлено ${formatMoment(state.directCampaignFetchedAt)}`
+      : "Источник: Campaigns.get",
+  );
+  setText(elements.directCampaignFacts.campaign_id, campaign.campaign_id);
+  setText(
+    elements.directCampaignFacts.type,
+    directLabel(campaign.type, directTypeLabels),
+  );
+  setText(
+    elements.directCampaignFacts.state,
+    directLabel(campaign.state, directStateLabels),
+  );
+  setText(
+    elements.directCampaignFacts.status,
+    directLabel(campaign.status, directStatusLabels),
+  );
+  setText(
+    elements.directCampaignFacts.status_payment,
+    directLabel(campaign.status_payment, directPaymentLabels),
+  );
+  setText(
+    elements.directCampaignFacts.daily_budget_micros,
+    formatDirectBudget(campaign.daily_budget_micros),
+  );
+  setText(
+    elements.directCampaignFacts.start_date,
+    formatDirectDate(campaign.start_date),
+  );
+  setText(
+    elements.directCampaignFacts.end_date,
+    formatDirectDate(campaign.end_date),
+  );
+  setText(elements.directCampaignFacts.timezone, campaign.timezone || "—");
+  setText(
+    elements.directCampaignFacts.client_info,
+    campaign.client_info || state.directCampaignAccount || "—",
+  );
+}
+
+function renderCampaignList() {
+  const directMode = state.campaignSource === "direct";
+  const sourceItems = directMode
+    ? state.directCampaignCatalog
+    : state.campaignCatalog;
+  const query = elements.campaignSearch.value.trim().toLocaleLowerCase("ru");
+  const filtered = sourceItems.filter((item) => {
+    const haystack = (
+      directMode
+        ? `${item.name} ${item.campaign_id} ${item.status} ${item.state}`
+        : `${item.name} ${item.keyword}`
+    ).toLocaleLowerCase("ru");
+    return haystack.includes(query);
+  });
+  setText(
+    elements.campaignFilterCount,
+    query
+      ? `${filtered.length} из ${sourceItems.length}`
+      : `${filtered.length}`,
+  );
+  elements.campaignList.replaceChildren();
+  filtered.forEach((item) => {
+    const row = document.createElement("tr");
+    const nameCell = document.createElement("td");
+    const budgetCell = document.createElement("td");
+    const cpaCell = document.createElement("td");
+    const selectButton = document.createElement("button");
+    const detail = document.createElement("small");
+
+    const selected = directMode
+      ? item.campaign_id === state.selectedDirectCampaignId
+      : item.selected;
+    row.classList.toggle("is-selected", selected);
+    if (selected) {
+      row.setAttribute("aria-current", "true");
+    }
+    selectButton.type = "button";
+    selectButton.className = "campaign-name-button";
+    selectButton.disabled = state.campaignBusy;
+    selectButton.setAttribute(
+      "aria-label",
+      directMode ? `Открыть ${item.name}` : `Редактировать ${item.name}`,
+    );
+    setText(selectButton, item.name);
+    setText(
+      detail,
+      directMode
+        ? `ID ${item.campaign_id} · ${directLabel(
+            item.status,
+            directStatusLabels,
+          )}`
+        : item.updated_at
+          ? `Изменена ${formatMoment(item.updated_at)}`
+          : `Новый черновик · ${item.keyword}`,
+    );
+    selectButton.append(detail);
+    selectButton.addEventListener("click", () => {
+      if (directMode) {
+        state.selectedDirectCampaignId = item.campaign_id;
+        renderCampaignList();
+        renderDirectCampaign(item);
+      } else {
+        selectCampaignDraft(item.draft_id);
+      }
+    });
+    setText(
+      budgetCell,
+      directMode
+        ? formatDirectBudget(item.daily_budget_micros).replace(" в день", "")
+        : `${formatRuleNumber(item.weekly_budget_rub)} ₽`,
+    );
+    setText(
+      cpaCell,
+      directMode
+        ? directLabel(item.state, directStateLabels)
+        : `${formatRuleNumber(item.target_cpa_rub)} ₽`,
+    );
+    nameCell.append(selectButton);
+    row.append(nameCell, budgetCell, cpaCell);
+    elements.campaignList.append(row);
+  });
+  elements.campaignEmpty.hidden = filtered.length > 0;
+  setText(
+    elements.campaignEmpty,
+    directMode
+      ? "В аккаунте Яндекс Директа нет кампаний по этому запросу."
+      : "По вашему запросу кампаний не найдено.",
+  );
+}
+
+function renderCampaignCatalog(catalog) {
+  state.campaignCatalog = Array.isArray(catalog.items) ? catalog.items : [];
+  if (catalog.selected) {
+    renderCampaignDraft(catalog.selected);
+    loadCampaignLaunch(catalog.selected.draft_id);
+    loadCampaignGoalLifecycle(catalog.selected.draft_id);
+  }
+  if (state.campaignSource === "test") {
+    setText(
+      elements.campaignCount,
+      catalog.total ?? state.campaignCatalog.length,
+    );
+    renderCampaignList();
+    setCampaignBusy(false);
+  }
+}
+
+function renderDirectCampaignCatalog(catalog) {
+  state.directCampaignCatalog = Array.isArray(catalog.items)
+    ? catalog.items
+    : [];
+  state.directCampaignFetchedAt = catalog.fetched_at || null;
+  state.directCampaignAccount = catalog.account || null;
+  const selected =
+    state.directCampaignCatalog.find(
+      (item) => item.campaign_id === state.selectedDirectCampaignId,
+    ) || state.directCampaignCatalog[0];
+  state.selectedDirectCampaignId = selected?.campaign_id || null;
+  if (state.campaignSource !== "direct") return;
+  setText(
+    elements.campaignCount,
+    catalog.total ?? state.directCampaignCatalog.length,
+  );
+  renderCampaignList();
+  renderDirectCampaign(selected);
+  setText(
+    elements.campaignSourceNote,
+    state.directCampaignFetchedAt
+      ? `Аккаунт ${state.directCampaignAccount} · обновлено ` +
+          `${formatMoment(state.directCampaignFetchedAt)}`
+      : "Реальные данные · только чтение",
+  );
+}
+
+function applyCampaignSourceLayout() {
+  const directMode = state.campaignSource === "direct";
+  elements.campaignSourceButtons.forEach((button) => {
+    const active = button.dataset.campaignSource === state.campaignSource;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  elements.newCampaign.hidden = directMode;
+  elements.refreshDirectCampaigns.hidden = !directMode;
+  elements.campaignInspectorActions.hidden = directMode;
+  elements.campaignLaunchStatus.hidden = directMode;
+  elements.campaignEditor.hidden = directMode;
+  elements.directCampaignInspector.hidden = !directMode;
+  elements.campaignStatusBadge.classList.toggle("is-live", directMode);
+  setText(
+    elements.campaignStatusBadge,
+    directMode ? "Только чтение" : "Черновик",
+  );
+  setText(
+    elements.campaignConsoleDescription,
+    directMode
+      ? (
+          "Изучайте реальные кампании аккаунта Яндекс Директа. " +
+          "Создание, редактирование и удаление отключены."
+        )
+      : (
+          "Просматривайте, создавайте и редактируйте локальные " +
+          "тестовые кампании."
+        ),
+  );
+  setText(
+    elements.campaignSourceNote,
+    directMode
+      ? state.directCampaignFetchedAt
+        ? `Аккаунт ${state.directCampaignAccount} · обновлено ` +
+          `${formatMoment(state.directCampaignFetchedAt)}`
+        : "Реальные данные · только чтение"
+      : "Изменения сохраняются только локально",
+  );
+  setText(
+    elements.campaignCountLabel,
+    directMode ? "кампаний в Директе" : "тестовых кампаний",
+  );
+  setText(
+    elements.campaignRegistryEyebrow,
+    directMode ? "Production · read-only" : "Все черновики",
+  );
+  setText(
+    elements.campaignRegistryTitle,
+    directMode ? "Кампании Яндекс Директа" : "Текущие кампании",
+  );
+  setText(
+    elements.campaignBudgetHeading,
+    directMode ? "Дневной бюджет" : "Бюджет",
+  );
+  setText(
+    elements.campaignMetricHeading,
+    directMode ? "Состояние" : "CPA",
+  );
+  elements.campaignSearch.placeholder = directMode
+    ? "Название, ID или статус"
+    : "Название или ключевая фраза";
+  elements.campaignSearch.value = "";
+
+  if (directMode) {
+    setText(elements.campaignCount, state.directCampaignCatalog.length);
+    renderCampaignList();
+    renderDirectCampaign(
+      state.directCampaignCatalog.find(
+        (item) => item.campaign_id === state.selectedDirectCampaignId,
+      ) || state.directCampaignCatalog[0],
+    );
+  } else {
+    setText(elements.campaignCount, state.campaignCatalog.length);
+    renderCampaignList();
+    if (state.campaignDraft) {
+      renderCampaignDraft(state.campaignDraft);
+      loadCampaignLaunch(state.campaignDraft.draft_id);
+      loadCampaignGoalLifecycle(state.campaignDraft.draft_id);
+    }
+    setCampaignBusy(false);
+  }
+}
+
+async function selectCampaignSource(source) {
+  if (
+    state.campaignBusy ||
+    !["test", "direct"].includes(source) ||
+    source === state.campaignSource ||
+    (state.campaignSource === "test" && !confirmCampaignDiscard())
+  ) {
+    return;
+  }
+  if (state.campaignSource === "test" && state.campaignDirty) {
+    renderCampaignDraft(state.campaignDraft);
+  }
+  state.campaignSource = source;
+  elements.campaignMessage.classList.remove("is-error");
+  setText(elements.campaignMessage, "");
+  applyCampaignSourceLayout();
+  if (source === "direct" && state.directCampaignCatalog.length === 0) {
+    await loadDirectCampaigns();
+  }
+}
+
+async function loadDirectCampaigns() {
+  if (state.directCampaignBusy) return;
+  setDirectCampaignBusy(true);
+  elements.campaignMessage.classList.remove("is-error");
+  setText(
+    elements.campaignMessage,
+    "Получаем реальные кампании из Яндекс Директа…",
+  );
+  try {
+    const catalog = await requestJson("/api/yandex-direct/campaigns");
+    renderDirectCampaignCatalog(catalog);
+    setText(
+      elements.campaignMessage,
+      catalog.truncated
+        ? "Показаны первые 10 000 кампаний. Доступ остаётся только для чтения."
+        : (
+            `Получено кампаний: ${catalog.total}. ` +
+            "Доступ остаётся только для чтения."
+          ),
+    );
+  } catch (error) {
+    state.directCampaignCatalog = [];
+    state.selectedDirectCampaignId = null;
+    renderDirectCampaignCatalog({ items: [], total: 0 });
+    elements.campaignMessage.classList.add("is-error");
+    setText(elements.campaignMessage, error.message);
+  } finally {
+    setDirectCampaignBusy(false);
+  }
+}
+
+function campaignEditorPayload() {
+  const goals = cloneCampaignValue(state.campaignGoals).map((goal) => ({
+    ...goal,
+    value_rub:
+      goal.value_mode === "DYNAMIC"
+        ? null
+        : Math.trunc(Number(goal.value_rub)),
+  }));
+  return {
+    campaign: {
+      name: elements.campaignInputs.name.value.trim(),
+      weekly_budget_rub: integerValue(
+        elements.campaignInputs.weekly_budget_rub,
+      ),
+      keyword: elements.campaignInputs.keyword.value.trim(),
+      landing_page: elements.campaignInputs.landing_page.value.trim(),
+    },
+    business_goal: {
+      meaning: elements.campaignInputs.business_goal.value.trim(),
+      target_cpa_rub: integerValue(
+        elements.campaignInputs.target_cpa_rub,
+      ),
+    },
+    goal_settings: {
+      strategy: elements.campaignInputs.goal_strategy.value,
+      payment_model: elements.campaignInputs.payment_model.value,
+      attribution_model: elements.campaignInputs.attribution_model.value,
+      counter_id: elements.campaignInputs.counter_id.value,
+      goals,
+    },
+    ad_groups: cloneCampaignValue(state.campaignAdGroups),
+  };
+}
+
+async function loadCampaignDraft() {
+  try {
+    const catalog = await requestJson("/api/campaigns");
+    renderCampaignCatalog(catalog);
+  } catch (error) {
+    elements.campaignMessage.classList.add("is-error");
+    setText(elements.campaignMessage, error.message);
+  }
+}
+
+function confirmCampaignDiscard() {
+  return (
+    !state.campaignDirty ||
+    window.confirm(
+      "Отменить несохранённые изменения и открыть другую кампанию?",
+    )
+  );
+}
+
+async function selectCampaignDraft(draftId) {
+  if (
+    state.campaignBusy ||
+    !draftId ||
+    draftId === state.campaignDraft?.draft_id ||
+    !confirmCampaignDiscard()
+  ) {
+    return;
+  }
+  setCampaignBusy(true);
+  elements.campaignMessage.classList.remove("is-error");
+  try {
+    const catalog = await requestJson(
+      `/api/campaigns/${encodeURIComponent(draftId)}/select`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
+    );
+    renderCampaignCatalog(catalog);
+    setText(elements.campaignMessage, "Кампания выбрана для редактирования.");
+  } catch (error) {
+    elements.campaignMessage.classList.add("is-error");
+    setText(elements.campaignMessage, error.message);
+    setCampaignBusy(false);
+  }
+}
+
+async function createCampaignDraft() {
+  if (!confirmCampaignDiscard()) return;
+  setCampaignBusy(true);
+  elements.campaignMessage.classList.remove("is-error");
+  try {
+    const catalog = await requestJson("/api/campaigns", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        action: "semantic_decision",
-        semantic_decision: semanticDecision,
+        expected_revision: state.campaignDraft?.revision || 0,
       }),
     });
-    renderWorkflowSteps(elements.goalWorkflowSteps, [
-      "GOAL_CANDIDATE",
-      "METRIKA_GOAL_ADD",
-      "SITE_EVENT_PUBLISH",
-      "REACH_GOAL_VERIFY",
-      "DELIVERY_POLLING",
-      `HUMAN_${semanticDecision}`,
-      semanticDecision === "REJECT" ? "CLEANUP" : "ACTIVATE_PRIMARY",
-    ]);
+    renderCampaignCatalog(catalog);
     setText(
-      elements.workflowMessage,
-      result.status === "REJECTED"
-        ? "Проверка цели завершена: цель отклонена."
-        : "Проверка цели завершена успешно.",
+      elements.campaignMessage,
+      "Новая кампания добавлена. Заполните параметры и сохраните изменения.",
     );
-    await refreshEvidence();
   } catch (error) {
-    elements.workflowMessage.classList.add("is-error");
-    setText(elements.workflowMessage, error.message);
-    elements.approveGoal.disabled = false;
-    elements.rejectGoal.disabled = false;
-    return;
+    elements.campaignMessage.classList.add("is-error");
+    setText(elements.campaignMessage, error.message);
+    setCampaignBusy(false);
   }
-  elements.runGoalWorkflow.disabled = false;
 }
 
-async function runImpactEvaluation() {
-  elements.runImpact.disabled = true;
+async function saveCampaignDraft() {
+  if (!state.campaignDraft) return;
+  setCampaignBusy(true);
+  elements.campaignMessage.classList.remove("is-error");
   try {
-    const result = await requestJson("/api/workflows/impact", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fixture: elements.impactFixture.value }),
-    });
-    const title = elements.impactResult.querySelector("strong");
-    const copy = elements.impactResult.querySelector("p");
-    const nextDecisionLabels = {
-      KEEP_CHANGE: "Сохранить изменение",
-      ROLLBACK_CHANGE: "Откатить изменение",
-      ADJUST_CHANGE: "Скорректировать изменение",
-      ESCALATE_TO_HUMAN: "Передать решение человеку",
-    };
-    const confidenceLabels = {
-      HIGH: "высокая",
-      MEDIUM: "средняя",
-      LOW: "низкая",
-    };
-    setText(
-      title,
-      nextDecisionLabels[result.recommended_next_decision] ||
-        "Требуется дополнительная проверка",
+    const draft = await requestJson(
+      `/api/campaigns/${encodeURIComponent(state.campaignDraft.draft_id)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision: state.campaignDraft.revision,
+          ...campaignEditorPayload(),
+        }),
+      },
     );
+    renderCampaignDraft(draft);
+    const catalog = await requestJson("/api/campaigns");
+    renderCampaignCatalog(catalog);
     setText(
-      copy,
-      `Уверенность: ${
-        confidenceLabels[result.impact_report.confidence] ||
-        result.impact_report.confidence
-      }`,
+      elements.campaignMessage,
+      "Черновик сохранён. Реальная кампания не изменена.",
     );
-    await refreshEvidence();
+    await refreshTestState(false);
   } catch (error) {
-    elements.impactResult.querySelector("strong").textContent =
-      "Не удалось оценить";
-    elements.impactResult.querySelector("p").textContent = error.message;
+    elements.campaignMessage.classList.add("is-error");
+    setText(elements.campaignMessage, error.message);
+    setCampaignBusy(false);
+  }
+}
+
+async function launchTestCampaign() {
+  if (!state.campaignDraft || state.campaignSource !== "test") return;
+  if (state.campaignDirty) {
+    elements.campaignMessage.classList.add("is-error");
+    setText(
+      elements.campaignMessage,
+      "Сохраните изменения перед тестовым запуском кампании.",
+    );
+    return;
+  }
+  const draftId = state.campaignDraft.draft_id;
+  setCampaignBusy(true);
+  elements.launchCampaign.setAttribute("aria-busy", "true");
+  setText(elements.launchCampaign, "Запускаем…");
+  elements.campaignMessage.classList.remove("is-error");
+  setText(
+    elements.campaignMessage,
+    "Выполняем Campaign Lifecycle в изолированном тестовом контуре…",
+  );
+  renderCampaignLaunchStatus({
+    draft_id: draftId,
+    launch_status: "RUNNING",
+    completed_steps: [],
+    total_steps: campaignLifecycleSteps.length,
+    external_write_sent: false,
+  });
+  try {
+    const result = await requestJson(
+      `/api/campaigns/${encodeURIComponent(draftId)}/launch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision: state.campaignDraft.revision,
+        }),
+      },
+    );
+    const completedSteps = Array.isArray(result.completed_steps)
+      ? result.completed_steps
+      : [];
+    const verified =
+      result.status === "APPLIED" &&
+      result.execution_mode === "SIMULATION" &&
+      completedSteps.length === campaignLifecycleSteps.length &&
+      completedSteps.every(
+        (step, index) => step === campaignLifecycleSteps[index],
+      ) &&
+      result.external_write_sent === false;
+    if (
+      state.campaignSource === "test" &&
+      state.campaignDraft?.draft_id === draftId
+    ) {
+      renderCampaignLaunchStatus({
+        draft_id: draftId,
+        launch_status: verified ? "LAUNCHED" : "FAILED",
+        workflow_status: result.status,
+        current: true,
+        run_id: result.run_id,
+        requested_at: result.requested_at,
+        completed_steps: completedSteps,
+        total_steps: campaignLifecycleSteps.length,
+        external_write_sent: result.external_write_sent,
+        message: verified
+          ? null
+          : result.detail ||
+            "Campaign Lifecycle не подтвердил полный тестовый запуск.",
+      });
+      setText(
+        elements.campaignMessage,
+        verified
+          ? "Тестовая кампания запущена. Внешние изменения не выполнялись."
+          : "Тестовый запуск не подтверждён. Проверьте статус Campaign Lifecycle.",
+      );
+      elements.campaignMessage.classList.toggle("is-error", !verified);
+    }
+  } catch (error) {
+    if (
+      state.campaignSource === "test" &&
+      state.campaignDraft?.draft_id === draftId
+    ) {
+      elements.campaignMessage.classList.add("is-error");
+      setText(elements.campaignMessage, error.message);
+      renderCampaignLaunchStatus({
+        draft_id: draftId,
+        launch_status: "FAILED",
+        message: error.message,
+        completed_steps: [],
+        total_steps: campaignLifecycleSteps.length,
+        external_write_sent: false,
+      });
+    }
   } finally {
-    elements.runImpact.disabled = false;
+    elements.launchCampaign.removeAttribute("aria-busy");
+    setText(elements.launchCampaign, "Запустить тестовую кампанию");
+    setCampaignBusy(false);
+  }
+}
+
+function openCampaignDeleteDialog() {
+  if (!state.campaignDraft || state.campaignCatalog.length <= 1) return;
+  setText(
+    elements.campaignDeleteName,
+    state.campaignDraft.campaign.name,
+  );
+  elements.campaignDeleteDialog.showModal();
+}
+
+async function deleteCampaignDraft() {
+  if (!state.campaignDraft) return;
+  elements.confirmCampaignDelete.disabled = true;
+  elements.campaignMessage.classList.remove("is-error");
+  try {
+    const catalog = await requestJson(
+      `/api/campaigns/${encodeURIComponent(state.campaignDraft.draft_id)}`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision: state.campaignDraft.revision,
+        }),
+      },
+    );
+    elements.campaignDeleteDialog.close();
+    renderCampaignCatalog(catalog);
+    setText(elements.campaignMessage, "Кампания удалена из локального списка.");
+  } catch (error) {
+    elements.campaignMessage.classList.add("is-error");
+    setText(elements.campaignMessage, error.message);
+  } finally {
+    elements.confirmCampaignDelete.disabled = false;
   }
 }
 
@@ -2240,15 +4594,148 @@ elements.revokeApproval.addEventListener("click", () => {
 elements.applyApproval.addEventListener("click", () => {
   applyLatestApproval();
 });
-elements.runCampaignWorkflow.addEventListener("click", runCampaignWorkflow);
-elements.runGoalWorkflow.addEventListener("click", runGoalTechnical);
-elements.approveGoal.addEventListener("click", () => {
-  decideGoalWorkflow("APPROVE");
+elements.newCampaign.addEventListener("click", createCampaignDraft);
+elements.refreshDirectCampaigns.addEventListener(
+  "click",
+  loadDirectCampaigns,
+);
+elements.campaignSourceButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    selectCampaignSource(button.dataset.campaignSource);
+  });
 });
-elements.rejectGoal.addEventListener("click", () => {
-  decideGoalWorkflow("REJECT");
+elements.saveCampaign.addEventListener("click", saveCampaignDraft);
+elements.launchCampaign.addEventListener("click", launchTestCampaign);
+elements.verifyCampaignGoal.addEventListener(
+  "click",
+  verifySelectedCampaignGoal,
+);
+elements.approveCampaignGoal.addEventListener("click", () => {
+  decideSelectedCampaignGoal("APPROVE");
 });
-elements.runImpact.addEventListener("click", runImpactEvaluation);
+elements.rejectCampaignGoal.addEventListener("click", () => {
+  decideSelectedCampaignGoal("REJECT");
+});
+elements.deleteCampaign.addEventListener("click", openCampaignDeleteDialog);
+elements.cancelCampaignDelete.addEventListener("click", () => {
+  elements.campaignDeleteDialog.close();
+});
+elements.confirmCampaignDelete.addEventListener(
+  "click",
+  deleteCampaignDraft,
+);
+elements.campaignSearch.addEventListener("input", renderCampaignList);
+elements.campaignEditor.addEventListener("submit", (event) => {
+  event.preventDefault();
+  saveCampaignDraft();
+});
+elements.campaignEditor.addEventListener("input", () => {
+  markCampaignDirty();
+});
+elements.addCampaignGoal.addEventListener("click", addCampaignGoal);
+elements.campaignAdGroupSelect.addEventListener("change", () => {
+  const group = state.campaignAdGroups.find(
+    (candidate) => candidate.id === elements.campaignAdGroupSelect.value,
+  );
+  if (!group) return;
+  state.selectedAdGroupId = group.id;
+  state.selectedAdId = group.ads[0]?.id || null;
+  renderCampaignAdGroups();
+});
+elements.addAdGroup.addEventListener("click", addCampaignAdGroup);
+elements.deleteAdGroup.addEventListener("click", deleteCampaignAdGroup);
+elements.campaignPilotGroup.addEventListener("change", () => {
+  const group = selectedCampaignAdGroup();
+  if (!group) return;
+  if (!elements.campaignPilotGroup.checked && group.selected_for_pilot) {
+    elements.campaignPilotGroup.checked = true;
+    return;
+  }
+  assignPilotGroup(group);
+  renderCampaignAdGroups();
+  markCampaignDirty();
+});
+elements.campaignAdGroupName.addEventListener("input", () => {
+  const group = selectedCampaignAdGroup();
+  if (!group) return;
+  group.name = elements.campaignAdGroupName.value;
+  const option = elements.campaignAdGroupSelect.selectedOptions[0];
+  if (option) {
+    setText(
+      option,
+      `${group.name || "Группа без названия"}${
+        group.selected_for_pilot ? " · пилот" : ""
+      }`,
+    );
+  }
+});
+elements.campaignAdGroupKeywords.addEventListener("input", () => {
+  const group = selectedCampaignAdGroup();
+  if (group) {
+    group.keywords = campaignLines(elements.campaignAdGroupKeywords.value);
+  }
+});
+elements.campaignAdGroupNegativeKeywords.addEventListener("input", () => {
+  const group = selectedCampaignAdGroup();
+  if (group) {
+    group.negative_keywords = campaignLines(
+      elements.campaignAdGroupNegativeKeywords.value,
+    );
+  }
+});
+elements.campaignAutotargeting.forEach((input) => {
+  input.addEventListener("change", () => {
+    const group = selectedCampaignAdGroup();
+    if (!group) return;
+    group.autotargeting[input.dataset.autotargeting] = input.checked;
+    markCampaignDirty();
+  });
+});
+elements.addCampaignAd.addEventListener("click", addCampaignAd);
+elements.campaignInputs.goal_strategy.addEventListener("change", () => {
+  const clickStrategy =
+    elements.campaignInputs.goal_strategy.value === "MAXIMIZE_CLICKS";
+  if (clickStrategy) {
+    elements.campaignInputs.payment_model.value = "CLICKS";
+  }
+  elements.campaignInputs.payment_model
+    .querySelector('option[value="CONVERSIONS"]')
+    .disabled = clickStrategy;
+  markCampaignDirty();
+});
+elements.campaignInputs.landing_page.addEventListener("input", (event) => {
+  const previous = state.campaignLandingPageValue;
+  state.campaignAdGroups.forEach((group) => {
+    group.ads.forEach((ad) => {
+      if (ad.href === previous) ad.href = event.target.value;
+    });
+  });
+  state.campaignLandingPageValue = event.target.value;
+  if (selectedCampaignAd()) renderCampaignAdEditor();
+});
+window.addEventListener("beforeunload", (event) => {
+  if (!state.campaignDirty) return;
+  event.preventDefault();
+});
+elements.historyDecisionsTab.addEventListener("click", () => {
+  showHistoryTab("decisions");
+});
+elements.historyOutcomesTab.addEventListener("click", () => {
+  showHistoryTab("outcomes");
+});
+elements.historyExpand.addEventListener("click", () => {
+  if (state.historyCompact) {
+    loadHistoryPage(1);
+  } else {
+    collapseHistory();
+  }
+});
+elements.historyPrevious.addEventListener("click", () => {
+  loadHistoryPage(Math.max(1, state.historyPage - 1));
+});
+elements.historyNext.addEventListener("click", () => {
+  loadHistoryPage(Math.min(state.historyPages, state.historyPage + 1));
+});
 elements.refreshEvidence.addEventListener("click", refreshEvidence);
 elements.runFullEvidence.addEventListener("click", runFullEvidence);
 
@@ -2257,6 +4744,7 @@ fetch("/api/status")
   .then((payload) => {
     state.status = payload;
     state.statusError = false;
+    elements.publicDemoBanner.hidden = payload.public_demo !== true;
     if (payload.test_automation) {
       applyAutomationSettings(payload.test_automation);
     }
@@ -2278,4 +4766,5 @@ renderRecommendationMatrix();
 refreshTestState(false);
 refreshControlPlane();
 refreshEvidence();
+loadCampaignDraft();
 window.setInterval(() => refreshTestState(true), 1000);

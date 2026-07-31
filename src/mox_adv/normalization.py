@@ -6,6 +6,7 @@ import hashlib
 import json
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Mapping, Sequence, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mox_adv.contracts import (
     INTEGRATED_SNAPSHOT_SCHEMA_VERSION,
@@ -99,13 +100,25 @@ class IntegratedSnapshotNormalizerV1:
     ) -> IntegratedSnapshotDraft:
         generated_at = _parse_utc(connected.generated_at, "generation")
         local_fixture = self._validate_sources(connected)
-        self._validate_trusted_scope(connected, policy, trusted_scope)
+        self._validate_trusted_scope(
+            connected,
+            policy,
+            trusted_scope,
+            local_fixture,
+        )
         gaps, comparability = self._comparability(
             connected,
             policy,
             generated_at,
             local_fixture,
         )
+        if (
+            not local_fixture
+            and connected.direct_state.last_change_author == "UNAVAILABLE_READ_ONLY"
+        ):
+            gaps.append("CHANGE_PROVENANCE_UNAVAILABLE")
+            if comparability == "COMPARABLE":
+                comparability = "PARTIAL"
         direct_dates, metrika_dates = self._validate_rows(
             connected,
             local_fixture,
@@ -125,9 +138,10 @@ class IntegratedSnapshotNormalizerV1:
             confidence_status = "STALE_DATA"
         else:
             confidence_status = "READY"
-        if comparability == "COMPARABLE" and connected.baseline is None:
-            comparability = "PARTIAL"
+        if connected.baseline is None:
             gaps.append("BASELINE_UNAVAILABLE")
+            if comparability == "COMPARABLE":
+                comparability = "PARTIAL"
         records = self._join_rows(connected, direct_dates, metrika_dates)
         financial_allowed = (
             comparability == "COMPARABLE" and confidence_status == "READY"
@@ -141,7 +155,7 @@ class IntegratedSnapshotNormalizerV1:
             scope=connected.scope,
             period_start=connected.direct_report.period_start,
             period_end=connected.direct_report.period_end,
-            timezone="UTC",
+            timezone=connected.direct_report.timezone,
             attribution=SnapshotAttribution(
                 direct=connected.direct_report.attribution,
                 metrika=connected.metrika_report.attribution,
@@ -217,6 +231,7 @@ class IntegratedSnapshotNormalizerV1:
         connected: ConnectedAnalytics,
         policy: Mapping[str, Any],
         trusted_scope: TrustedAnalyticsScope,
+        local_fixture: bool,
     ) -> None:
         if (
             connected.scope.organization != trusted_scope.organization
@@ -233,7 +248,10 @@ class IntegratedSnapshotNormalizerV1:
         ):
             raise _reject("The baseline is outside the trusted scope.")
         owner = policy["principals"]["owner"]["identity"]
-        if connected.direct_state.last_change_author != owner:
+        if connected.direct_state.last_change_author != owner and not (
+            not local_fixture
+            and connected.direct_state.last_change_author == "UNAVAILABLE_READ_ONLY"
+        ):
             raise _reject("The campaign contains an unknown external change.")
 
     @staticmethod
@@ -310,7 +328,14 @@ class IntegratedSnapshotNormalizerV1:
         ):
             gaps.append("PERIOD_MISMATCH")
             incompatible = True
-        if direct.timezone != "UTC" or metrika.timezone != "UTC":
+        try:
+            analytics_timezone = ZoneInfo(direct.timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            analytics_timezone = None
+        timezone_aligned = (
+            direct.timezone == metrika.timezone and analytics_timezone is not None
+        )
+        if not timezone_aligned:
             gaps.append("TIMEZONE_MISMATCH")
             incompatible = True
         expected_attribution = policy["attribution"]
@@ -331,7 +356,20 @@ class IntegratedSnapshotNormalizerV1:
             connected.direct_state.budget_period_end,
             "budget period end",
         )
-        if budget_period_end - budget_period_start != timedelta(days=7):
+        if timezone_aligned:
+            assert analytics_timezone is not None
+            local_budget_start = budget_period_start.astimezone(analytics_timezone)
+            local_budget_end = budget_period_end.astimezone(analytics_timezone)
+            budget_period_valid = (
+                local_budget_start.timetz().replace(tzinfo=None) == time.min
+                and local_budget_end.timetz().replace(tzinfo=None) == time.min
+                and (local_budget_end.date() - local_budget_start.date()).days == 7
+            )
+        else:
+            budget_period_valid = budget_period_end - budget_period_start == timedelta(
+                days=7
+            )
+        if not budget_period_valid:
             raise _reject("The weekly budget period must span seven days.")
         if generated_at < budget_period_start:
             gaps.append("BUDGET_PERIOD_MISMATCH")
@@ -382,8 +420,8 @@ class IntegratedSnapshotNormalizerV1:
         closed_at = datetime.combine(
             period_end + timedelta(days=1),
             time.min,
-            tzinfo=timezone.utc,
-        )
+            tzinfo=(analytics_timezone if timezone_aligned else timezone.utc),
+        ).astimezone(timezone.utc)
         if generated_at < closed_at:
             gaps.append("PERIOD_NOT_CLOSED")
             incompatible = True

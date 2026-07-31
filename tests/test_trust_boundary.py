@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 import uuid
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -278,8 +279,8 @@ class ExactEgressBoundaryTests(unittest.TestCase):
     def test_exact_read_and_write_profiles_are_bound_to_matrix_entries(self) -> None:
         self.guard.authorize(
             "POST",
-            "https://api.direct.yandex.com/json/v5/reports",
-            version="v5",
+            "https://api.direct.yandex.com/json/v501/reports",
+            version="v501",
             service="Reports",
             operation="get",
             authority=EgressAuthority(
@@ -303,8 +304,8 @@ class ExactEgressBoundaryTests(unittest.TestCase):
         cases = (
             {
                 "http_method": "POST",
-                "url": "http://api.direct.yandex.com/json/v5/reports",
-                "version": "v5",
+                "url": "http://api.direct.yandex.com/json/v501/reports",
+                "version": "v501",
                 "service": "Reports",
                 "operation": "get",
                 "authority": EgressAuthority(
@@ -314,8 +315,8 @@ class ExactEgressBoundaryTests(unittest.TestCase):
             },
             {
                 "http_method": "POST",
-                "url": "https://api.direct.yandex.com:444/json/v5/reports",
-                "version": "v5",
+                "url": "https://api.direct.yandex.com:444/json/v501/reports",
+                "version": "v501",
                 "service": "Reports",
                 "operation": "get",
                 "authority": EgressAuthority(
@@ -325,8 +326,8 @@ class ExactEgressBoundaryTests(unittest.TestCase):
             },
             {
                 "http_method": "GET",
-                "url": "https://api.direct.yandex.com/json/v5/reports",
-                "version": "v5",
+                "url": "https://api.direct.yandex.com/json/v501/reports",
+                "version": "v501",
                 "service": "Reports",
                 "operation": "get",
                 "authority": EgressAuthority(
@@ -336,8 +337,8 @@ class ExactEgressBoundaryTests(unittest.TestCase):
             },
             {
                 "http_method": "POST",
-                "url": "https://api.direct.yandex.com/json/v5/reports",
-                "version": "v5",
+                "url": "https://api.direct.yandex.com/json/v501/reports",
+                "version": "v501",
                 "service": "Reports",
                 "operation": "unknown",
                 "authority": EgressAuthority(
@@ -347,8 +348,8 @@ class ExactEgressBoundaryTests(unittest.TestCase):
             },
             {
                 "http_method": "POST",
-                "url": "https://api.direct.yandex.com/json/v5/reports",
-                "version": "v5",
+                "url": "https://api.direct.yandex.com/json/v501/reports",
+                "version": "v501",
                 "service": "Reports",
                 "operation": "get",
                 "authority": EgressAuthority(
@@ -364,8 +365,8 @@ class ExactEgressBoundaryTests(unittest.TestCase):
         with self.assertRaises(EgressDenied):
             self.guard.authorize(
                 "POST",
-                "https://api.direct.yandex.com/json/v5/reports",
-                version="v5",
+                "https://api.direct.yandex.com/json/v501/reports",
+                version="v501",
                 service="Reports",
                 operation="get",
                 authority=EgressAuthority(
@@ -660,8 +661,9 @@ class SignedAuditGateTests(unittest.TestCase):
                 signer = FakeAnchorSigner()
                 anchor = journal.create_signed_anchor(signer, NOW)
                 journal.close()
-                with sqlite3.connect(path) as connection:
-                    connection.execute(statement)
+                with closing(sqlite3.connect(path)) as connection:
+                    with connection:
+                        connection.execute(statement)
                 reopened = SQLiteAuditJournal.open(path)
                 with self.assertRaises(AuditIntegrityError):
                     reopened.verify_signed_anchor(

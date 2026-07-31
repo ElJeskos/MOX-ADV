@@ -343,6 +343,7 @@ class ClosedSchemaTests(unittest.TestCase):
         campaign = {
             "schema_version": "campaign-draft-v1",
             "draft_id": "draft-1",
+            "name": "Lead service",
             "business_goal": {
                 "event": "lead_submitted",
                 "meaning": "A visitor submitted the lead form.",

@@ -20,14 +20,19 @@
         <a href="/autopilot" data-nav data-page-link="autopilot">Автопилот</a>
         <a href="/rules" data-nav data-page-link="rules">Правила</a>
         <a href="/history" data-nav data-page-link="history">История</a>
-        <a href="/workflows" data-nav data-page-link="workflows">Сценарии</a>
+        <a href="/campaign" data-nav data-page-link="campaign">Кампания</a>
         <a href="/control" data-nav data-page-link="control">Контроль</a>
+        <span class="nav-disabled" aria-disabled="true">Вебвизор</span>
       </nav>
       <div class="service-state" id="service-state">
         <span class="state-dot" aria-hidden="true"></span>
         <span>Система готова</span>
       </div>
     </header>
+    <aside class="public-demo-banner" id="public-demo-banner" hidden>
+      <strong>Публичная демонстрация</strong>
+      <span>Работает полный Dashboard, включая подключённые интеграции Яндекса. Тестовые изменения сохраняются в общей демонстрационной среде.</span>
+    </aside>
 
     <section class="page overview-page" data-page="overview" aria-labelledby="overview-title">
       <div class="page-heading">
@@ -165,6 +170,26 @@
           <div class="report-meta">
             <span id="report-run-id">—</span>
             <span id="report-period">—</span>
+          </div>
+
+          <div class="campaign-goal-summary" id="campaign-goal-summary">
+            <div>
+              <span>Цель рекламной кампании</span>
+              <strong id="report-campaign-goal">—</strong>
+              <small id="report-goal-usage">Учитывается в решении</small>
+            </div>
+            <div>
+              <span>Целевой CPA</span>
+              <strong id="report-goal-target">—</strong>
+            </div>
+            <div>
+              <span>Фактический CPA</span>
+              <strong id="report-goal-actual">—</strong>
+            </div>
+            <div class="goal-achievement" id="report-goal-achievement">
+              <span>Достижение</span>
+              <strong id="report-goal-status">—</strong>
+            </div>
           </div>
 
           <div class="metrics" id="metrics"></div>
@@ -668,106 +693,568 @@
         </div>
       </section>
 
-      <section class="page history-panel" data-page="history" aria-labelledby="history-title">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Журнал решений</p>
-            <h3 id="history-title">Что было решено и почему</h3>
-          </div>
-          <span class="panel-index">02</span>
+      <section class="page history-console" data-page="history" aria-labelledby="history-title">
+        <div class="history-tabs" role="tablist" aria-label="Разделы истории">
+          <button
+            id="history-decisions-tab"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="history-decisions-panel"
+          >
+            История решений
+          </button>
+          <button
+            id="history-outcomes-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="history-outcomes-panel"
+          >
+            Исход решений
+          </button>
         </div>
-        <div class="decision-history" id="decision-history">
-          <p class="history-empty">История появится после первого тестового цикла.</p>
+        <div
+          id="history-decisions-panel"
+          class="history-tab-panel"
+          role="tabpanel"
+          aria-labelledby="history-decisions-tab"
+        >
+          <div class="operator-console-head">
+            <div>
+              <p class="eyebrow">Журнал решений</p>
+              <h2 id="history-title">Что было решено и почему</h2>
+            </div>
+            <p>
+              По умолчанию показаны три последних решения.
+              Разверните журнал, чтобы посмотреть остальные.
+            </p>
+          </div>
+          <div class="history-summary">
+            <p><strong id="history-total">0</strong> решений в журнале</p>
+            <span>Сначала новые</span>
+          </div>
+          <div class="decision-history" id="decision-history">
+            <p class="history-empty">История появится после первого тестового цикла.</p>
+          </div>
+          <div class="history-controls">
+            <button class="text-button" id="history-expand" type="button">
+              Показать весь журнал
+            </button>
+            <div class="history-pagination" id="history-pagination" hidden>
+              <button class="text-button" id="history-previous" type="button">
+                Предыдущая страница
+              </button>
+              <span id="history-page-status">Страница 1 из 1</span>
+              <button class="text-button" id="history-next" type="button">
+                Следующая страница
+              </button>
+            </div>
+          </div>
+        </div>
+        <div
+          id="history-outcomes-panel"
+          class="history-tab-panel"
+          role="tabpanel"
+          aria-labelledby="history-outcomes-tab"
+          hidden
+        >
+          <div class="operator-console-head">
+            <div>
+              <p class="eyebrow">Проверка результата</p>
+              <h2>Что изменилось после решения</h2>
+            </div>
+            <p>
+              Здесь показано принятое решение, фактическое изменение и
+              измеренный результат после него.
+            </p>
+          </div>
+          <div class="decision-outcome" id="decision-outcome">
+            <p class="history-empty">
+              Выберите «Посмотреть исход» в журнале решений.
+            </p>
+          </div>
         </div>
       </section>
     </section>
 
-    <section class="page workflow-console" data-page="workflows" aria-labelledby="workflow-title">
+    <section class="page campaign-console" data-page="campaign" aria-labelledby="campaign-title">
       <div class="operator-console-head">
         <div>
-          <p class="eyebrow">Тестовые сценарии</p>
-          <h2 id="workflow-title">Кампания и цель Метрики</h2>
+          <p class="eyebrow">Реестр объектов</p>
+          <h2 id="campaign-title">Рекламные кампании</h2>
         </div>
-        <p>
-          Отдельно проверьте создание кампании и настройку цели на безопасных данных.
+        <p id="campaign-console-description">
+          Просматривайте, создавайте и редактируйте локальные тестовые кампании.
         </p>
       </div>
 
-      <div class="workflow-layout">
-        <section class="workflow-panel" aria-labelledby="campaign-workflow-title">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Яндекс Директ</p>
-              <h3 id="campaign-workflow-title">Пилотная кампания</h3>
-            </div>
-            <span class="panel-index">01</span>
-          </div>
-          <p class="panel-copy">
-            Создание структуры, модерация, запуск и проверка результата.
-          </p>
-          <div class="workflow-steps" id="campaign-workflow-steps"></div>
-          <button class="secondary-button" id="run-campaign-workflow" type="button">
-            Запустить безопасную симуляцию
-          </button>
-        </section>
-
-        <section class="workflow-panel" aria-labelledby="goal-workflow-title">
-          <div class="panel-head">
-            <div>
-              <p class="eyebrow">Яндекс Метрика</p>
-              <h3 id="goal-workflow-title">Кандидатная цель</h3>
-            </div>
-            <span class="panel-index">02</span>
-          </div>
-          <p class="panel-copy">
-            Создание цели, тестовое событие и подтверждение бизнес-смысла.
-          </p>
-          <div class="workflow-steps" id="goal-workflow-steps"></div>
-          <div class="inline-actions">
-            <button class="secondary-button" id="run-goal-workflow" type="button">
-              Проверить технически
-            </button>
-            <button class="text-button" id="approve-goal" type="button" disabled>
-              Подтвердить смысл
-            </button>
-            <button class="text-button" id="reject-goal" type="button" disabled>
-              Отклонить
-            </button>
-          </div>
-        </section>
-      </div>
-      <p class="automation-message" id="workflow-message" aria-live="polite"></p>
-    </section>
-
-    <section class="page impact-console" data-page="history" aria-labelledby="impact-title">
-      <div class="operator-console-head">
-        <div>
-          <p class="eyebrow">Проверка результата</p>
-          <h2 id="impact-title">Что изменилось после решения</h2>
-        </div>
-        <p>
-          Сравните период до и после изменения и выберите следующий шаг.
-        </p>
-      </div>
-      <div class="impact-layout">
-        <label class="interval-field">
-          <span>Сценарий наблюдения</span>
-          <select id="impact-fixture">
-            <option value="IMPACT_CPA_IMPROVED_KEEP">CPA улучшился · сохранить</option>
-            <option value="IMPACT_CPA_WORSE_ROLLBACK">CPA ухудшился · откатить</option>
-            <option value="IMPACT_MIXED_ADJUST">Смешанный эффект · скорректировать</option>
-            <option value="IMPACT_INCONCLUSIVE_HUMAN">Недостаточно данных · человеку</option>
-          </select>
-        </label>
-        <button class="secondary-button" id="run-impact" type="button">
-          Оценить результат
+      <div class="campaign-source-switch" role="tablist" aria-label="Источник кампаний">
+        <button
+          class="campaign-source-button is-active"
+          id="campaign-source-test"
+          type="button"
+          role="tab"
+          aria-selected="true"
+          data-campaign-source="test"
+        >
+          <span>Тестовые</span>
+          <small>Локальные черновики</small>
         </button>
-        <div class="impact-result" id="impact-result" aria-live="polite">
-          <span>Следующее решение</span>
-          <strong>Ожидает данных после изменения</strong>
-          <p>Запустите один из фиксированных сценариев.</p>
+        <button
+          class="campaign-source-button"
+          id="campaign-source-direct"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          data-campaign-source="direct"
+        >
+          <span>Яндекс Директ</span>
+          <small>Реальные · только чтение</small>
+        </button>
+        <div class="campaign-source-note" id="campaign-source-note">
+          Изменения сохраняются только локально
         </div>
       </div>
+
+      <div class="campaign-overview-bar">
+        <div>
+          <strong id="campaign-count">—</strong>
+          <span id="campaign-count-label">тестовых кампаний</span>
+        </div>
+        <label class="campaign-search">
+          <span>Поиск по кампаниям</span>
+          <input id="campaign-search" type="search" placeholder="Название или ключевая фраза" autocomplete="off">
+        </label>
+        <button class="run-button compact" id="new-campaign" type="button">
+          <span aria-hidden="true">＋</span>
+          Новая кампания
+        </button>
+        <button class="run-button compact" id="refresh-direct-campaigns" type="button" hidden>
+          Обновить из Директа
+        </button>
+      </div>
+
+      <div class="campaign-workspace">
+        <section class="campaign-registry" aria-labelledby="campaign-registry-title">
+          <div class="campaign-registry-head">
+            <div>
+              <p class="eyebrow" id="campaign-registry-eyebrow">Все черновики</p>
+              <h3 id="campaign-registry-title">Текущие кампании</h3>
+            </div>
+            <span id="campaign-filter-count">—</span>
+          </div>
+          <div class="campaign-table-wrap">
+            <table class="campaign-table">
+              <thead>
+                <tr>
+                  <th scope="col">Кампания</th>
+                  <th scope="col" id="campaign-budget-heading">Бюджет</th>
+                  <th scope="col" id="campaign-metric-heading">CPA</th>
+                </tr>
+              </thead>
+              <tbody id="campaign-list"></tbody>
+            </table>
+          </div>
+          <p class="campaign-empty" id="campaign-empty" hidden>
+            По вашему запросу кампаний не найдено.
+          </p>
+        </section>
+
+        <section class="campaign-inspector" aria-labelledby="campaign-editor-title">
+          <div class="campaign-inspector-head">
+            <div>
+              <div class="campaign-status-line">
+                <span class="campaign-status-badge" id="campaign-status-badge">Черновик</span>
+                <span id="campaign-draft-meta">Реальная кампания не изменяется</span>
+              </div>
+              <h3 id="campaign-editor-title">Редактирование кампании</h3>
+              <p id="campaign-draft-status">Локальный черновик</p>
+            </div>
+            <div class="campaign-inspector-actions" id="campaign-inspector-actions">
+              <button class="text-button danger-text" id="delete-campaign" type="button">
+                Удалить
+              </button>
+              <button class="secondary-button compact" id="save-campaign" type="button">
+                Сохранить
+              </button>
+              <button class="run-button compact" id="launch-campaign" type="button" disabled>
+                Запустить тестовую кампанию
+              </button>
+            </div>
+          </div>
+
+          <section
+            class="campaign-launch-status is-idle"
+            id="campaign-launch-status"
+            aria-labelledby="campaign-launch-title"
+            aria-live="polite"
+            aria-atomic="true"
+            role="status"
+          >
+            <div class="campaign-launch-summary">
+              <span class="campaign-launch-mark" aria-hidden="true">TEST</span>
+              <div>
+                <p class="eyebrow">Тестовый запуск</p>
+                <h4 id="campaign-launch-title">Тестовая кампания не запускалась</h4>
+                <p id="campaign-launch-copy">
+                  Запуск выполнит Campaign Lifecycle в изолированном контуре.
+                </p>
+              </div>
+            </div>
+            <dl class="campaign-launch-facts">
+              <div>
+                <dt>Lifecycle</dt>
+                <dd id="campaign-launch-steps">0 из 8 этапов</dd>
+              </div>
+              <div>
+                <dt>Безопасность</dt>
+                <dd id="campaign-launch-safety">Внешних изменений нет</dd>
+              </div>
+              <div>
+                <dt>Время запуска</dt>
+                <dd id="campaign-launch-time">—</dd>
+              </div>
+              <div>
+                <dt>Run ID</dt>
+                <dd id="campaign-launch-run-id">—</dd>
+              </div>
+            </dl>
+          </section>
+
+          <form class="campaign-editor" id="campaign-editor">
+            <section class="campaign-editor-section" aria-labelledby="campaign-settings-title">
+              <div class="campaign-section-heading">
+                <div>
+                  <p class="eyebrow">Яндекс Директ</p>
+                  <h4 id="campaign-settings-title">Параметры размещения</h4>
+                </div>
+                <span class="panel-index">01</span>
+              </div>
+              <div class="campaign-field-grid">
+                <label class="campaign-field-wide">
+                  <span>Название кампании</span>
+                  <input id="campaign-name" type="text" maxlength="128" autocomplete="off">
+                </label>
+                <label>
+                  <span>Недельный бюджет, ₽</span>
+                  <input id="campaign-weekly-budget" type="number" min="1" max="3000">
+                </label>
+                <label>
+                  <span>География</span>
+                  <input value="Россия" readonly aria-readonly="true">
+                </label>
+                <label class="campaign-field-wide">
+                  <span>Ключевая фраза</span>
+                  <input id="campaign-keyword" type="text" maxlength="128" autocomplete="off">
+                </label>
+                <label class="campaign-field-wide">
+                  <span>Посадочная страница</span>
+                  <input id="campaign-landing-page" type="url" maxlength="2048" autocomplete="off">
+                </label>
+              </div>
+            </section>
+
+            <section class="campaign-editor-section goal-editor-section" aria-labelledby="campaign-goal-title">
+              <div class="campaign-section-heading">
+                <div>
+                  <p class="eyebrow">Стратегия</p>
+                  <h4 id="campaign-goal-title">Целевые действия и их ценность</h4>
+                </div>
+                <span class="panel-index">02</span>
+              </div>
+              <div class="campaign-field-grid campaign-strategy-grid">
+                <label class="campaign-field-wide">
+                  <span>Бизнес-цель</span>
+                  <textarea id="campaign-business-goal" rows="3" maxlength="500"></textarea>
+                </label>
+                <label>
+                  <span>Стратегия</span>
+                  <select id="campaign-goal-strategy">
+                    <option value="MAXIMIZE_CONVERSIONS">Максимум конверсий</option>
+                    <option value="MAXIMIZE_CLICKS">Максимум кликов</option>
+                    <option value="MAXIMIZE_PROFIT">Максимум прибыли</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Модель оплаты</span>
+                  <select id="campaign-payment-model">
+                    <option value="CLICKS">За клики</option>
+                    <option value="CONVERSIONS">За конверсии</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Целевой CPA, ₽</span>
+                  <input id="campaign-target-cpa" type="number" min="1" max="1000">
+                </label>
+                <label>
+                  <span>Модель атрибуции</span>
+                  <select id="campaign-attribution-model">
+                    <option value="AUTO">Автоматическая</option>
+                    <option value="LC">Последний переход</option>
+                    <option value="LSCCD">Последний значимый переход с кросс-девайсом</option>
+                    <option value="FCCD">Первый переход с кросс-девайсом</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Счётчик Метрики</span>
+                  <input id="campaign-counter-id" type="text" readonly aria-readonly="true">
+                  <small>Тестовый счётчик закреплён политикой Gate 0</small>
+                </label>
+              </div>
+              <div class="campaign-subsection-head">
+                <div>
+                  <h5>Цели стратегии</h5>
+                  <p>До 30 целей. Основная цель участвует в анализе и безопасном пилотном цикле.</p>
+                </div>
+                <button class="secondary-button compact" id="add-campaign-goal" type="button">
+                  Добавить цель
+                </button>
+              </div>
+              <div class="campaign-goals" id="campaign-goals"></div>
+              <section
+                class="campaign-goal-lifecycle is-idle"
+                id="campaign-goal-lifecycle"
+                aria-labelledby="campaign-goal-lifecycle-title"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                <div class="campaign-goal-lifecycle-head">
+                  <div>
+                    <p class="eyebrow">Симуляция Goal Lifecycle</p>
+                    <h5 id="campaign-goal-lifecycle-title">Проверка цели Метрики</h5>
+                  </div>
+                  <span class="campaign-goal-badge" id="campaign-goal-badge">SIMULATED</span>
+                </div>
+                <p class="campaign-goal-lifecycle-copy" id="campaign-goal-lifecycle-copy">
+                  Проверьте кандидатную цель на изолированных адаптерах и отдельно подтвердите её бизнес-смысл.
+                </p>
+                <dl class="campaign-goal-evidence">
+                  <div>
+                    <dt>Кандидат</dt>
+                    <dd id="campaign-goal-candidate">—</dd>
+                  </div>
+                  <div>
+                    <dt>Событие</dt>
+                    <dd id="campaign-goal-event">Не проверено</dd>
+                  </div>
+                  <div>
+                    <dt>Доставка</dt>
+                    <dd id="campaign-goal-delivery">Не проверена</dd>
+                  </div>
+                  <div>
+                    <dt>Оптимизация</dt>
+                    <dd id="campaign-goal-optimization">Не допущена</dd>
+                  </div>
+                  <div>
+                    <dt>Safety</dt>
+                    <dd id="campaign-goal-safety">SIMULATED · внешних изменений нет</dd>
+                  </div>
+                  <div>
+                    <dt>Run ID</dt>
+                    <dd id="campaign-goal-run-id">—</dd>
+                  </div>
+                </dl>
+                <details class="campaign-goal-evidence-details" id="campaign-goal-evidence-details" hidden>
+                  <summary>Техническое доказательство · SIMULATED</summary>
+                  <dl>
+                    <div>
+                      <dt>Goal ID</dt>
+                      <dd id="campaign-goal-evidence-id">—</dd>
+                    </div>
+                    <div>
+                      <dt>Тип и классификация</dt>
+                      <dd id="campaign-goal-evidence-type">—</dd>
+                    </div>
+                    <div>
+                      <dt>Событие</dt>
+                      <dd id="campaign-goal-evidence-event">—</dd>
+                    </div>
+                    <div>
+                      <dt>Селектор</dt>
+                      <dd id="campaign-goal-evidence-selector">—</dd>
+                    </div>
+                    <div>
+                      <dt>Тестовый сценарий</dt>
+                      <dd id="campaign-goal-evidence-scenario">—</dd>
+                    </div>
+                    <div>
+                      <dt>Проверено</dt>
+                      <dd id="campaign-goal-evidence-checked-at">—</dd>
+                    </div>
+                    <div>
+                      <dt>Автор</dt>
+                      <dd id="campaign-goal-evidence-author">—</dd>
+                    </div>
+                    <div>
+                      <dt>Версия конфигурации</dt>
+                      <dd id="campaign-goal-evidence-version">—</dd>
+                    </div>
+                  </dl>
+                </details>
+                <div class="campaign-goal-actions">
+                  <button class="secondary-button compact" id="verify-campaign-goal" type="button">
+                    Проверить тестовую цель
+                  </button>
+                  <button class="run-button compact" id="approve-campaign-goal" type="button" hidden>
+                    Подтвердить смысл цели
+                  </button>
+                  <button class="text-button danger-text" id="reject-campaign-goal" type="button" hidden>
+                    Отклонить цель
+                  </button>
+                </div>
+                <p class="campaign-goal-message" id="campaign-goal-message"></p>
+              </section>
+            </section>
+
+            <section
+              class="campaign-editor-section ad-editor-section"
+              id="campaign-ad-workspace"
+              aria-labelledby="campaign-ads-title"
+            >
+              <div class="campaign-section-heading">
+                <div>
+                  <p class="eyebrow">Яндекс Директ</p>
+                  <h4 id="campaign-ads-title">Группы и объявления</h4>
+                </div>
+                <span class="panel-index">03</span>
+              </div>
+              <p class="campaign-section-intro">
+                Настройте группы и комбинаторные объявления.
+                Для безопасного пилота выберите одну группу и два варианта A/B.
+              </p>
+              <div class="ad-group-toolbar">
+                <label>
+                  <span>Группа объявлений</span>
+                  <select id="campaign-ad-group-select"></select>
+                </label>
+                <button class="secondary-button compact" id="add-ad-group" type="button">
+                  Добавить группу
+                </button>
+                <button class="text-button danger-text" id="delete-ad-group" type="button">
+                  Удалить группу
+                </button>
+                <label class="pilot-group-toggle">
+                  <input id="campaign-pilot-group" type="checkbox">
+                  <span>Использовать в пилотном запуске</span>
+                </label>
+              </div>
+              <div class="campaign-field-grid ad-group-fields">
+                <label class="campaign-field-wide">
+                  <span>Название группы</span>
+                  <input id="campaign-ad-group-name" type="text" maxlength="255" autocomplete="off">
+                </label>
+                <label class="campaign-field-wide">
+                  <span>Ключевые фразы</span>
+                  <textarea id="campaign-ad-group-keywords" rows="3" placeholder="Одна фраза на строку"></textarea>
+                </label>
+                <label class="campaign-field-wide">
+                  <span>Минус-фразы</span>
+                  <textarea id="campaign-ad-group-negative-keywords" rows="3" placeholder="Одна фраза на строку"></textarea>
+                </label>
+              </div>
+              <fieldset class="autotargeting-fieldset">
+                <legend>Категории автотаргетинга</legend>
+                <label><input type="checkbox" data-autotargeting="EXACT"> Целевые запросы</label>
+                <label><input type="checkbox" data-autotargeting="ALTERNATIVE"> Альтернативные</label>
+                <label><input type="checkbox" data-autotargeting="COMPETITOR"> Конкурентные</label>
+                <label><input type="checkbox" data-autotargeting="BROADER"> Широкие</label>
+                <label><input type="checkbox" data-autotargeting="ACCESSORY"> Сопутствующие</label>
+              </fieldset>
+              <div class="campaign-subsection-head">
+                <div>
+                  <h5>Объявления группы</h5>
+                  <p>Комбинаторный формат: до 7 заголовков, 3 текстов и 5 изображений.</p>
+                </div>
+                <button class="secondary-button compact" id="add-campaign-ad" type="button">
+                  Добавить объявление
+                </button>
+              </div>
+              <div class="campaign-ad-tabs" id="campaign-ad-tabs" role="tablist" aria-label="Объявления группы"></div>
+              <div class="campaign-ad-editor" id="campaign-ad-editor"></div>
+            </section>
+          </form>
+
+          <div class="direct-campaign-inspector" id="direct-campaign-inspector" hidden>
+            <div class="direct-readonly-banner">
+              <span aria-hidden="true">RO</span>
+              <div>
+                <strong>Режим только для чтения</strong>
+                <p>Данные получены напрямую через Campaigns.get. Изменяющие запросы отключены.</p>
+              </div>
+            </div>
+            <section class="campaign-editor-section" aria-labelledby="direct-campaign-details-title">
+              <div class="campaign-section-heading">
+                <div>
+                  <p class="eyebrow">Яндекс Директ</p>
+                  <h4 id="direct-campaign-details-title">Параметры кампании</h4>
+                </div>
+                <span class="panel-index">LIVE</span>
+              </div>
+              <dl class="direct-campaign-facts">
+                <div>
+                  <dt>ID кампании</dt>
+                  <dd id="direct-campaign-id">—</dd>
+                </div>
+                <div>
+                  <dt>Тип</dt>
+                  <dd id="direct-campaign-type">—</dd>
+                </div>
+                <div>
+                  <dt>Состояние показов</dt>
+                  <dd id="direct-campaign-state">—</dd>
+                </div>
+                <div>
+                  <dt>Статус модерации</dt>
+                  <dd id="direct-campaign-status">—</dd>
+                </div>
+                <div>
+                  <dt>Статус оплаты</dt>
+                  <dd id="direct-campaign-payment">—</dd>
+                </div>
+                <div>
+                  <dt>Дневной бюджет</dt>
+                  <dd id="direct-campaign-budget">—</dd>
+                </div>
+                <div>
+                  <dt>Начало показов</dt>
+                  <dd id="direct-campaign-start">—</dd>
+                </div>
+                <div>
+                  <dt>Окончание показов</dt>
+                  <dd id="direct-campaign-end">—</dd>
+                </div>
+                <div>
+                  <dt>Часовой пояс</dt>
+                  <dd id="direct-campaign-timezone">—</dd>
+                </div>
+                <div>
+                  <dt>Клиент</dt>
+                  <dd id="direct-campaign-client">—</dd>
+                </div>
+              </dl>
+            </section>
+          </div>
+          <p class="automation-message" id="campaign-message" aria-live="polite"></p>
+        </section>
+      </div>
+
+      <dialog class="campaign-delete-dialog" id="campaign-delete-dialog" aria-labelledby="campaign-delete-title">
+        <p class="eyebrow">Подтверждение</p>
+        <h3 id="campaign-delete-title">Удалить кампанию?</h3>
+        <p>
+          Черновик «<strong id="campaign-delete-name">—</strong>» исчезнет из списка.
+          Реальная кампания Яндекс Директа не будет затронута.
+        </p>
+        <div class="inline-actions">
+          <button class="text-button" id="cancel-campaign-delete" type="button">
+            Отмена
+          </button>
+          <button class="danger-button" id="confirm-campaign-delete" type="button">
+            Удалить кампанию
+          </button>
+        </div>
+      </dialog>
     </section>
 
     <section class="page evidence-console" data-page="control" aria-labelledby="evidence-title">
@@ -815,9 +1302,8 @@
       </a>
       <p class="automation-message" id="evidence-message" aria-live="polite"></p>
     </section>
-
     <footer>
-      <span>127.0.0.1 · локальный операторский интерфейс</span>
+      <span>MOX-ADV · операторский интерфейс</span>
       <span>Директ + Метрика · единый цикл управления</span>
     </footer>
   </body>

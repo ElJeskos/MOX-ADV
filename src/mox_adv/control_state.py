@@ -8,12 +8,12 @@ import json
 import os
 import sqlite3
 import subprocess
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Protocol, Tuple
 
 from mox_adv.commands import OptimizationAction
 from mox_adv.interrupt_state import (
@@ -382,7 +382,20 @@ class DurableControlState:
         with suppress(OSError):
             os.chmod(self.path, 0o600)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = self._new_connection()
+        try:
+            yield connection
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _new_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.path), timeout=0.25)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -695,7 +708,7 @@ class DurableControlState:
         now: datetime,
     ) -> Tuple[ExecutionStatus, ExecutionRecord]:
         now_text = _utc_text(now)
-        connection = self._connect()
+        connection = self._new_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
             unresolved = connection.execute(
@@ -764,7 +777,7 @@ class DurableControlState:
         now: datetime,
     ) -> ExecutionRecord:
         now_text = _utc_text(now)
-        connection = self._connect()
+        connection = self._new_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -829,7 +842,7 @@ class DurableControlState:
         """Commit authority and IN_FLIGHT before the immediate dispatch boundary."""
 
         now_text = _utc_text(now)
-        connection = self._connect()
+        connection = self._new_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
             unresolved = connection.execute(

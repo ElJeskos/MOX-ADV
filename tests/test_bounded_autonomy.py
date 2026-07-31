@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -235,27 +236,27 @@ class MandateAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(mandate, reopened.load(mandate.mandate_id))
 
-        connection = sqlite3.connect(str(self.database))
-        with connection, self.assertRaises(sqlite3.IntegrityError):
-            connection.execute(
-                "UPDATE mandates SET canonical_json = ? WHERE mandate_id = ?",
-                ("{}", mandate.mandate_id),
-            )
+        with closing(sqlite3.connect(str(self.database))) as connection:
+            with connection, self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE mandates SET canonical_json = ? WHERE mandate_id = ?",
+                    ("{}", mandate.mandate_id),
+                )
 
     def test_invalid_signature_and_illegal_state_rewrite_fail_closed(self) -> None:
         mandate = self.issue_and_activate()
-        connection = sqlite3.connect(str(self.database))
-        with connection, self.assertRaises(sqlite3.IntegrityError):
-            connection.execute(
-                "UPDATE mandates SET status = 'ISSUED' WHERE mandate_id = ?",
-                (mandate.mandate_id,),
-            )
-        with connection:
-            connection.execute("DROP TRIGGER mandates_immutable_fields")
-            connection.execute(
-                "UPDATE mandates SET signature = ? WHERE mandate_id = ?",
-                ("hmac-sha256:" + "0" * 64, mandate.mandate_id),
-            )
+        with closing(sqlite3.connect(str(self.database))) as connection:
+            with connection, self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE mandates SET status = 'ISSUED' WHERE mandate_id = ?",
+                    (mandate.mandate_id,),
+                )
+            with connection:
+                connection.execute("DROP TRIGGER mandates_immutable_fields")
+                connection.execute(
+                    "UPDATE mandates SET signature = ? WHERE mandate_id = ?",
+                    ("hmac-sha256:" + "0" * 64, mandate.mandate_id),
+                )
         with self.assertRaisesRegex(ControlRejected, "MANDATE_INTEGRITY_FAILURE"):
             self.authority.load(mandate.mandate_id)
 

@@ -1170,6 +1170,135 @@ class AutomationStore:
             for row in rows
         ]
 
+    def history_page(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> dict[str, Any]:
+        """Return one stable page of the newest decision-ledger entries."""
+
+        if (
+            isinstance(page, bool)
+            or not isinstance(page, int)
+            or page < 1
+            or isinstance(page_size, bool)
+            or not isinstance(page_size, int)
+            or not 1 <= page_size <= 100
+        ):
+            raise AutomationConfigurationError(
+                "INVALID_HISTORY_PAGE",
+                "History page and page size are invalid.",
+            )
+        with self._connect() as connection:
+            total = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM decision_history"
+                ).fetchone()[0]
+            )
+            pages = max(1, (total + page_size - 1) // page_size)
+            selected_page = min(page, pages)
+            rows = connection.execute(
+                "SELECT run_id, created_at, origin, mode, status, "
+                "matched_triggers_json, reason, action, execution_status, "
+                "report_href FROM decision_history "
+                "ORDER BY created_at DESC, run_id DESC LIMIT ? OFFSET ?",
+                (
+                    page_size,
+                    (selected_page - 1) * page_size,
+                ),
+            ).fetchall()
+        return {
+            "items": [self._history_item(row) for row in rows],
+            "page": selected_page,
+            "page_size": page_size,
+            "pages": pages,
+            "total": total,
+        }
+
+    def record_decision_outcome(
+        self,
+        *,
+        source_run_id: str,
+        outcome_run_id: str,
+        created_at: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Bind one immutable observed outcome to its source decision."""
+
+        if (
+            not source_run_id
+            or not outcome_run_id
+            or not created_at
+            or not isinstance(payload, Mapping)
+        ):
+            raise AutomationConfigurationError(
+                "INVALID_DECISION_OUTCOME",
+                "Decision outcome binding is invalid.",
+            )
+        encoded = json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        with self._connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM decision_history WHERE run_id = ?",
+                (source_run_id,),
+            ).fetchone()
+            if exists is None:
+                raise AutomationConfigurationError(
+                    "DECISION_NOT_FOUND",
+                    "The source decision is not present in the journal.",
+                )
+            connection.execute(
+                "INSERT INTO decision_outcomes "
+                "(source_run_id, outcome_run_id, created_at, payload_json) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    source_run_id,
+                    outcome_run_id,
+                    created_at,
+                    encoded,
+                ),
+            )
+
+    def decision_outcome(self, source_run_id: str) -> dict[str, Any] | None:
+        """Return the newest observed outcome for one decision."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT outcome_run_id, created_at, payload_json "
+                "FROM decision_outcomes WHERE source_run_id = ? "
+                "ORDER BY created_at DESC, outcome_run_id DESC LIMIT 1",
+                (source_run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(str(row[2]))
+        return {
+            "source_run_id": source_run_id,
+            "outcome_run_id": str(row[0]),
+            "created_at": str(row[1]),
+            "outcome": payload,
+        }
+
+    @staticmethod
+    def _history_item(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "run_id": row[0],
+            "created_at": row[1],
+            "origin": row[2],
+            "mode": row[3],
+            "status": row[4],
+            "matched_triggers": json.loads(row[5]),
+            "reason": row[6],
+            "action": row[7],
+            "execution_status": row[8],
+            "report_href": row[9],
+        }
+
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(str(self.path), timeout=5)
@@ -1228,4 +1357,12 @@ class AutomationStore:
             "action TEXT NOT NULL, "
             "execution_status TEXT NOT NULL, "
             "report_href TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS decision_outcomes ("
+            "source_run_id TEXT NOT NULL, "
+            "outcome_run_id TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, "
+            "payload_json TEXT NOT NULL, "
+            "PRIMARY KEY (source_run_id, outcome_run_id))"
         )

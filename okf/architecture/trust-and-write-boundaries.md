@@ -1,40 +1,42 @@
 ---
 type: Safety Boundary
 title: Trust and Write Boundaries
-description: Defines where model output ends and deterministic write authority begins.
+description: Defines the data, credential, target, network, and write boundaries that fail closed around the executor.
 tags: [architecture, security, trust-boundary]
-timestamp: "2026-07-29T14:10:28Z"
+generated:
+  by: "codex/gpt-5"
+  at: "2026-07-29T17:43:55Z"
+verified:
+  by: "codex/gpt-5"
+  at: "2026-07-29T17:43:55Z"
+status: stable
+sources:
+  - id: requirements-v2
+    resource: "repository:requirements-v2-prototype.md"
+    title: MOX-ADV prototype requirements version 2.0-prototype
+    last_modified: 2026-07-29
 ---
 
 # Trust and Write Boundaries
 
-The LLM produces typed analysis and proposals but has no write authority.
-It must not receive OAuth tokens, arbitrary target IDs, endpoints, credential profiles, Approval objects, Mandates, or arbitrary HTTP payloads.
-Trusted target IDs, credentials, authority objects, and execution keys are resolved server-side from the run context.
+The LLM has no OAuth token, arbitrary endpoint, credential profile, unrestricted target identifier, raw API response, arbitrary HTTP payload, or direct write capability.
+The executor resolves targets and credentials from trusted configuration and is the only component that receives the pilot credential immediately before an allowed request.[^requirements-v2]
 
-The policy engine is deterministic and cannot be bypassed by model output, prompt text, or a client payload.
-The executor is the only component allowed to call changing APIs.
-Every write is constrained by a server-side allowlist, a dedicated least-privilege credential profile, current object state, and either an applicable Approval or Mandate.
+Direct production read, Direct sandbox write, Metrica test write, test-site publication, and Direct pilot write use separate logical profiles and credentials.
+The read-only process has no write credential.
+The pilot profile is disabled by default and is limited to one allowlisted campaign, one action, and the approved platform-side spend cap.
 
-All text originating in APIs, ads, UTM values, site DOM, and business briefs is untrusted data.
-It cannot alter instructions, available tools, scope, authority, or policy.
-Secrets and direct identifiers stay outside model context, logs, artifacts, environment variables, command-line arguments, and persistent configuration.
+Network access is limited to the endpoints in the approved API matrix, the required Metrica endpoints, `mc.yandex.ru`, and one model provider over HTTPS port 443.
+Redirects and production-delete operations are prohibited.
+Unknown endpoint and API combinations fail before a network request.
 
-Immediately before each external write, the executor must fail closed unless all applicable checks succeed:
+URLs, UTM values, search terms, DOM content, and API errors are untrusted and must be redacted before model use.
+Write-capable OAuth tokens remain in macOS Keychain.
+The local production read-only dashboard may read only its Direct and Metrika tokens from a repository-root `.env` file owned by the current user with mode `0600` or stricter `0400`.
+OAuth tokens must not enter prompts, process environment variables, command-line arguments, Docker metadata, code, standard output, exceptions, or artifacts.
 
-- Endpoint, service, API version, credential profile, organization, account, target, and action are allowlisted.
-- Snapshot or current-state evidence is fresh and compatible for the current transition.
-- Expected canonical fingerprint, cooldown, quotas, monetary limits, and campaign serialization hold.
-- Approval or Mandate scope and lifecycle state remain valid.
-- The kill switch is available and inactive for the applicable scope.
-- The audit event and execution reservation can be persisted transactionally.
+Before a write, deterministic checks bind the allowlisted scope, exact proposal and diff, current fingerprint, fresh comparable snapshot, sample sufficiency, numerical limits, pilot cap, unused execution key, and single-writer condition.
+A timeout triggers readback rather than a blind retry.
+An unknown result blocks the next write until manual verification.
 
-A timeout or lost response never permits a blind write retry.
-Readback and reconciliation classify the observed state as applied, failed, or unknown.
-An unknown result blocks further actions until human reconciliation.
-
-# Citations
-
-[1] [`requirements.md`](../../requirements.md), sections 5, 6, `FR-CAM-005` through `FR-CAM-007`, `FR-CTL-002` through `FR-CTL-005`, and `NFR-002` through `NFR-005`.
-
-[2] [External Write Safety](../runbooks/external-write-safety.md)
+[^requirements-v2]: [MOX-ADV prototype requirements](../../requirements-v2-prototype.md), `FR-004`, `FR-005`, `FR-008`, `NFR-003`, and `NFR-004`.

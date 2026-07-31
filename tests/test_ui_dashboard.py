@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -105,22 +106,145 @@ class DashboardApplicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             first = DashboardApplication(root)
-            technical = first.run_goal_technical_simulation()
+            draft = first.campaign_overview()
+            technical = first.run_goal_technical_simulation(
+                draft["draft_id"],
+                expected_revision=draft["revision"],
+            )
+            pending = first.goal_lifecycle_overview(draft["draft_id"])
+            self.assertEqual(
+                "AWAITING_SEMANTIC_DECISION",
+                pending["lifecycle_status"],
+            )
+            self.assertEqual("VERIFIED", pending["technical_status"])
 
             reopened = DashboardApplication(root)
-            result = reopened.decide_pending_goal_simulation("REJECT")
+            result = reopened.decide_pending_goal_simulation(
+                "REJECT",
+                draft_id=draft["draft_id"],
+                expected_revision=draft["revision"],
+                run_id=technical["run_id"],
+            )
 
             self.assertEqual(technical["run_id"], result["run_id"])
             self.assertEqual("REJECTED", result["status"])
             self.assertTrue(result["cleanup"]["performed"])
             self.assertEqual(1, result["cleanup"]["fake_goal_deleted"])
             self.assertEqual(1, result["cleanup"]["fake_site_rollback"])
+            rejected = DashboardApplication(root).goal_lifecycle_overview(
+                draft["draft_id"]
+            )
+            self.assertEqual("REJECTED", rejected["lifecycle_status"])
+            self.assertEqual(technical["run_id"], rejected["run_id"])
+
+    def test_goal_technical_verification_requires_explicit_draft_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = DashboardApplication(Path(temporary))
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Выберите тестовую кампанию",
+            ):
+                app.run_goal_technical_simulation("", expected_revision=0)
+
+    def test_only_one_goal_technical_verification_can_be_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = DashboardApplication(root)
+            draft = app.campaign_overview()
+
+            def start_verification(_: int) -> str:
+                result = app.run_goal_technical_simulation(
+                    draft["draft_id"],
+                    expected_revision=draft["revision"],
+                )
+                return str(result["run_id"])
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                submitted = [
+                    executor.submit(start_verification, index) for index in range(8)
+                ]
+
+            successes = []
+            failures = []
+            for future in submitted:
+                try:
+                    successes.append(future.result())
+                except ValueError as error:
+                    failures.append(str(error))
+
+            self.assertEqual(1, len(successes))
+            self.assertEqual(7, len(failures))
+            self.assertTrue(
+                all(
+                    error == "GOAL_SEMANTIC_DECISION_ALREADY_PENDING"
+                    for error in failures
+                )
+            )
+            self.assertEqual(
+                1,
+                len(list(root.glob("ui-goal-*/goal_technical.json"))),
+            )
+
+    def test_outdated_pending_goal_can_be_rejected_and_reverified(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = DashboardApplication(root)
+            draft = app.campaign_overview()
+            technical = app.run_goal_technical_simulation(
+                draft["draft_id"],
+                expected_revision=draft["revision"],
+            )
+            changed_goal = dict(draft["business_goal"])
+            changed_goal["meaning"] = "Новая версия бизнес-смысла цели"
+            saved = app.save_campaign_draft(
+                {
+                    "campaign": draft["campaign"],
+                    "business_goal": changed_goal,
+                    "goal_settings": draft["goal_settings"],
+                    "ad_groups": draft["ad_groups"],
+                },
+                draft["revision"],
+                draft["draft_id"],
+            )
+
+            outdated = app.goal_lifecycle_overview(draft["draft_id"])
+            self.assertEqual("OUTDATED", outdated["lifecycle_status"])
+            self.assertTrue(outdated["can_reject"])
+            with self.assertRaisesRegex(
+                ValueError,
+                "GOAL_TECHNICAL_VERIFICATION_OUTDATED",
+            ):
+                app.decide_pending_goal_simulation(
+                    "APPROVE",
+                    draft_id=draft["draft_id"],
+                    expected_revision=saved["revision"],
+                    run_id=technical["run_id"],
+                )
+
+            rejected = app.decide_pending_goal_simulation(
+                "REJECT",
+                draft_id=draft["draft_id"],
+                expected_revision=saved["revision"],
+                run_id=technical["run_id"],
+            )
+            rerun = app.run_goal_technical_simulation(
+                draft["draft_id"],
+                expected_revision=saved["revision"],
+            )
+
+            self.assertEqual("REJECTED", rejected["status"])
+            self.assertNotEqual(technical["run_id"], rerun["run_id"])
 
     def test_restart_reconciles_goal_evidence_after_semantic_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             first = DashboardApplication(root)
-            technical = first.run_goal_technical_simulation()
+            draft = first.campaign_overview()
+            technical = first.run_goal_technical_simulation(
+                draft["draft_id"],
+                expected_revision=draft["revision"],
+            )
 
             with (
                 patch.object(
@@ -130,7 +254,12 @@ class DashboardApplicationTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(OSError, "evidence failure"),
             ):
-                first.decide_pending_goal_simulation("APPROVE")
+                first.decide_pending_goal_simulation(
+                    "APPROVE",
+                    draft_id=draft["draft_id"],
+                    expected_revision=draft["revision"],
+                    run_id=technical["run_id"],
+                )
 
             run_directory = root / technical["run_id"]
             self.assertTrue((run_directory / "goal_workflow.json").is_file())
@@ -163,6 +292,36 @@ class DashboardApplicationTests(unittest.TestCase):
                 (run_directory / "artifact-manifest.json").read_text(encoding="utf-8")
             )
             self.assertNotIn(".result.json.crash-tmp", manifest["artifacts"])
+
+    def test_restart_quarantines_corrupt_completed_goal_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_directory = root / "ui-goal-corrupt"
+            run_directory.mkdir()
+            (run_directory / "goal_workflow.json").write_text(
+                "{not-json",
+                encoding="utf-8",
+            )
+            for name in (
+                ".dashboard-audit.sqlite3",
+                "artifact-manifest.json",
+                "events.jsonl",
+                "report.md",
+                "result.json",
+                "signed-audit-anchor.json",
+            ):
+                (run_directory / name).write_text("corrupt", encoding="utf-8")
+
+            DashboardApplication(root)
+
+            self.assertFalse(run_directory.exists())
+            quarantine = root / ".incomplete-dashboard-evidence"
+            quarantined = list(quarantine.glob("ui-goal-corrupt-*"))
+            self.assertEqual(1, len(quarantined))
+            self.assertEqual(
+                "{not-json",
+                (quarantined[0] / "goal_workflow.json").read_text(encoding="utf-8"),
+            )
 
     def test_scheduler_uses_autopilot_authority_without_visible_mode_switch(
         self,
@@ -215,6 +374,70 @@ class DashboardApplicationTests(unittest.TestCase):
             self.assertFalse(released["active"])
             self.assertEqual(1, authenticator.elevated_calls)
 
+    def test_failed_campaign_launch_is_not_reported_as_launched(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = DashboardApplication(root)
+            editor = app.campaign_overview()
+            draft = app.campaign_store.campaign_draft_payload()
+            run_id = "ui-campaign-20260730T120000000000Z"
+            run_directory = root / run_id
+            run_directory.mkdir()
+            (run_directory / "campaign_workflow.json").write_text(
+                json.dumps(
+                    {
+                        "workflow": "CAMPAIGN_LIFECYCLE",
+                        "status": "FAILED",
+                        "execution_mode": "SIMULATION",
+                        "run_id": run_id,
+                        "requested_at": "2026-07-30T12:00:00+00:00",
+                        "exact_diff": {
+                            "operation": "CREATE_UNIFIED_SEARCH_CAMPAIGN",
+                            "before": None,
+                            "after": draft,
+                        },
+                        "completed_steps": ["CAMPAIGN_ADD"],
+                        "external_write_sent": False,
+                        "detail": "MODERATION_READBACK_FAILED",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            changed_campaign = dict(editor["campaign"])
+            changed_campaign["name"] = "Изменённая версия кампании"
+            app.save_campaign_draft(
+                {
+                    "campaign": changed_campaign,
+                    "business_goal": editor["business_goal"],
+                    "goal_settings": editor["goal_settings"],
+                    "ad_groups": editor["ad_groups"],
+                },
+                editor["revision"],
+                editor["draft_id"],
+            )
+
+            overview = DashboardApplication(root).campaign_launch_overview(
+                draft["draft_id"]
+            )
+
+            self.assertEqual("FAILED", overview["launch_status"])
+            self.assertEqual("FAILED", overview["workflow_status"])
+            self.assertFalse(overview["current"])
+            self.assertEqual(
+                "MODERATION_READBACK_FAILED",
+                overview["message"],
+            )
+
+    def test_campaign_launch_requires_explicit_draft_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = DashboardApplication(Path(temporary))
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Выберите тестовую кампанию",
+            ):
+                app.run_campaign_simulation("", expected_revision=0)
+
     def test_control_workflows_and_evidence_use_public_json_and_artifact_seams(
         self,
     ) -> None:
@@ -237,7 +460,11 @@ class DashboardApplicationTests(unittest.TestCase):
                 app.select_operating_mode("RECOMMEND")["selected"],
             )
 
-            campaign = app.run_campaign_simulation()
+            campaign_draft = app.campaign_overview()
+            campaign = app.run_campaign_simulation(
+                campaign_draft["draft_id"],
+                expected_revision=campaign_draft["revision"],
+            )
             goal = app.run_goal_simulation("APPROVE")
             impact = app.run_impact_fixture("IMPACT_CPA_WORSE_ROLLBACK")
 

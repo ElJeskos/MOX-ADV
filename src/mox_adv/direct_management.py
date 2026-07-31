@@ -5,7 +5,17 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+)
 
 
 class DirectStateTransitionRejected(RuntimeError):
@@ -555,7 +565,10 @@ class FakeDirectManagementAdapter:
         result = self._apply(request)
         if request.method == DirectMethod.ADD:
             self._idempotent_results[request.operation_key] = result
-        if operation == self.timeout_after and request.operation_key not in self._timed_out_keys:
+        if (
+            operation == self.timeout_after
+            and request.operation_key not in self._timed_out_keys
+        ):
             self._timed_out_keys.add(request.operation_key)
             raise DirectOutcomeUnknown(
                 "FAKE_DIRECT_OUTCOME_UNKNOWN: "
@@ -576,10 +589,7 @@ class FakeDirectManagementAdapter:
             return copy.deepcopy(self._objects[(effective_service, object_id)])
         except KeyError as error:
             raise DirectStateTransitionRejected(
-                "DIRECT_OBJECT_NOT_FOUND: "
-                + typed_service.value
-                + ":"
-                + object_id
+                "DIRECT_OBJECT_NOT_FOUND: " + typed_service.value + ":" + object_id
             ) from error
 
     def seed_object(self, service: str, value: Mapping[str, Any]) -> str:
@@ -606,10 +616,15 @@ class FakeDirectManagementAdapter:
         )
 
     def operation_count(self, service: str, method: str) -> int:
-        return sum(1 for called_service, called_method, _ in self.calls if (
-            called_service,
-            called_method,
-        ) == (service, method))
+        return sum(
+            1
+            for called_service, called_method, _ in self.calls
+            if (
+                called_service,
+                called_method,
+            )
+            == (service, method)
+        )
 
     def object_ids(self) -> Tuple[str, ...]:
         return tuple(sorted(object_id for _, object_id in self._objects))
@@ -630,9 +645,7 @@ class FakeDirectManagementAdapter:
         try:
             return handlers[request.method](request)
         except KeyError as error:
-            raise DirectAdapterFailure(
-                "Unsupported fake Direct operation."
-            ) from error
+            raise DirectAdapterFailure("Unsupported fake Direct operation.") from error
 
     def _delete(self, request: DirectMethodRequest) -> DirectMethodResult:
         object_id = str(request.payload["id"])

@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from html import escape
 from pathlib import Path
 from types import SimpleNamespace
@@ -217,6 +218,46 @@ def _projection_source(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "business_goal": dict(snapshot["business_goal"]),
         "allowed_change_history": [],
         "policy_limits": {},
+    }
+
+
+def _campaign_goal_report(
+    snapshot: Mapping[str, Any],
+    recommendation_rules: Mapping[str, Any],
+) -> dict[str, Any]:
+    business_goal = snapshot["business_goal"]
+    target_kpi = snapshot["target_kpi"]
+    target = int(recommendation_rules["target_cpa_rub"])
+    actual = str(snapshot["display_metrics"]["cpa_rub"])
+    confidence = str(snapshot["confidence_status"])
+    comparability = str(snapshot["comparability_status"])
+    if actual == "NOT_APPLICABLE":
+        status = "NOT_EVALUABLE"
+    elif confidence == "INSUFFICIENT_DATA":
+        status = "INSUFFICIENT_DATA"
+    elif confidence == "STALE_DATA" or comparability != "COMPARABLE":
+        status = "NEEDS_REVIEW"
+    else:
+        try:
+            status = (
+                "ACHIEVED"
+                if Decimal(actual) <= Decimal(target)
+                else "NOT_ACHIEVED"
+            )
+        except InvalidOperation:
+            status = "NOT_EVALUABLE"
+    return {
+        "business_goal": {
+            "event": str(business_goal["event"]),
+            "meaning": str(business_goal["meaning"]),
+        },
+        "target_kpi": {
+            "name": str(target_kpi["name"]),
+            "target_maximum": target,
+            "actual": actual,
+        },
+        "achievement_status": status,
+        "used_in_decision": True,
     }
 
 
@@ -648,6 +689,27 @@ def _report_html(report: Mapping[str, Any]) -> str:
     execution_status = escape(str(execution["status"]))
     comparability = escape(str(report["data_quality"]["comparability"]))
     confidence = escape(str(report["data_quality"]["confidence"]))
+    campaign_goal = report["campaign_goal"]
+    goal_meaning = escape(str(campaign_goal["business_goal"]["meaning"]))
+    goal_target = escape(str(campaign_goal["target_kpi"]["target_maximum"]))
+    goal_actual_value = str(campaign_goal["target_kpi"]["actual"])
+    goal_actual = (
+        "Недоступно"
+        if goal_actual_value == "NOT_APPLICABLE"
+        else escape(goal_actual_value) + " ₽"
+    )
+    goal_status = escape(
+        {
+            "ACHIEVED": "Достигнута",
+            "NOT_ACHIEVED": "Не достигнута",
+            "INSUFFICIENT_DATA": "Недостаточно данных",
+            "NEEDS_REVIEW": "Нужна проверка",
+            "NOT_EVALUABLE": "Нельзя оценить",
+        }.get(
+            str(campaign_goal["achievement_status"]),
+            str(campaign_goal["achievement_status"]),
+        )
+    )
     quality_gaps = (
         ", ".join(escape(str(item)) for item in report["data_quality"].get("gaps", []))
         or "нет"
@@ -822,6 +884,10 @@ def _report_html(report: Mapping[str, Any]) -> str:
     section {{ padding: 38px 0; border-bottom: 1px solid #cdd1cb; }}
     .label {{ margin: 0 0 18px; color: #69716c; font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }}
     .metrics {{ display: grid; grid-template-columns: repeat(5, 1fr); }}
+    .goal-context {{ display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 24px; }}
+    .goal-context div {{ min-width: 0; }}
+    .goal-context span {{ display: block; margin-bottom: 8px; color: #69716c; font-size: 11px; }}
+    .goal-context strong {{ font-size: 18px; line-height: 1.35; }}
     .metric {{ min-width: 0; padding-right: 20px; }}
     .metric + .metric {{ padding-left: 20px; border-left: 1px solid #cdd1cb; }}
     .metric span {{ display: block; margin-bottom: 14px; color: #69716c; font-size: 11px; }}
@@ -879,6 +945,16 @@ def _report_html(report: Mapping[str, Any]) -> str:
 {evidence_section}
 
     <section>
+      <p class="label">Цель рекламной кампании</p>
+      <div class="goal-context">
+        <div><span>Бизнес-цель</span><strong>{goal_meaning}</strong></div>
+        <div><span>Целевой CPA</span><strong>≤ {goal_target} ₽</strong></div>
+        <div><span>Фактический CPA</span><strong>{goal_actual}</strong></div>
+        <div><span>Достижение</span><strong>{goal_status}</strong></div>
+      </div>
+    </section>
+
+    <section>
       <p class="label">Связанные показатели Директа и Метрики</p>
       <div class="metrics">
         <div class="metric"><span>CTR</span><strong>{escape(str(metrics["ctr_percent"]))}%</strong></div>
@@ -932,6 +1008,9 @@ class UiRunService:
         self.autonomy_control_state: DurableControlState | None = None
         self.autonomy_mandate_authority: DurableMandateAuthority | None = None
         self.operating_mode_provider: Callable[[], str] | None = None
+        self.campaign_context_provider: (
+            Callable[[], Mapping[str, Any]] | None
+        ) = None
         self._test_run_lock = threading.Lock()
 
     def configure_bounded_autonomy(
@@ -957,6 +1036,54 @@ class UiRunService:
 
         self.operating_mode_provider = provider
 
+    def configure_campaign_context_provider(
+        self,
+        provider: Callable[[], Mapping[str, Any]],
+    ) -> None:
+        """Bind runs to the current local campaign goal and target KPI."""
+
+        self.campaign_context_provider = provider
+
+    def _effective_policy(self) -> dict[str, Any]:
+        policy = deepcopy(self.policy)
+        if self.campaign_context_provider is None:
+            return policy
+        context = self.campaign_context_provider()
+        if (
+            not isinstance(context, Mapping)
+            or set(context) != {"business_goal", "target_kpi"}
+            or not isinstance(context["business_goal"], Mapping)
+            or set(context["business_goal"]) != {"event", "meaning"}
+            or not isinstance(context["target_kpi"], Mapping)
+            or set(context["target_kpi"]) != {"name", "target_maximum"}
+            or context["business_goal"]["event"]
+            != policy["conversion"]["primary"]["event"]
+            or context["target_kpi"]["name"] != "CPA_RUB"
+        ):
+            raise UiRunRejected(
+                "CAMPAIGN_CONTEXT_INVALID",
+                "Контекст рекламной кампании не прошёл проверку.",
+            )
+        target = context["target_kpi"]["target_maximum"]
+        if (
+            isinstance(target, bool)
+            or not isinstance(target, int)
+            or not 1 <= target <= int(policy["mandate"]["kpi"]["target_maximum"])
+        ):
+            raise UiRunRejected(
+                "CAMPAIGN_CONTEXT_INVALID",
+                "Целевой KPI рекламной кампании выходит за Gate 0.",
+            )
+        meaning = context["business_goal"]["meaning"]
+        if not isinstance(meaning, str) or not 1 <= len(meaning) <= 500:
+            raise UiRunRejected(
+                "CAMPAIGN_CONTEXT_INVALID",
+                "Бизнес-цель рекламной кампании некорректна.",
+            )
+        policy["conversion"]["primary"]["business_meaning"] = meaning
+        policy["mandate"]["kpi"]["target_maximum"] = target
+        return policy
+
     def status(self) -> dict[str, Any]:
         return {
             "service": "MOX-ADV",
@@ -971,6 +1098,23 @@ class UiRunService:
             ),
             "test_automation": self.automation(),
         }
+
+    def production_campaign_catalog(self) -> dict[str, Any]:
+        """Fetch the live Direct campaign catalog without write authority."""
+
+        readiness = self.production_reader.campaign_catalog_readiness(self.policy)
+        if not readiness["ready"]:
+            raise UiRunRejected(
+                "DIRECT_CAMPAIGN_CATALOG_NOT_READY",
+                "; ".join(readiness["blockers"]),
+            )
+        try:
+            return self.production_reader.list_campaigns(policy=self.policy)
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            raise UiRunRejected(
+                "DIRECT_CAMPAIGN_CATALOG_FAILED",
+                str(error),
+            ) from error
 
     def automation(self) -> dict[str, Any]:
         return self.automation_store.settings()
@@ -994,6 +1138,54 @@ class UiRunService:
 
     def decision_history(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.automation_store.history(limit)
+
+    def decision_history_page(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> dict[str, Any]:
+        try:
+            return self.automation_store.history_page(
+                page=page,
+                page_size=page_size,
+            )
+        except AutomationConfigurationError as error:
+            raise UiRunRejected(error.reason_code, str(error)) from error
+
+    def record_decision_outcome(
+        self,
+        *,
+        source_run_id: str,
+        outcome_run_id: str,
+        created_at: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        try:
+            self.automation_store.record_decision_outcome(
+                source_run_id=source_run_id,
+                outcome_run_id=outcome_run_id,
+                created_at=created_at,
+                payload=payload,
+            )
+        except AutomationConfigurationError as error:
+            raise UiRunRejected(error.reason_code, str(error)) from error
+
+    def decision_outcome(self, source_run_id: str) -> dict[str, Any]:
+        if _RUN_ID.fullmatch(source_run_id) is None:
+            raise UiRunRejected(
+                "INVALID_RUN_ID",
+                "Decision run ID is invalid.",
+            )
+        outcome = self.automation_store.decision_outcome(source_run_id)
+        if outcome is None:
+            return {
+                "source_run_id": source_run_id,
+                "outcome_run_id": None,
+                "created_at": None,
+                "outcome": None,
+            }
+        return outcome
 
     def run_due_automation(self) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
@@ -1120,9 +1312,10 @@ class UiRunService:
                 "Mandate is required for bounded autonomy.",
             )
         read_only = mode == "production"
+        run_policy = self._effective_policy()
         if mode == "production":
             readiness = production_readiness(
-                self.policy,
+                run_policy,
                 self.production_reader,
             )
             if not readiness["ready"]:
@@ -1134,11 +1327,11 @@ class UiRunService:
         try:
             scenario_value = validate_scenario(None if read_only else scenario)
             rules_value = validate_rules(
-                self.policy,
+                run_policy,
                 None if read_only else rules,
             )
             recommendation_rules_value = validate_recommendation_rules(
-                self.policy,
+                run_policy,
                 None if read_only else recommendation_rules,
             )
         except AutomationConfigurationError as error:
@@ -1149,6 +1342,12 @@ class UiRunService:
             raise UiRunRejected("INVALID_RUN_ID", "Generated run ID is invalid.")
         run_directory = self.runs_root / run_id
         run_directory.mkdir(parents=True, exist_ok=False)
+        effective_policy_path = run_directory / "effective-policy.json"
+        effective_policy_path.write_text(
+            json.dumps(run_policy, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
         fixture_path = TEST_FIXTURE_PATH
         scenario_source = "DEFAULT"
         if not read_only and scenario is not None:
@@ -1163,13 +1362,13 @@ class UiRunService:
             try:
                 if progress_callback is None:
                     collected = self.production_reader.collect_snapshot(
-                        policy=self.policy,
+                        policy=run_policy,
                         observation_id=run_id,
                         generated_at=now,
                     )
                 else:
                     collected = self.production_reader.collect_snapshot(
-                        policy=self.policy,
+                        policy=run_policy,
                         observation_id=run_id,
                         generated_at=now,
                         progress_callback=progress_callback,
@@ -1186,7 +1385,7 @@ class UiRunService:
                 run_id="observe",
                 runs_root=components,
                 fixture_path=fixture_path,
-                policy_path=POLICY_PATH,
+                policy_path=effective_policy_path,
             )
             if observe_outcome.status != "SUCCEEDED":
                 raise UiRunRejected(
@@ -1268,7 +1467,7 @@ class UiRunService:
             projection = build_sanitized_projection(
                 projection_source,
                 recommendation_policy(
-                    self.policy,
+                    run_policy,
                     recommendation_rules_value,
                 ),
             )
@@ -1323,7 +1522,7 @@ class UiRunService:
             elif proposal.expected_diff["operation"] == "NO_CHANGE":
                 execution, _ = _execute_simulated_change(
                     run_directory=run_directory,
-                    policy=self.policy,
+                    policy=run_policy,
                     snapshot=snapshot,
                     proposal=proposal,
                     proposal_hash=recommendation.canonical_hash,
@@ -1333,7 +1532,7 @@ class UiRunService:
                 execution = _read_only_execution(snapshot, proposal)
             elif effective_operating_mode == "APPROVAL_REQUIRED":
                 prepared, step = _prepare_simulated_change(
-                    policy=self.policy,
+                    policy=run_policy,
                     snapshot=snapshot,
                     proposal=proposal,
                     proposal_hash=recommendation.canonical_hash,
@@ -1355,7 +1554,7 @@ class UiRunService:
                         "The Dashboard Mandate authority is unavailable.",
                     )
                 execution = _execute_bounded_simulated_change(
-                    policy=self.policy,
+                    policy=run_policy,
                     state=self.autonomy_control_state,
                     mandate_authority=self.autonomy_mandate_authority,
                     snapshot=snapshot,
@@ -1367,7 +1566,7 @@ class UiRunService:
             else:
                 execution, approval_record = _execute_simulated_change(
                     run_directory=run_directory,
-                    policy=self.policy,
+                    policy=run_policy,
                     snapshot=snapshot,
                     proposal=proposal,
                     proposal_hash=recommendation.canonical_hash,
@@ -1394,6 +1593,10 @@ class UiRunService:
             },
             "scope": dict(snapshot["scope"]),
             "metrics": dict(snapshot["display_metrics"]),
+            "campaign_goal": _campaign_goal_report(
+                snapshot,
+                recommendation_rules_value,
+            ),
             "data_quality": {
                 "comparability": snapshot["comparability_status"],
                 "confidence": snapshot["confidence_status"],

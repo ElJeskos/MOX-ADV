@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from mox_adv.direct_management import (
@@ -252,10 +253,7 @@ def validate_campaign_draft(
     prepared_media = set(safety_bindings.prepared_media_references)
     for ad in ads:
         ad_landing = _validated_https_landing(str(ad["landing_page"]))
-        if (
-            ad_landing.hostname != landing.hostname
-            or ad_landing.path != landing.path
-        ):
+        if ad_landing.hostname != landing.hostname or ad_landing.path != landing.path:
             raise LifecycleRejected("LANDING_PAGE_OUTSIDE_DRAFT_SCOPE")
         copy_text = (str(ad["title"]) + " " + str(ad["text"])).casefold()
         if any(phrase in copy_text for phrase in prohibited):
@@ -312,11 +310,20 @@ class CampaignSagaStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(str(self.path), timeout=1)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            yield connection
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         DurableControlState(self.path)
@@ -395,8 +402,7 @@ class CampaignSagaStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             completed_count = connection.execute(
-                "SELECT COUNT(*) FROM campaign_saga_steps "
-                "WHERE execution_key = ?",
+                "SELECT COUNT(*) FROM campaign_saga_steps WHERE execution_key = ?",
                 (execution_key,),
             ).fetchone()[0]
             if completed_count != ordinal:
@@ -462,14 +468,20 @@ class CampaignSagaStore:
                 _utc_text(reservation.expires_at),
             )
             if existing is not None:
-                if tuple(existing[name] for name in (
-                    "status",
-                    "scope_binding",
-                    "object_type",
-                    "proposal_id",
-                    "credential_profile",
-                    "expires_at",
-                )) != values:
+                if (
+                    tuple(
+                        existing[name]
+                        for name in (
+                            "status",
+                            "scope_binding",
+                            "object_type",
+                            "proposal_id",
+                            "credential_profile",
+                            "expires_at",
+                        )
+                    )
+                    != values
+                ):
                     raise LifecycleRejected("IMMUTABLE_RESERVATION_CONFLICT")
                 return
             connection.execute(
@@ -598,8 +610,7 @@ class CampaignSagaStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior_count = connection.execute(
-                "SELECT COUNT(*) FROM campaign_saga_steps "
-                "WHERE execution_key = ?",
+                "SELECT COUNT(*) FROM campaign_saga_steps WHERE execution_key = ?",
                 (request.execution_key,),
             ).fetchone()[0]
             if prior_count != ordinal:
@@ -1019,6 +1030,7 @@ class CampaignLifecycleService:
             request.run_id,
             operation_key,
             {
+                "name": request.draft.name,
                 "type": request.draft.campaign_type,
                 "state": "SUSPENDED",
                 "strategy": dict(request.draft.strategy),
@@ -1235,6 +1247,7 @@ class CampaignLifecycleService:
         if any(
             (
                 campaign.get("type") != "UNIFIED_CAMPAIGN",
+                campaign.get("name") != request.draft.name,
                 campaign.get("state") != "ON",
                 campaign.get("strategy") != dict(request.draft.strategy),
                 campaign.get("geography") != list(request.draft.geography),

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 
 class InterruptStateUnavailable(RuntimeError):
@@ -33,10 +33,19 @@ class DurableInterruptState:
         with suppress(OSError):
             os.chmod(self.path, 0o600)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(str(self.path), timeout=0.25)
-        connection.execute("PRAGMA busy_timeout = 250")
-        return connection
+        try:
+            connection.execute("PRAGMA busy_timeout = 250")
+            yield connection
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
 
     def engage(
         self,

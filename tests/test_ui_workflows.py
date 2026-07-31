@@ -19,6 +19,7 @@ def campaign_draft_payload() -> dict[str, object]:
     return {
         "schema_version": "campaign-draft-v1",
         "draft_id": "dashboard-draft-1",
+        "name": "Lead service",
         "business_goal": {
             "event": "lead_submitted",
             "meaning": "A visitor submitted the lead form.",
@@ -202,6 +203,34 @@ class CampaignWorkflowFacadeTests(WorkflowFacadeTestCase):
             )
 
         self.assertFalse((self.runs_root / "dashboard-campaign-production-1").exists())
+
+    def test_controlled_result_rejects_blocked_write_and_status_mismatch(
+        self,
+    ) -> None:
+        invalid_results = (
+            {
+                "status": "BLOCKED",
+                "execution_status": "BLOCKED",
+                "external_write_sent": True,
+                "evidence_paths": ["blocked-write.json"],
+            },
+            {
+                "status": "APPLIED",
+                "execution_status": "BLOCKED",
+                "external_write_sent": False,
+                "evidence_paths": ["mismatched-status.json"],
+            },
+        )
+
+        for result in invalid_results:
+            with (
+                self.subTest(result=result),
+                self.assertRaisesRegex(
+                    DashboardWorkflowRejected,
+                    "CONTROLLED_PILOT_RESULT_INVALID",
+                ),
+            ):
+                self.facade._validate_controlled_result(result)
 
     def test_campaign_production_runs_only_with_exact_preview_authority(self) -> None:
         policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))

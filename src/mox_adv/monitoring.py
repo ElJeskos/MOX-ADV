@@ -7,11 +7,12 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Callable, Optional, Protocol, Tuple
+from typing import Any, Callable, Iterator, Optional, Protocol, Tuple
 
 from mox_adv.contracts import IntegratedPerformanceSnapshot
 from mox_adv.normalization import IntegratedSnapshotNormalizerV1
@@ -727,8 +728,18 @@ class MonitoringStore:
             deduplicated=False,
         )
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.path), isolation_level=None)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(str(self.path), isolation_level=None)
+        try:
+            yield connection
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
 
     @staticmethod
     def _require_claim(
@@ -820,8 +831,18 @@ class DurableWriteWindowGate:
                 (execution_key,),
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.path), isolation_level=None)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(str(self.path), isolation_level=None)
+        try:
+            yield connection
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
 
     @staticmethod
     def _ensure_schema(connection: sqlite3.Connection) -> None:

@@ -338,6 +338,20 @@ class UiBrowserTests(unittest.TestCase):
                     self.assertTrue(page.locator("#report").is_visible())
                     self.assertFalse(page.locator("#empty-state").is_visible())
                     self.assertEqual(5, page.locator("#pipeline .is-done").count())
+                    self.assertIn(
+                        "Получать заявки через форму на сайте",
+                        page.locator("#campaign-goal-summary").inner_text(),
+                    )
+                    self.assertIn(
+                        "Учитывается при выборе решения",
+                        page.locator("#campaign-goal-summary").inner_text(),
+                    )
+                    self.assertEqual(
+                        "≤ 1 000 ₽",
+                        page.locator("#report-goal-target")
+                        .inner_text()
+                        .replace("\N{NO-BREAK SPACE}", " "),
+                    )
                     self.assertEqual(
                         "95.00",
                         page.locator(".metric")
@@ -377,6 +391,11 @@ class UiBrowserTests(unittest.TestCase):
                     self.assertIn("<title>Отчёт MOX-ADV</title>", report_text)
                     self.assertIn(
                         "Использование бюджета",
+                        report_text,
+                    )
+                    self.assertIn("Цель рекламной кампании", report_text)
+                    self.assertIn(
+                        "Получать заявки через форму на сайте",
                         report_text,
                     )
                     self.assertIn("95.00%", report_text)
@@ -835,8 +854,12 @@ class UiBrowserTests(unittest.TestCase):
                     ).click()
                     page.get_by_role(
                         "heading",
-                        name="Цикл завершён",
+                        name="Предложение заблокировано",
                     ).wait_for()
+                    self.assertEqual(
+                        "ЗАБЛОКИРОВАНО",
+                        page.locator("#run-status").inner_text(),
+                    )
                     self.assertIn(
                         "Передать человеку",
                         page.locator("#decision-title").inner_text(),

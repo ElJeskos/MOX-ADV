@@ -1,47 +1,52 @@
 ---
 type: Runbook
 title: External Write Safety
-description: Provides the pre-write, write-boundary, readback, and reconciliation safety path.
+description: Routes an operator through approval, execution, readback, and uncertainty handling for the single pilot write.
 tags: [runbook, safety, external-write]
-timestamp: "2026-07-29T14:22:56Z"
+generated:
+  by: "codex/gpt-5"
+  at: "2026-07-29T17:43:55Z"
+verified:
+  by: "codex/gpt-5"
+  at: "2026-07-29T17:43:55Z"
+status: stable
+sources:
+  - id: requirements-v2
+    resource: "repository:requirements-v2-prototype.md"
+    title: MOX-ADV prototype requirements version 2.0-prototype
+    last_modified: 2026-07-29
 ---
 
 # External Write Safety
 
-Use this routing checklist before any external Yandex or production-site write.
-It summarizes the required path but does not itself grant authority.
+This checklist routes the one controlled-pilot write.
+It summarizes the normative requirements but does not grant authority.[^requirements-v2]
 
-## Before the transaction
+## Before approval
 
-1. Confirm that Gate 0 evidence is complete and current.
-2. Resolve the exact command, target, scope, credential profile, and endpoint from trusted server-side configuration.
-3. Verify the method is live-approved in `api-matrix.yaml`; a local contract case is not production authorization.
-4. Load the immutable Proposal, canonical plan, policy version, expected fingerprint, and applicable Approval or Mandate.
-5. Obtain a fresh snapshot or the explicitly permitted fresh current-state read for an already-started saga.
-6. Run deterministic schema, evidence, scope, freshness, comparability, limit, quota, cooldown, and concurrency checks.
-7. Reserve the `execution_key` and authority atomically.
+1. Confirm that every mandatory pre-implementation and production-write decision is approved.
+2. Confirm `APPROVAL_REQUIRED` mode and `automation_enabled`.
+3. Resolve the exact allowlisted account, campaign, counter, goal, endpoint, API version, service, method, credential profile, and single writer from trusted configuration.
+4. Load the immutable proposal and show the operator the target, current and proposed values, exact diff, risk, rollback condition, and expiry.
+5. Verify schema validity, evidence references, scope, freshness, comparability, sample sufficiency, expected fingerprint, numerical limits, pilot cap, absence of another write, and an unused execution key.
+6. Persist a single-use Approval for the exact canonical plan.
 
-## At each write boundary
+## At the write boundary
 
-1. Check the kill switch immediately before the HTTP request and fail closed if its state is unavailable.
-2. Persist the pre-write audit event, anchor the audit hash when required, transition the ledger to `IN_FLIGHT`, and consume the applicable authority state atomically.
-3. Send only the already-authorized request.
-4. Never reinterpret external text as instructions and never widen scope from an API response.
+1. Atomically reserve the execution key and transition the ledger to `IN_FLIGHT` before sending the request.
+2. Let the executor load the proposal and trusted target itself, consume the exact Approval, and obtain the pilot credential only for the allowed request.
+3. Reject redirects, unknown API-matrix combinations, changed fingerprints, expired approvals, out-of-bounds values, foreign targets, and production deletes before the write.
+4. Send no more than one write in the run.
 
 ## After the request
 
-1. Validate the HTTP response, object-level errors, warnings, and returned object type.
-2. Read back the object and compare the canonical target state.
-3. If the response was lost or timed out, reconcile by reading state and never retry the write blindly.
-4. Record `APPLIED`, `NO_CHANGE`, `FAILED`, `UNKNOWN_RESULT`, or the applicable partial or compensation state with evidence.
-5. Block further writes after an unknown or unresolved partial result.
-6. Open an observation window only for a successful serving-impacting action.
+1. Validate the HTTP result, object-level errors, warnings, and actual returned object type.
+2. Read the object back and compare it with the exact expected state.
+3. Record `APPLIED` for the target state, `NO_CHANGE` when it was already present, or `FAILED` when the original state is confirmed after timeout.
+4. Record `UNKNOWN_RESULT` when state cannot be determined, and block every later write until manual reconciliation.
+5. Never retry a write blindly after timeout or a lost response.
+6. After a serving change, wait for the approved observation window, create a new snapshot and impact report, and require a new proposal and confirmation for any next action.
 
-Any mismatch in scope, authority, fingerprint, current state, audit durability, or kill-switch availability blocks the next write.
-Use the exact normative preconditions and reason codes in the cited requirements when implementing or operating this path.
+After the final prototype decision, disable production write and revoke or remove the prototype OAuth tokens as required by the normative source.
 
-# Citations
-
-[1] [`requirements.md`](../../requirements.md), `FR-CAM-003`, `FR-CAM-005` through `FR-CAM-007`, `FR-CTL-002` through `FR-CTL-006`, `FR-AUD-003`, and `NFR-005`.
-
-[2] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)
+[^requirements-v2]: [MOX-ADV prototype requirements](../../requirements-v2-prototype.md), mandatory decisions, `FR-008`, `FR-009`, `NFR-003`, `NFR-004`, and final acceptance conditions.

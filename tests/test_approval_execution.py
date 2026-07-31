@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -413,12 +414,12 @@ class ApprovalExecutionTests(unittest.TestCase):
         self.assertEqual(1, adapter.write_calls)
 
     def test_approval_authority_rejects_core_field_mutation(self) -> None:
-        connection = sqlite3.connect(str(self.database))
-        with connection, self.assertRaises(sqlite3.IntegrityError):
-            connection.execute(
-                "UPDATE approvals SET reason = ? WHERE approval_id = ?",
-                ("Widened after approval.", self.approval.approval_id),
-            )
+        with closing(sqlite3.connect(str(self.database))) as connection:
+            with connection, self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE approvals SET reason = ? WHERE approval_id = ?",
+                    ("Widened after approval.", self.approval.approval_id),
+                )
 
     def test_each_policy_boundary_fails_closed_before_adapter_call(self) -> None:
         mutations: dict[str, dict[str, Any]] = {

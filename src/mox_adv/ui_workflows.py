@@ -593,9 +593,24 @@ class DashboardWorkflowFacade:
         candidate_payload: Mapping[str, Any],
         expected_site_version: str,
         requested_at: str,
+        source_draft: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create and technically verify a simulated candidate without semantics."""
 
+        normalized_source: dict[str, Any] | None = None
+        if source_draft is not None:
+            if (
+                set(source_draft) != {"draft_id", "revision", "candidate_hash"}
+                or not isinstance(source_draft.get("draft_id"), str)
+                or not source_draft["draft_id"]
+                or isinstance(source_draft.get("revision"), bool)
+                or not isinstance(source_draft.get("revision"), int)
+                or source_draft["revision"] < 0
+                or not isinstance(source_draft.get("candidate_hash"), str)
+                or not source_draft["candidate_hash"].startswith("sha256:")
+            ):
+                raise DashboardWorkflowRejected("GOAL_SOURCE_DRAFT_INVALID")
+            normalized_source = dict(source_draft)
         existing_session = self._goal_sessions.get(run_id)
         if existing_session is not None:
             return dict(existing_session["result"])
@@ -730,7 +745,13 @@ class DashboardWorkflowFacade:
         )
         result = {
             **preview,
+            **(
+                {"source_draft": normalized_source}
+                if normalized_source is not None
+                else {}
+            ),
             "status": "AWAITING_SEMANTIC_DECISION",
+            "evidence_type": "SIMULATED",
             "requested_at": now.isoformat(),
             "semantic_decision": None,
             "semantic_reviewer": None,
@@ -1258,7 +1279,12 @@ class DashboardWorkflowFacade:
         ):
             raise DashboardWorkflowRejected("CONTROLLED_PILOT_RESULT_INVALID")
         if (
-            result["execution_status"] in {"APPLIED", "NO_CHANGE"}
+            result["status"] != result["execution_status"]
+            or (
+                result["execution_status"] == "BLOCKED"
+                and result["external_write_sent"]
+            )
+            or result["execution_status"] in {"APPLIED", "NO_CHANGE"}
             and not result["external_write_sent"]
         ):
             raise DashboardWorkflowRejected("CONTROLLED_PILOT_RESULT_INVALID")

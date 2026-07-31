@@ -7,7 +7,9 @@ name = "mox-adv"
 version = "0.1.0"
 description = "Safe local MOX-ADV prototype bootstrap"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = [
+    "vercel>=0.5,<1 ; python_full_version >= '3.10'",
+]
 
 [project.scripts]
 mox-adv = "mox_adv.cli:main"

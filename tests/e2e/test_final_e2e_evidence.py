@@ -102,8 +102,8 @@ class ReadOnlyEgressRecorderTests(unittest.TestCase):
         recorder = ReadOnlyEgressRecorder(policy)
         recorder.authorize_external(
             "POST",
-            "https://api.direct.yandex.com/json/v5/reports",
-            version="v5",
+            "https://api.direct.yandex.com/json/v501/reports",
+            version="v501",
             service="Reports",
             operation="get",
             authority=EgressAuthority(

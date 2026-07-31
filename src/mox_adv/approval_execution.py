@@ -102,6 +102,13 @@ class ApprovalRequiredPolicy:
         request: ExecutionRequest,
     ) -> PolicyOutcome:
         facts = request.facts
+        no_conversion_safety_stop = (
+            prepared.action == OptimizationAction.SUSPEND_CAMPAIGN
+            and facts.comparability_status == "COMPARABLE"
+            and facts.conversions == 0
+            and facts.spend_rub
+            >= int(self.policy["limits"]["no_conversion_stop_spend_rub"])
+        )
         checks = (
             (facts.mode == "APPROVAL_REQUIRED", "MODE_NOT_WRITE_CAPABLE"),
             (facts.automation_enabled, "AUTOMATION_DISABLED"),
@@ -111,9 +118,12 @@ class ApprovalRequiredPolicy:
                 "EXECUTION_KEY_MISMATCH",
             ),
             (
-                facts.comparability_status == "COMPARABLE"
-                and facts.confidence_status == "READY"
-                and facts.financial_recommendations_allowed,
+                no_conversion_safety_stop
+                or (
+                    facts.comparability_status == "COMPARABLE"
+                    and facts.confidence_status == "READY"
+                    and facts.financial_recommendations_allowed
+                ),
                 "SNAPSHOT_NOT_COMPARABLE",
             ),
             (
@@ -228,7 +238,11 @@ class ApprovalRequiredPolicy:
     ) -> bool:
         state_on = facts.campaign_state == "ON"
         sufficient = facts.clicks >= 50 and facts.conversions >= 3
-        cpa = Decimal(facts.cpa_rub)
+        cpa = (
+            Decimal("Infinity")
+            if facts.cpa_rub == "NOT_APPLICABLE"
+            else Decimal(facts.cpa_rub)
+        )
         utilization = Decimal(facts.budget_utilization_percent)
         ctr = Decimal(facts.ctr_percent)
         checks = {

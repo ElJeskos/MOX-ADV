@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional
 
 from mox_adv.autonomy_contracts import (
     MandateRecord,
@@ -62,7 +63,20 @@ class DurableMandateAuthority:
             ) from error
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = self._new_connection()
+        try:
+            yield connection
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _new_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.path), timeout=0.25)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -253,7 +267,7 @@ class DurableMandateAuthority:
         now: datetime,
     ) -> MandateRecord:
         self._validate_issuer(principal)
-        connection = self._connect()
+        connection = self._new_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -320,7 +334,7 @@ class DurableMandateAuthority:
                 "KILL_SWITCH_UNAVAILABLE",
                 "durable revocation interrupt is unavailable.",
             ) from error
-        connection = self._connect()
+        connection = self._new_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -421,7 +435,7 @@ class DurableMandateAuthority:
     ) -> tuple[ExecutionStatus, ExecutionRecord]:
         monetary_exposure_rub = deterministic_monetary_exposure_rub(prepared)
         now_text = _utc_text(now)
-        connection = self._connect()
+        connection = self._new_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
             mandate = self._load_active_in_connection(connection, mandate_id, now)
@@ -527,7 +541,7 @@ class DurableMandateAuthority:
         before_dispatch: Optional[Callable[[], None]] = None,
         at_dispatch_boundary: Optional[Callable[[], None]] = None,
     ) -> tuple[ExecutionStatus, ExecutionRecord]:
-        connection = self._connect()
+        connection = self._new_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
             mandate = self._load_active_in_connection(connection, mandate_id, now)
@@ -606,7 +620,7 @@ class DurableMandateAuthority:
     ) -> ExecutionRecord:
         """Persist indeterminate terminal readback so every later write fails closed."""
 
-        connection = self._connect()
+        connection = self._new_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -707,7 +721,7 @@ class DurableMandateAuthority:
     ) -> ExecutionRecord:
         """Record target-state reconciliation without sending or consuming quota."""
 
-        connection = self._connect()
+        connection = self._new_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(

@@ -26,8 +26,8 @@ DIRECT_METHODS = {
 }
 
 OTHER_API = {
-    ("DIRECT_REPORTS", "v5", "Reports", "get"): (
-        "api.direct.yandex.com", "/json/v5/reports", "POST", "READ_ONLY",
+    ("DIRECT_REPORTS", "v501", "Reports", "get"): (
+        "api.direct.yandex.com", "/json/v501/reports", "POST", "READ_ONLY",
         "DOCUMENTED_NOT_EXECUTED",
     ),
     ("METRIKA", "v1", "Statistics", "get"): (
@@ -81,7 +81,8 @@ TOP_FIELDS = {
     "llm", "governance", "api_matrix",
 }
 CREDENTIAL_PROFILES = {
-    "DIRECT_PROD_READ", "METRIKA_TEST_WRITE", "TEST_SITE_PUBLISH",
+    "DIRECT_PROD_READ", "METRIKA_PROD_READ", "METRIKA_TEST_WRITE",
+    "TEST_SITE_PUBLISH",
     "DIRECT_PILOT_WRITE", "METRIKA_PILOT_WRITE", "PILOT_SITE_PUBLISH",
 }
 LIMIT_FIELDS = {
@@ -125,7 +126,7 @@ API_FIELDS = {
     "http_verb", "access_class", "verification_status",
 }
 APPROVED_POLICY_SHA256 = (
-    "ef4756f0d4d843eb0bd4bfbf56ec18f65868e108133552e21dac83c6625e2cc5"
+    "a17ff1959ed1e93cef3b33c9b163288361615f8e0c097b3d288690de595a3fe4"
 )
 
 
@@ -273,13 +274,30 @@ def _validate_record_and_authority(
     credentials = policy.get("credentials", {})
     forbidden = {
         "source", "environment_variables", "argv", "logs", "artifacts",
-        "exceptions", "docker_metadata",
+        "exceptions", "docker_metadata", "unprotected_files",
     }
     if (
         credentials.get("storage") != "macos_keychain"
         or set(credentials.get("forbidden_channels", [])) != forbidden
     ):
         errors.append("credentials: isolation mismatch")
+    if credentials.get("local_read_only_override") != {
+        "surface": "dashboard",
+        "storage": "protected_dotenv_file",
+        "path": ".env",
+        "required_file_access": "owner_only_0600_or_stricter",
+        "process_environment_import": False,
+        "write_profiles_allowed": False,
+        "bindings": {
+            "DIRECT_PROD_READ": "YANDEX_DIRECT_OAUTH_TOKEN",
+            "METRIKA_PROD_READ": "YANDEX_METRICA_OAUTH_TOKEN",
+        },
+        "configuration_bindings": {
+            "direct_client_login": "YANDEX_DIRECT_CLIENT_LOGIN",
+            "metrika_counter_ids": "YANDEX_METRICA_COUNTER_IDS",
+        },
+    }:
+        errors.append("credentials: local read-only override mismatch")
     profiles = credentials.get("profiles", [])
     if {item.get("name") for item in profiles} != CREDENTIAL_PROFILES:
         errors.append("credentials.profiles: profile set mismatch")

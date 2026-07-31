@@ -1,0 +1,16 @@
+.env
+.env.*
+.git
+.venv
+.vercel
+**/__pycache__
+*.pyc
+*.png
+artifacts
+coverage
+dist
+docs
+node_modules
+okf
+runs
+tests

@@ -121,9 +121,10 @@ class ImmutableProposalStore:
         )
         if value["schema_version"] != "stored-proposal-v1":
             raise ProposalConflictError("Stored proposal version is unsupported.")
-        if not isinstance(value["canonical_hash"], str) or _SHA256.fullmatch(
-            value["canonical_hash"]
-        ) is None:
+        if (
+            not isinstance(value["canonical_hash"], str)
+            or _SHA256.fullmatch(value["canonical_hash"]) is None
+        ):
             raise ProposalConflictError("Stored proposal hash is invalid.")
         canonical_bytes = json.dumps(
             value,

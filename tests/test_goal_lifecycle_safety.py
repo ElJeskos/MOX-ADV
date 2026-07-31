@@ -306,9 +306,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
 
     def test_mandate_cannot_authorize_a_different_candidate_payload(self) -> None:
         store = GoalLifecycleStore(self.database)
-        adapter = FakeMetrikaGoalAdapter(
-            ("sim-test-counter", "sim-pilot-counter")
-        )
+        adapter = FakeMetrikaGoalAdapter(("sim-test-counter", "sim-pilot-counter"))
         service = self.service(store, adapter)
         self.register_creation(
             store,

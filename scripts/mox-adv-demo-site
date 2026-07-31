@@ -1,0 +1,127 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+dashboard_command="$repository_root/.venv/bin/mox-adv"
+demo_port=${MOX_ADV_DEMO_PORT:-8878}
+dashboard_pid=""
+tunnel_pid=""
+tunnel_log=""
+
+cleanup() {
+    if [ -n "$tunnel_pid" ]; then
+        kill "$tunnel_pid" 2>/dev/null || true
+    fi
+    if [ -n "$dashboard_pid" ]; then
+        kill "$dashboard_pid" 2>/dev/null || true
+    fi
+    if [ -n "$tunnel_log" ] && [ -f "$tunnel_log" ]; then
+        rm -f -- "$tunnel_log"
+    fi
+}
+
+latest_public_url() {
+    sed -n \
+        's/.*https:\/\/\([[:alnum:]]*\)\.lhr\.life.*/https:\/\/\1.lhr.life/p' \
+        "$tunnel_log" | tail -n 1
+}
+
+trap cleanup EXIT HUP INT TERM
+
+case "$demo_port" in
+    ""|*[!0-9]*)
+        echo "MOX_ADV_DEMO_PORT must be a valid port number." >&2
+        exit 2
+        ;;
+esac
+
+if [ "$demo_port" -lt 1 ] || [ "$demo_port" -gt 65535 ]; then
+    echo "MOX_ADV_DEMO_PORT must be between 1 and 65535." >&2
+    exit 2
+fi
+
+if [ ! -x "$dashboard_command" ]; then
+    echo "The project environment is unavailable. Create .venv first." >&2
+    exit 2
+fi
+
+if ! command -v ssh >/dev/null 2>&1; then
+    echo "OpenSSH is unavailable." >&2
+    exit 2
+fi
+
+"$dashboard_command" ui \
+    --port "$demo_port" \
+    --runs-dir "$repository_root/runs" \
+    --no-open \
+    --public-demo &
+dashboard_pid=$!
+
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+    if curl --fail --silent \
+        "http://127.0.0.1:$demo_port/api/status" >/dev/null 2>&1; then
+        break
+    fi
+    if ! kill -0 "$dashboard_pid" 2>/dev/null; then
+        echo "The Dashboard stopped before the demo tunnel was ready." >&2
+        exit 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+done
+
+if [ "$attempt" -ge 30 ]; then
+    echo "The Dashboard did not become ready within 30 seconds." >&2
+    exit 1
+fi
+
+echo "Starting a temporary public link..."
+tunnel_log=$(mktemp "${TMPDIR:-/tmp}/mox-adv-demo.XXXXXX")
+ssh -T \
+    -o StrictHostKeyChecking=accept-new \
+    -o ServerAliveInterval=30 \
+    -o ExitOnForwardFailure=yes \
+    -R "80:127.0.0.1:$demo_port" \
+    nokey@localhost.run \
+    -- --output json >"$tunnel_log" 2>&1 &
+tunnel_pid=$!
+
+attempt=0
+public_url=""
+while [ "$attempt" -lt 30 ]; do
+    public_url=$(latest_public_url)
+    if [ -n "$public_url" ]; then
+        break
+    fi
+    if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+        echo "The public tunnel stopped before it produced a link." >&2
+        sed -n '1,20p' "$tunnel_log" >&2
+        exit 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+done
+
+if [ -z "$public_url" ]; then
+    echo "The public tunnel did not produce a link within 30 seconds." >&2
+    exit 1
+fi
+
+echo
+echo "Public demo: $public_url"
+echo "The full Dashboard and configured Yandex integrations are available."
+echo "Press Ctrl+C to stop the Dashboard and invalidate the link."
+
+while kill -0 "$tunnel_pid" 2>/dev/null; do
+    current_url=$(latest_public_url)
+    if [ -n "$current_url" ] && [ "$current_url" != "$public_url" ]; then
+        public_url=$current_url
+        echo
+        echo "Public demo link renewed: $public_url"
+        echo "Share this new address instead of the previous one."
+    fi
+    sleep 2
+done
+
+wait "$tunnel_pid"

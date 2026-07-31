@@ -7,6 +7,7 @@
   "required": [
     "schema_version",
     "draft_id",
+    "name",
     "business_goal",
     "primary_conversion",
     "campaign_type",
@@ -24,6 +25,11 @@
       "const": "campaign-draft-v1"
     },
     "draft_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "name": {
       "type": "string",
       "minLength": 1,
       "maxLength": 128

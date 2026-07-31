@@ -1,54 +1,64 @@
 ---
 type: Reference
 title: Initial Source Map
-description: Records the project and format sources used to seed each curated concept.
+description: Maps authoritative repository sources, format sources, and migration provenance to the curated MOX-ADV concepts.
 tags: [references, provenance, okf]
-timestamp: "2026-07-29T14:22:56Z"
+generated:
+  by: "codex/gpt-5"
+  at: "2026-07-30T13:53:15Z"
+verified:
+  by: "codex/gpt-5"
+  at: "2026-07-30T13:53:15Z"
+status: stable
+sources:
+  - id: requirements-v2
+    resource: "repository:requirements-v2-prototype.md"
+    title: MOX-ADV prototype requirements version 2.0-prototype
+    last_modified: 2026-07-30
+  - id: agents
+    resource: "repository:AGENTS.md"
+    title: Repository agent routing
+  - id: domain-workflow
+    resource: "repository:docs/agents/domain.md"
+    title: Domain documentation workflow
+  - id: issue-workflow
+    resource: "repository:docs/agents/issue-tracker.md"
+    title: GitHub issue workflow
+  - id: triage-workflow
+    resource: "repository:docs/agents/triage-labels.md"
+    title: Triage label vocabulary
+  - id: okf-v02-spec
+    resource: https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/3fcbb9f/okf/SPEC.md
+    title: Open Knowledge Format v0.2 specification
+  - id: legacy-okf-v01
+    resource: "git:281f329:okf/"
+    title: Legacy MOX-ADV OKF v0.1 bundle
 ---
 
 # Initial Source Map
 
-This reference records the live sources used to seed the MOX-ADV OKF bundle on 2026-07-29.
-It preserves provenance without copying a stale raw snapshot into the bundle.
+This concept records live provenance without copying a stale raw source layer into the bundle.
+Its structure follows the pinned OKF v0.2 specification.[^okf-v02-spec]
 
 ## Project Sources
 
-| Source | Authority | Use |
+| Source ID | Authority role | Derived concepts |
 | --- | --- | --- |
-| [`requirements.md`](../../requirements.md) | Normative product and acceptance specification, version 2.7 | Product scope, architecture constraints, contracts, permissions, gates, tests, and evidence |
-| [`AGENTS.md`](../../AGENTS.md) | Repository agent routing | Entry point for issue tracking, domain documentation, and OKF usage |
-| [`docs/agents/domain.md`](../../docs/agents/domain.md) | Domain-documentation workflow | Routes future domain concepts to `CONTEXT.md` and accepted ADRs when they exist |
-| [`docs/agents/issue-tracker.md`](../../docs/agents/issue-tracker.md) | Issue-tracker workflow | Defines GitHub Issues as the project planning surface |
-| [`docs/agents/triage-labels.md`](../../docs/agents/triage-labels.md) | Triage vocabulary | Defines canonical issue states |
+| `requirements-v2` | Current product and acceptance specification, including Dashboard campaign goals and responsive ads, navigation, decision-journal, and linked-outcome behavior | Every project, product, architecture, implementation, and runbook concept |
+| `agents` | Repository agent routing only | The repository adapter path |
+| `domain-workflow` | Domain-documentation workflow only | Future `CONTEXT.md` and ADR routing |
+| `issue-workflow` | GitHub issue workflow only | No product behavior |
+| `triage-workflow` | Canonical issue-state vocabulary only | No product behavior |
 
-## Format Sources
+## Format and Migration Sources
 
-| Source | Role |
+| Source ID | Role |
 | --- | --- |
-| [Introducing the Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing) | Explains the v0.1 living-wiki model, portability, producer and consumer independence, and progressive disclosure |
-| [Pinned OKF v0.1 specification](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/ee67a5c/okf/SPEC.md) | Defines the exact format targeted by this bundle |
-| [Current upstream OKF specification](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) | Tracks later format evolution; it is v0.2 as of 2026-07-29 and does not silently change this bundle's declared version |
+| `okf-v02-spec` | Defines the portable OKF v0.2 format and metadata semantics |
+| `legacy-okf-v01` | Preserves migration provenance in Git history and is not authority for current product behavior |
 
-## Concept Provenance
+The legacy bundle described the deleted `requirements.md` v2.7 baseline and included bounded-autonomy, Mandate, and delivery-gate claims that conflict with the current prototype boundary.
+Those claims were not carried into current concepts.[^legacy-okf-v01]
 
-| OKF concept | Primary source locations |
-| --- | --- |
-| [Normative Specification](../project/normative-specification.md) | `requirements.md` sections 1, 17, 18, 20, and 21 |
-| [Prototype Outcome and Scope](../product/prototype-outcome-and-scope.md) | `requirements.md` sections 2 and 3 |
-| [Operating Modes and Human Authority](../product/operating-modes-and-human-authority.md) | `requirements.md` sections 4, 8.5, 8.6, 12, and 15 |
-| [Closed Control Loop](../architecture/closed-control-loop.md) | `requirements.md` sections 2 and 5, `FR-MON-008`, `FR-MON-009`, and `FR-CTL-007` |
-| [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md) | `requirements.md` sections 5, 6, 10, 12, and 14 |
-| [Core Contracts and State](../implementation/core-contracts-and-state.md) | `requirements.md` sections 7, 8, 10, 12, 13, and 16 |
-| [Delivery Gates and Evidence](../implementation/delivery-gates-and-evidence.md) | `requirements.md` sections 6.2, 13, and 17 through 21 |
-| [External Write Safety](../runbooks/external-write-safety.md) | `requirements.md` `FR-CAM-003`, `FR-CAM-005` through `FR-CAM-007`, `FR-CTL-002` through `FR-CTL-006`, `FR-AUD-003`, and `NFR-005` |
-
-The external documents named in Appendix A are review provenance and are not repository-local normative sources.
-OKF concepts are derived orientation and are not authoritative inputs to acceptance.
-
-# Citations
-
-[1] [Introducing the Open Knowledge Format](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)
-
-[2] [Open Knowledge Format v0.1 specification, pinned at `ee67a5c`](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/ee67a5c/okf/SPEC.md)
-
-[3] [Current Open Knowledge Format specification](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
+[^okf-v02-spec]: Open Knowledge Format v0.2 specification
+[^legacy-okf-v01]: Legacy OKF v0.1 bundle preserved at Git commit `281f329`.

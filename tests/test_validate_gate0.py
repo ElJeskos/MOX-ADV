@@ -54,12 +54,8 @@ class Gate0PolicyValidationTests(unittest.TestCase):
                     "scope_binding": reservation_contract["scope_binding"],
                     "object_type": reservation_contract["object_type"],
                     "proposal_id": f"proposal-{index}",
-                    "credential_profile": reservation_contract[
-                        "credential_profile"
-                    ],
-                    "expires_at": (
-                        observed_at + timedelta(hours=1)
-                    ).isoformat(),
+                    "credential_profile": reservation_contract["credential_profile"],
+                    "expires_at": (observed_at + timedelta(hours=1)).isoformat(),
                 }
             binding_entries[name] = entry
         manifest: dict[str, object] = {
@@ -93,9 +89,7 @@ class Gate0PolicyValidationTests(unittest.TestCase):
 
     def test_pilot_policy_rejects_unverified_readback_manifest(self) -> None:
         manifest = self.trusted_manifest()
-        manifest["bindings"]["direct_account"][
-            "verification_status"
-        ] = "UNVERIFIED"
+        manifest["bindings"]["direct_account"]["verification_status"] = "UNVERIFIED"
 
         errors = validate_policy(
             self.policy,
@@ -110,9 +104,7 @@ class Gate0PolicyValidationTests(unittest.TestCase):
         )
 
     def test_pilot_policy_rejects_stale_readback_manifest(self) -> None:
-        manifest = self.trusted_manifest(
-            self.now - timedelta(minutes=16)
-        )
+        manifest = self.trusted_manifest(self.now - timedelta(minutes=16))
 
         errors = validate_policy(
             self.policy,
@@ -127,9 +119,7 @@ class Gate0PolicyValidationTests(unittest.TestCase):
         )
 
     def test_pilot_policy_rejects_future_readback_manifest(self) -> None:
-        manifest = self.trusted_manifest(
-            self.now + timedelta(minutes=1)
-        )
+        manifest = self.trusted_manifest(self.now + timedelta(minutes=1))
 
         errors = validate_policy(
             self.policy,
@@ -145,12 +135,10 @@ class Gate0PolicyValidationTests(unittest.TestCase):
 
     def test_pilot_policy_rejects_expired_creation_reservation(self) -> None:
         manifest = self.trusted_manifest()
-        reservation = manifest["bindings"][
-            "campaign_creation_reservation"
-        ]["reservation"]
-        reservation["expires_at"] = (
-            self.now - timedelta(seconds=1)
-        ).isoformat()
+        reservation = manifest["bindings"]["campaign_creation_reservation"][
+            "reservation"
+        ]
+        reservation["expires_at"] = (self.now - timedelta(seconds=1)).isoformat()
 
         errors = validate_policy(
             self.policy,
@@ -244,9 +232,7 @@ class Gate0PolicyValidationTests(unittest.TestCase):
 
     def test_llm_fixture_ambiguity_outcome_is_enforced(self) -> None:
         policy = copy.deepcopy(self.policy)
-        policy["llm"]["reliability_fixtures"][3][
-            "ambiguity_outcome"
-        ] = "NOT_APPLICABLE"
+        policy["llm"]["reliability_fixtures"][3]["ambiguity_outcome"] = "NOT_APPLICABLE"
 
         errors = validate_policy(policy, profile="simulation")
 
@@ -298,10 +284,7 @@ class Gate0PolicyValidationTests(unittest.TestCase):
         self.assertNotIn("account_id", serialized)
         self.assertNotIn("created_campaign", serialized)
         self.assertTrue(
-            all(
-                value is None
-                for value in self.policy["bindings"]["pilot"].values()
-            )
+            all(value is None for value in self.policy["bindings"]["pilot"].values())
         )
 
 

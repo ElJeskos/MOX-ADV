@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
@@ -90,8 +91,9 @@ class AuditJournalTests(unittest.TestCase):
 
             import sqlite3
 
-            with sqlite3.connect(path) as connection:
-                connection.execute("DELETE FROM events WHERE sequence = 2")
+            with closing(sqlite3.connect(path)) as connection:
+                with connection:
+                    connection.execute("DELETE FROM events WHERE sequence = 2")
 
             reopened = SQLiteAuditJournal.open(path)
             with self.assertRaises(AuditIntegrityError):
@@ -112,8 +114,9 @@ class AuditJournalTests(unittest.TestCase):
 
             import sqlite3
 
-            with sqlite3.connect(path) as connection:
-                connection.execute("DELETE FROM events WHERE sequence = 2")
+            with closing(sqlite3.connect(path)) as connection:
+                with connection:
+                    connection.execute("DELETE FROM events WHERE sequence = 2")
 
             with self.assertRaises(AuditIntegrityError):
                 journal.append("replacement.event", {})
@@ -133,8 +136,9 @@ class AuditJournalTests(unittest.TestCase):
 
             import sqlite3
 
-            with sqlite3.connect(path) as connection:
-                connection.execute("DELETE FROM events WHERE sequence = 2")
+            with closing(sqlite3.connect(path)) as connection:
+                with connection:
+                    connection.execute("DELETE FROM events WHERE sequence = 2")
 
             with self.assertRaises(AuditIntegrityError):
                 journal.seal()

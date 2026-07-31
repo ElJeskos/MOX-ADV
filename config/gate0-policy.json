@@ -91,14 +91,40 @@
       "logs",
       "artifacts",
       "exceptions",
-      "docker_metadata"
+      "docker_metadata",
+      "unprotected_files"
     ],
+    "local_read_only_override": {
+      "surface": "dashboard",
+      "storage": "protected_dotenv_file",
+      "path": ".env",
+      "required_file_access": "owner_only_0600_or_stricter",
+      "process_environment_import": false,
+      "write_profiles_allowed": false,
+      "bindings": {
+        "DIRECT_PROD_READ": "YANDEX_DIRECT_OAUTH_TOKEN",
+        "METRIKA_PROD_READ": "YANDEX_METRICA_OAUTH_TOKEN"
+      },
+      "configuration_bindings": {
+        "direct_client_login": "YANDEX_DIRECT_CLIENT_LOGIN",
+        "metrika_counter_ids": "YANDEX_METRICA_COUNTER_IDS"
+      }
+    },
     "profiles": [
       {
         "name": "DIRECT_PROD_READ",
         "principal": "sviridov:DIRECT_PROD_READ",
         "access": "direct_reports_read_only",
         "keychain_binding": "MOX_ADV_DIRECT_PROD_READ",
+        "rotation": "replace_keychain_credential_after_read_access_validation",
+        "revoke": "revoke_yandex_oauth_then_delete_keychain_credential",
+        "crash_behavior": "discard_ephemeral_secret_and_reacquire_on_next_run"
+      },
+      {
+        "name": "METRIKA_PROD_READ",
+        "principal": "sviridov:METRIKA_PROD_READ",
+        "access": "metrika_read_only",
+        "keychain_binding": "MOX_ADV_METRIKA_PROD_READ",
         "rotation": "replace_keychain_credential_after_read_access_validation",
         "revoke": "revoke_yandex_oauth_then_delete_keychain_credential",
         "crash_behavior": "discard_ephemeral_secret_and_reacquire_on_next_run"
@@ -880,8 +906,8 @@
       "system": "DIRECT_REPORTS",
       "environment": "production",
       "host": "api.direct.yandex.com",
-      "path": "/json/v5/reports",
-      "version": "v5",
+      "path": "/json/v501/reports",
+      "version": "v501",
       "service": "Reports",
       "method": "get",
       "http_verb": "POST",

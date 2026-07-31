@@ -414,9 +414,17 @@ LLM предлагает высокоуровневое действие, а с�
 - `set_ad_variant(variant_id)` вызывает `Ads.update` с подготовленными заголовком и текстом.
 - `set_campaign_state(target_state)` вызывает `Campaigns.suspend` или `Campaigns.resume`.
 
-`CampaignDraftV1` содержит бизнес-цель и основную конверсию, поддерживаемый тип кампании и стратегию, географию и расписание, бюджет и предельные ограничения, группы, ключевые и минус-фразы либо аудитории, тексты и заголовки, ссылки и UTM, allowlisted посадочную страницу и ссылки на подготовленные медиа-материалы.
+`CampaignDraftV1` содержит `name`, бизнес-цель и основную конверсию, поддерживаемый тип кампании и стратегию, географию и расписание, бюджет и предельные ограничения, группы, ключевые и минус-фразы либо аудитории, тексты и заголовки, ссылки и UTM, allowlisted посадочную страницу и ссылки на подготовленные медиа-материалы.
 Детерминированный слой проверяет schema, ограничения полей, домен посадочной страницы, запрещённые формулировки, дубликаты и полноту.
 После проверки `CampaignDraftV1` orchestrator сохраняет immutable proposal высокоуровневого `create_campaign` с точным diff.
+The local Dashboard exposes a separate `Рекламная кампания` page for creating and editing a versioned local campaign draft, its business goal, target KPI, and linked Metrika goal.
+Saving this draft never sends an external write, while subsequent analysis and safe lifecycle simulations consume the saved campaign goal and KPI.
+The campaign goal workspace configures strategy, payment model, attribution model, the policy-bound Metrika counter, and from one to 30 priority goals.
+Each goal records its name, event, site location, type, source, fixed or dynamic conversion value, and whether it is the single primary goal used by analysis.
+The same page manages ad groups with keywords, negative keywords, autotargeting categories, and responsive ads rather than exposing a separate advertisement page.
+Each responsive ad supports from one to seven titles, from one to three texts, a destination URL, display path, sitelinks, callouts, prepared images, and a search preview.
+Exactly one group and two ads with roles A and B project into the current Gate 0 lifecycle, while additional local groups, goals, and ads remain versioned in the draft without external writes.
+The top navigation exposes `Вебвизор` only as its last disabled gray item until that capability is implemented; it has no link or separate page.
 В controlled production pilot `create_campaign` после approval выполняет одну бизнес-транзакцию: dry-run, создание кампании, группы, активного и резервного вариантов объявления и ключевой фразы, сохранение ID и фактических типов, отправку на модерацию, отслеживание статуса, запуск и полный readback.
 Тот же lifecycle проверяет настройку, изменение бюджета и допустимых параметров, pause и resume.
 Повтор с тем же `execution_key` не создаёт вторую структуру.
@@ -446,6 +454,10 @@ Site publish имеет отдельный Approval или Mandate, точный
 Production-сайт изменяется только внутри утверждённой pilot zone.
 После pilot write формируется новый snapshot и `impact_report.json` со статусом `OBSERVED_POST_CHANGE`.
 Impact report можно передать LLM для следующей рекомендации, но новое действие требует нового proposal и подтверждения.
+The Dashboard history page exposes two top-left sections: `История решений` and `Исход решений`.
+The decision journal shows the three newest decisions by default, expands on demand, and paginates the expanded journal server-side with ten decisions per page.
+Every journal entry exposes its outcome view, which identifies the accepted decision and immediate execution result, then shows comparable before-and-after metrics and the recommended next step when post-change evidence exists.
+When post-change evidence has not been collected, the outcome view states that the observation is still pending and does not invent a result.
 
 #### 3.2 Как прототип должен защищать изменяющее действие?
 
@@ -570,6 +582,7 @@ ID требования: `NFR-002`
 MCP или другой agent adapter подключается только к orchestrator или internal API и не начинает доверенную цепочку.
 Основные компоненты должны запускаться через Docker и управляться через командную строку.
 Небольшой хостовый запускатель разрешён только для чтения OAuth-токена из macOS Keychain и безопасной передачи токена контейнеру на время запуска.
+Локальный production read-only dashboard является отдельным контуром и может читать только четыре выделенные привязки Директа и Метрики непосредственно из защищённого файла `.env` в корне репозитория: два read-only OAuth-токена, client login Директа и один ID счётчика Метрики.
 Облачная, Linux- и отдельная промышленная серверная среда не создаются и не проверяются.
 
 ### 2. Безопасность, устойчивость и стоимость
@@ -583,7 +596,10 @@ ID требования: `NFR-003`
 Прототип не передаёт прикладные персональные данные внешней LLM.
 Тестовая страница содержит только синтетический контент.
 Технические данные тестового визита обрабатываются Метрикой только в объёме проверки счётчика и цели.
-OAuth-токены хранятся в macOS Keychain и не попадают в prompt, env, argv, Docker metadata, код, stdout, exceptions или артефакты.
+Write-capable и не относящиеся к локальному dashboard OAuth-токены хранятся в macOS Keychain.
+Локальный production read-only dashboard читает только `YANDEX_DIRECT_OAUTH_TOKEN`, `YANDEX_DIRECT_CLIENT_LOGIN`, `YANDEX_METRICA_OAUTH_TOKEN` и `YANDEX_METRICA_COUNTER_IDS` из обычного файла `.env`, принадлежащего текущему пользователю с режимом `0600` или более строгим `0400`, без импорта значений в process environment.
+`YANDEX_METRICA_COUNTER_IDS` должен содержать ровно один положительный ID счётчика для связанного анализа одной кампании.
+OAuth-токены не попадают в prompt, process environment, argv, Docker metadata, код, stdout, exceptions или артефакты.
 Названия кампаний и целей, объявления, URL и UTM, поисковые запросы, API warnings и errors, бизнес-бриф и DOM считаются недоверенными данными.
 LLM получает только очищенные allowlisted поля с ограничением длины.
 Инструкции внутри недоверенного текста не могут изменить policy, scope, target, approval или набор tools.
@@ -592,6 +608,7 @@ LLM получает только очищенные allowlisted поля с о�
 Используются логические профили:
 
 - `DIRECT_PROD_READ` для production Reports без management connector и write-egress.
+- `METRIKA_PROD_READ` для production Statistics без management connector и write-egress.
 - `METRIKA_TEST_WRITE` с минимальными `metrika:read` и `metrika:write` для одного тестового counter.
 - `TEST_SITE_PUBLISH` только для тестовой страницы без права публикации на production-сайт.
 - `DIRECT_PILOT_WRITE`, отключённый по умолчанию и ограниченный одним allowlisted production-аккаунтом, действием по Approval или Mandate и platform-side spend cap.
@@ -599,7 +616,7 @@ LLM получает только очищенные allowlisted поля с о�
 - `PILOT_SITE_PUBLISH` для одной ограниченной production-zone, разрешённых событий и файлов, с diff, conditional rollback и Approval или Mandate.
 До создания кампании профиль разрешает только `create_campaign` с Approval и действующей `CreationReservation`, а после создания — только write по сохранённым идентификаторам пилотной структуры текущего run.
 
-Профили используют раздельные principals и credentials из Keychain или credential broker.
+Профили используют раздельные principals и credentials из Keychain или credential broker, кроме двух выделенных read-only профилей локального dashboard, разрешённых в защищённом `.env`.
 Read-only процесс не получает write credential.
 Pilot credential получает только executor непосредственно перед разрешённым запросом.
 Для каждого credential profile в Gate 0 фиксируются rotation, revoke и поведение при crash.
@@ -612,7 +629,7 @@ Redirects и удаление существующих или чужих product
 Удаление как часть integration cleanup разрешено только для объектов, созданных текущим run.
 Временный секрет удаляется после run.
 Локальные временные файлы удаляются не позднее двадцати четырёх часов после демонстрации.
-Все OAuth-токены прототипа удаляются из Keychain или отзываются после фиксации заказчиком итогового статуса приёмки.
+Все OAuth-токены прототипа удаляются из Keychain и защищённого `.env` или отзываются после фиксации заказчиком итогового статуса приёмки.
 Архив без секретов хранится не более тридцати дней.
 
 #### 2.2 Как прототип должен вести себя при ошибках?
@@ -871,4 +888,7 @@ Fixtures проверяют расчёты и safety policy, но не треб�
 - [Авторизация Яндекс Метрики](https://yandex.ru/dev/metrika/ru/intro/authorization).
 - [Создание цели Яндекс Метрики](https://yandex.ru/dev/metrika/ru/management/openapi/goal/addGoal).
 - [Передача события через reachGoal](https://yandex.ru/support/metrica/ru/objects/reachgoal).
+- [Целевые действия в стратегии Яндекс Директа](https://yandex.ru/support/direct/ru/strategies/priority-goals).
+- [Создание и изменение объявлений через Direct API](https://yandex.ru/dev/direct/doc/ru/ads/add).
+- [Создание групп объявлений через Direct API](https://yandex.ru/dev/direct/doc/ru/adgroups/add).
 - [Сервис Reports Яндекс Директа](https://yandex.ru/dev/direct/doc/ru/reports).

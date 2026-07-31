@@ -405,8 +405,8 @@ class ReadConnectorContractTests(unittest.TestCase):
             [
                 (
                     "DIRECT_REPORTS",
-                    "/json/v5/reports",
-                    "v5",
+                    "/json/v501/reports",
+                    "v501",
                     "Reports",
                     "get",
                 ),
@@ -485,6 +485,36 @@ class ReadConnectorContractTests(unittest.TestCase):
             "sim-primary-goal",
             transport.requests[2].payload["goal"],
         )
+
+    def test_real_read_without_change_provenance_is_partial_not_rejected(
+        self,
+    ) -> None:
+        policy, fixture = linked_input()
+        transport = RecordingReadTransport(fixture)
+        transport.direct_state = replace(
+            transport.direct_state,
+            last_change_author="UNAVAILABLE_READ_ONLY",
+        )
+        trusted_scope = trusted_fixture_scope(policy, "linked-observe")
+
+        snapshot = read_observe_snapshot(
+            policy=policy,
+            observation_id="real-read-no-change-provenance",
+            generated_at=fixture["generated_at"],
+            period_start=fixture["direct_report"]["period_start"],
+            period_end=fixture["direct_report"]["period_end"],
+            trusted_scope=trusted_scope,
+            direct_reports=DirectReportsReadConnectorV1(transport),
+            direct_state=DirectCampaignStateReadConnectorV1(transport),
+            metrika_report=MetrikaReportReadConnectorV1(transport),
+        )
+
+        self.assertEqual("PARTIAL", snapshot.comparability_status)
+        self.assertIn(
+            "CHANGE_PROVENANCE_UNAVAILABLE",
+            snapshot.data_quality_gaps,
+        )
+        self.assertFalse(snapshot.financial_recommendations_allowed)
 
     def test_read_response_for_wrong_requested_period_is_incompatible(
         self,

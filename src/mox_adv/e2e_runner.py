@@ -255,6 +255,7 @@ def _campaign_payload() -> Mapping[str, Any]:
     return {
         "schema_version": "campaign-draft-v1",
         "draft_id": "draft-campaign-e2e",
+        "name": "Lead service",
         "business_goal": {
             "event": "lead_submitted",
             "meaning": "A visitor submitted the lead form.",

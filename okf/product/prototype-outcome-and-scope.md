@@ -1,34 +1,35 @@
 ---
 type: Product Scope
 title: Prototype Outcome and Scope
-description: Defines the proof goal, mandatory pilot boundary, and explicit non-goals.
+description: Defines the controlled-loop proof goal, narrow pilot boundary, and explicit prototype non-goals.
 tags: [product, scope, pilot]
-timestamp: "2026-07-29T14:10:28Z"
+generated:
+  by: "codex/gpt-5"
+  at: "2026-07-29T17:43:55Z"
+verified:
+  by: "codex/gpt-5"
+  at: "2026-07-29T17:43:55Z"
+status: stable
+sources:
+  - id: requirements-v2
+    resource: "repository:requirements-v2-prototype.md"
+    title: MOX-ADV prototype requirements version 2.0-prototype
+    last_modified: 2026-07-29
 ---
 
 # Prototype Outcome and Scope
 
-MOX-ADV must prove that linked advertising facts can become an explainable, policy-bounded action, be executed safely, and be evaluated on the same campaign.
-The required control loop is:
+MOX-ADV must prove one controlled loop:
 
-`linked data -> validated snapshot -> analysis -> proposal -> policy check -> approval or mandate -> write -> readback -> observation -> ImpactReport -> post-change LLM analysis -> new typed decision`
+`linked Direct and Metrica data -> metrics -> LLM analysis -> proposal -> policy check -> human confirmation -> change -> readback -> observed result`
 
-The prototype has two functional modules.
-Monitoring joins Yandex Direct and Yandex Metrica statistics, calculates metrics, detects anomalies, and evaluates change outcomes.
-Campaign management drafts, creates, launches, and safely changes advertising objects through typed commands.
+The monitoring module reads one campaign and one counter, joins their data, calculates metrics, detects problems, and produces an explainable recommendation.
+The safe campaign-management module prepares a campaign structure and may execute one bounded action only after explicit operator confirmation.[^requirements-v2]
 
-The mandatory pilot is intentionally narrow:
+The prototype is limited to one local operator, one test account, one allowlisted advertising account, one allowlisted pilot campaign, one supported campaign type, one counter, one primary goal, and one separate candidate test goal.
+It includes local fixtures, available real-statistics reads, a confirmed campaign-creation lifecycle in the test contour, scheduled and one-off read-only analysis, one manually approved reversible pilot action, readback, an observed-result report, a CLI, and local artifacts.
 
-- One organization, allowlisted account, Metrica counter, and prototype-created campaign are in scope.
-- The supported campaign shape is one Unified Performance Campaign on search with one group, one targeting condition, and one `ResponsiveAd` with tightly bounded variants.
-- The system must demonstrate both human-approved and bounded-autonomous execution, including a separately mandated first launch when it is not part of the approved creation saga.
-- The system must produce local contract evidence and controlled-pilot evidence for the operations actually used.
+The prototype does not include multiple clients or campaign types, autonomous production writes, long-lived Mandates, production-site or existing production-goal changes, automatic production deletion, generated media, a web interface, CRM or offline conversions, paid hosting, cloud deployment, microservices, high availability, or proof of causal KPI uplift.
+It proves measurement correctness and execution safety rather than guaranteed business improvement.
 
-Important non-goals include multi-tenant operation, multiple campaign types, CRM or revenue attribution, automatic media generation, destructive production cleanup, a web UI, cloud deployment, microservices, and guaranteed KPI improvement.
-The prototype proves measurement and control safety, not causal uplift.
-
-# Citations
-
-[1] [`requirements.md`](../../requirements.md), sections 2 and 3.
-
-[2] [Closed Control Loop](../architecture/closed-control-loop.md)
+[^requirements-v2]: [MOX-ADV prototype requirements](../../requirements-v2-prototype.md), “Goal,” “Scope,” and `FR-007`.

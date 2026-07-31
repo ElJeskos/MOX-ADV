@@ -600,6 +600,7 @@ class OptimizationProposalV1:
 class CampaignDraftV1:
     schema_version: str
     draft_id: str
+    name: str
     business_goal: Mapping[str, Any]
     primary_conversion: Mapping[str, Any]
     campaign_type: str
@@ -617,6 +618,7 @@ class CampaignDraftV1:
         fields = (
             "schema_version",
             "draft_id",
+            "name",
             "business_goal",
             "primary_conversion",
             "campaign_type",
@@ -633,6 +635,7 @@ class CampaignDraftV1:
         if value["schema_version"] != "campaign-draft-v1":
             raise SchemaValidationError("Campaign draft version is unsupported.")
         _text(value["draft_id"], "Campaign draft ID", maximum=128)
+        _text(value["name"], "Campaign name", maximum=128)
         _closed(
             value["business_goal"],
             ("event", "meaning"),
@@ -695,6 +698,7 @@ class CampaignDraftV1:
         return cls(
             schema_version=value["schema_version"],
             draft_id=value["draft_id"],
+            name=value["name"],
             business_goal=_freeze_json(value["business_goal"]),
             primary_conversion=_freeze_json(value["primary_conversion"]),
             campaign_type=value["campaign_type"],
@@ -712,6 +716,7 @@ class CampaignDraftV1:
         return {
             "schema_version": self.schema_version,
             "draft_id": self.draft_id,
+            "name": self.name,
             "business_goal": _thaw_json(self.business_goal),
             "primary_conversion": _thaw_json(self.primary_conversion),
             "campaign_type": self.campaign_type,

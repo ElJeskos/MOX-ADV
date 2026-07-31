@@ -136,6 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not open the UI in the default browser",
     )
+    ui_parser.add_argument(
+        "--public-demo",
+        action="store_true",
+        help="accept same-origin requests from a supported temporary tunnel",
+    )
     return parser
 
 
@@ -232,6 +237,7 @@ def main(
             port=arguments.port,
             runs_root=arguments.runs_dir,
             open_browser=not arguments.no_open,
+            public_demo=arguments.public_demo,
         )
         return 0
     if arguments.command in {"approval", "kill-switch", "mandate"}:

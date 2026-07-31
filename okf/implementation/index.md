@@ -1,4 +1,4 @@
 # Implementation
 
-- [Core Contracts and State](core-contracts-and-state.md) — Summarizes the versioned schemas, immutable records, authority state machines, and execution ledger.
-- [Delivery Gates and Evidence](delivery-gates-and-evidence.md) — Maps delivery gates to the evidence needed for local validation and the controlled pilot.
+- [Core Contracts and State](core-contracts-and-state.md) — Summarizes typed snapshots, versioned campaign drafts with priority goals and responsive ads, proposals, approvals, execution state, Dashboard decision history and outcomes, boundaries, and run artifacts.
+- [Acceptance and Evidence](acceptance-and-evidence.md) — Summarizes fixture, scenario, capability-status, and evidence requirements for prototype acceptance.

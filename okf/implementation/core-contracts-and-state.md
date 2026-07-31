@@ -1,40 +1,55 @@
 ---
 type: Implementation Contract
 title: Core Contracts and State
-description: Summarizes the versioned schemas, immutable records, authority state machines, and execution ledger.
+description: Summarizes typed snapshots, versioned campaign drafts with priority goals and responsive ads, proposals, approvals, execution state, Dashboard decision history and outcomes, boundaries, and run artifacts.
 tags: [implementation, contracts, state]
-timestamp: "2026-07-29T14:10:28Z"
+generated:
+  by: "codex/gpt-5"
+  at: "2026-07-30T13:53:15Z"
+verified:
+  by: "codex/gpt-5"
+  at: "2026-07-30T13:53:15Z"
+status: stable
+sources:
+  - id: requirements-v2
+    resource: "repository:requirements-v2-prototype.md"
+    title: MOX-ADV prototype requirements version 2.0-prototype
+    last_modified: 2026-07-30
 ---
 
 # Core Contracts and State
 
-Every model-visible and persisted contract is versioned and closed to unknown fields.
-Machine-readable JSON Schemas in `schemas/` must match the normative model definitions in `requirements.md`; the requirements win until an approved new version changes them.
-Identifiers, timestamps, money, limits, and evidence references are validated outside the LLM.
+`IntegratedPerformanceSnapshot` binds allowlisted organization, connection, account, campaign, counter, and goal identifiers to a period, attribution model, source timestamps, watermarks, raw metrics, calculated metrics, current managed values, object states, change history, business objective, data-quality gaps, comparability, and conclusion confidence.
+Its identifier covers every normative input, configuration version, and policy version.
+A late conversion creates a new snapshot version instead of mutating an old one.[^requirements-v2]
 
-The central immutable records are:
+`OptimizationProposalV1` is a closed-schema model output.
+It records one of `EFFECTIVE`, `INEFFECTIVE`, `INSUFFICIENT_DATA`, or `NEEDS_HUMAN`, observed facts, up to three ranked hypotheses, evidence references to fields present in the snapshot, bounded atomic actions, risks, preconditions, rollback conditions, expected direction, and a short Russian explanation.
+Unknown fields and arbitrary HTTP payloads are rejected.
 
-- `IntegratedPerformanceSnapshotV1`, which joins source provenance, configuration, object state, metrics, data quality, comparability, confidence, and baseline.
-- `OptimizationProposalV1`, which contains one typed decision, evidence references, bounded atomic actions, risks, preconditions, and an explanation.
-- `ImpactReportV1`, which contains only deterministically calculated post-change facts and never contains the next decision.
+`CampaignDraftV1` names the campaign, describes its supported test structure and business goal, and passes deterministic validation before the confirmed creation lifecycle.
+`GoalCandidate` describes a new goal in the test counter and remains `CANDIDATE` until technical event evidence and separate human confirmation establish an approved business meaning.
+The Dashboard stores append-only versions of one local campaign draft and exposes its placement settings, business goal, target CPA, strategy, payment model, attribution model, and policy-bound Metrika counter on the separate `Рекламная кампания` page.
+The page stores from one to 30 goals with names, events, site locations, types, sources, conversion-value modes, conversion values, and exactly one primary goal.
+The same page stores ad groups with keywords, negative keywords, autotargeting categories, and responsive ads containing up to seven titles, three texts, destination and display URLs, sitelinks, callouts, and prepared images.
+Exactly one selected group and two ads assigned roles A and B project into `CampaignDraftV1` for the current Gate 0 lifecycle.
+Additional goals, groups, and ads remain versioned local draft data.
+Saving the draft performs no external write, while subsequent analysis and safe lifecycle simulations consume the selected primary goal, target, pilot group, and A/B ads.
+`Вебвизор` remains the last disabled gray navigation item and has no route until the capability is implemented.
+The Dashboard history page separates the decision journal from decision outcomes with two top-left tabs.
+The journal returns the three newest entries by default and uses server-side pages of ten entries when expanded.
+Each decision can open an outcome view that combines its accepted action and immediate execution result with an immutable linked post-change observation.
+If no linked observation exists, the view explicitly remains pending instead of presenting synthetic before-and-after evidence.
 
-Canonical JSON and SHA-256 bind snapshots, proposals, plans, fingerprints, reservations, and execution keys to exact versions of their inputs.
-Money is stored as integer microrubles.
-Policy comparisons use unrounded values.
+The single-use `Approval` binds the exact canonical plan to scope, snapshot timestamps, policy version, expected fingerprint, and expiry.
+The decision idempotency key covers the current analytical and managed state.
+The execution key additionally covers the approved proposal, action, target value, and expected object version.
 
-Write authority and recovery are durable state machines:
+SQLite stores an `ExecutionLedger` with a unique execution key and transitions through `RESERVED`, `IN_FLIGHT`, and a terminal or blocking result such as `APPLIED`, `NO_CHANGE`, `BLOCKED`, `UNKNOWN_RESULT`, or `FAILED`.
+The state survives restart, prevents duplicate application, and blocks further writes after an unresolved unknown result.
 
-- `ApprovalV1` is reserved atomically before the first write, becomes `USED_IN_SAGA` at the first HTTP-send boundary, and can authorize only remaining steps of the same unchanged canonical plan until the saga expires or terminates.
-- `MandateV1` is immutable and consumes action and monetary quotas atomically.
-- `ExecutionLedger` has a unique `execution_key`, records `IN_FLIGHT` before the external request, prevents duplicate application, and preserves uncertain or partially applied outcomes.
-- `CreationReservationV1` binds not-yet-created objects to trusted scope and registers created IDs into the ledger.
-- Kill-switch state, active observation windows, authority state, and unfinished sagas must recover after restart.
+Each run uses `runs/<run_id>/` and creates only the artifacts for stages that occurred.
+Possible artifacts include `proposal.json`, `approval.json`, `change_diff.json`, `result.json`, `impact_report.json`, `report.md`, and `events.jsonl`.
+They record schema and policy versions, evidence, decisions, before-and-after values, provider usage, cost, and timing without secrets or hidden model reasoning.
 
-Every model-visible tool returns exactly one typed result, including denials, timeouts, and internal errors.
-Side-effecting tool requests must become persisted Proposals before the executor can consider them.
-
-# Citations
-
-[1] [`requirements.md`](../../requirements.md), sections 7, 8, 10, 12, 13, and 16.
-
-[2] [Trust and Write Boundaries](../architecture/trust-and-write-boundaries.md)
+[^requirements-v2]: [MOX-ADV prototype requirements](../../requirements-v2-prototype.md), `FR-001`, `FR-005`, `FR-007` through `FR-009`, and `NFR-004`.

@@ -18,4 +18,5 @@ See `docs/agents/domain.md`.
 ### Knowledge bundle
 
 Use `okf/` as the portable living knowledge bundle for this project.
-`docs/agents/okf.md` configures repository-specific producer and consumer behavior and must not contain project knowledge.
+Read `docs/agents/okf.md` before consuming or updating the bundle.
+Keep project knowledge in OKF and repository-specific producer and consumer workflow in the adapter.

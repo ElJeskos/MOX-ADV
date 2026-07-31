@@ -9,9 +9,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from mox_adv.control_state import ControlRejected
+from mox_adv.ui_campaign import DashboardCampaignRejected
 from mox_adv.ui_dashboard import DashboardApplication
 from mox_adv.ui_service import UiRunRejected, UiRunService
 from mox_adv.ui_workflows import DashboardWorkflowRejected
@@ -24,6 +25,7 @@ _ASSETS = {
     "/autopilot": ("index.html", "text/html; charset=utf-8"),
     "/rules": ("index.html", "text/html; charset=utf-8"),
     "/history": ("index.html", "text/html; charset=utf-8"),
+    "/campaign": ("index.html", "text/html; charset=utf-8"),
     "/workflows": ("index.html", "text/html; charset=utf-8"),
     "/control": ("index.html", "text/html; charset=utf-8"),
     "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
@@ -38,7 +40,8 @@ class UiRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
         if path in _ASSETS:
             name, content_type = _ASSETS[path]
             self._send_bytes(
@@ -51,7 +54,9 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             self._send_bytes(HTTPStatus.NO_CONTENT, b"", "image/x-icon")
             return
         if path == "/api/status":
-            self._send_json(HTTPStatus.OK, self.server.service.status())
+            status = dict(self.server.service.status())
+            status["public_demo"] = self.server.public_demo
+            self._send_json(HTTPStatus.OK, status)
             return
         if path == "/api/test-automation":
             self._send_json(
@@ -60,15 +65,111 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/api/test-history":
+            query = parse_qs(parsed_url.query)
+            if "page" in query or "page_size" in query:
+                try:
+                    page = int(query.get("page", ["1"])[0])
+                    page_size = int(query.get("page_size", ["10"])[0])
+                    result = self.server.service.decision_history_page(
+                        page=page,
+                        page_size=page_size,
+                    )
+                except (IndexError, TypeError, ValueError, UiRunRejected) as error:
+                    self._send_error(
+                        HTTPStatus.BAD_REQUEST,
+                        "INVALID_HISTORY_PAGE",
+                        str(error) or "History page is invalid.",
+                    )
+                    return
+                self._send_json(HTTPStatus.OK, result)
+                return
             self._send_json(
                 HTTPStatus.OK,
                 {"items": self.server.service.decision_history()},
             )
             return
+        if path.startswith("/api/test-history/") and path.endswith("/outcome"):
+            parts = path.strip("/").split("/")
+            if len(parts) == 4:
+                try:
+                    outcome = self.server.service.decision_outcome(
+                        unquote(parts[2])
+                    )
+                except UiRunRejected as error:
+                    self._send_error(
+                        HTTPStatus.NOT_FOUND,
+                        error.reason_code,
+                        str(error),
+                    )
+                    return
+                self._send_json(HTTPStatus.OK, outcome)
+                return
         if path == "/api/control-plane":
             self._send_json(
                 HTTPStatus.OK,
                 self.server.dashboard.control_overview(),
+            )
+            return
+        if path == "/api/campaigns":
+            self._send_json(
+                HTTPStatus.OK,
+                self.server.dashboard.campaign_catalog(),
+            )
+            return
+        if path == "/api/yandex-direct/campaigns":
+            try:
+                catalog = self.server.service.production_campaign_catalog()
+            except UiRunRejected as error:
+                self._send_error(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    error.reason_code,
+                    str(error),
+                )
+                return
+            self._send_json(HTTPStatus.OK, catalog)
+            return
+        if path.startswith("/api/campaigns/"):
+            parts = path.strip("/").split("/")
+            if len(parts) == 4 and parts[3] == "goal":
+                try:
+                    result = self.server.dashboard.goal_lifecycle_overview(
+                        unquote(parts[2])
+                    )
+                except DashboardCampaignRejected as error:
+                    self._send_error(
+                        HTTPStatus.NOT_FOUND,
+                        error.reason_code,
+                        str(error),
+                    )
+                    return
+                self._send_json(HTTPStatus.OK, result)
+                return
+            if len(parts) == 4 and parts[3] == "launch":
+                try:
+                    result = self.server.dashboard.campaign_launch_overview(
+                        unquote(parts[2])
+                    )
+                except DashboardCampaignRejected as error:
+                    self._send_error(
+                        HTTPStatus.NOT_FOUND,
+                        error.reason_code,
+                        str(error),
+                    )
+                    return
+                self._send_json(HTTPStatus.OK, result)
+                return
+            if len(parts) == 3:
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.dashboard.campaign_overview(
+                        unquote(parts[2])
+                    ),
+                )
+                return
+        if path == "/api/campaign":
+            self._send_json(
+                HTTPStatus.OK,
+                self.server.dashboard.campaign_overview(),
             )
             return
         if path == "/api/evidence":
@@ -149,6 +250,22 @@ class UiRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        campaign_select = (
+            path.startswith("/api/campaigns/")
+            and path.endswith("/select")
+            and len(path.strip("/").split("/")) == 4
+        )
+        campaign_launch = (
+            path.startswith("/api/campaigns/")
+            and path.endswith("/launch")
+            and len(path.strip("/").split("/")) == 4
+        )
+        campaign_goal_action = (
+            path.startswith("/api/campaigns/")
+            and len(path.strip("/").split("/")) == 5
+            and path.strip("/").split("/")[3] == "goal"
+            and path.strip("/").split("/")[4] in {"technical", "decision"}
+        )
         if path not in {
             "/api/runs",
             "/api/runs/stream",
@@ -157,11 +274,15 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             "/api/control-plane/mandates",
             "/api/control-plane/approvals",
             "/api/proposals/revise",
+            "/api/campaign",
+            "/api/campaigns",
             "/api/workflows/campaign",
             "/api/workflows/goal",
             "/api/workflows/impact",
             "/api/evidence/run",
-        }:
+        } and not campaign_select and not campaign_launch and not (
+            campaign_goal_action
+        ):
             self._send_error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "Route not found.")
             return
         if not self._allow_json_mutation():
@@ -241,23 +362,106 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                     str(payload.get("run_id", "")),
                     step,
                 )
+            elif path == "/api/campaign":
+                payload = self._read_json()
+                if payload.get("action") != "new":
+                    raise ValueError("CAMPAIGN_ACTION_INVALID")
+                revision = payload.get("expected_revision")
+                if isinstance(revision, bool) or not isinstance(revision, int):
+                    raise ValueError("CAMPAIGN_REVISION_REQUIRED")
+                result = self.server.dashboard.create_campaign_draft(revision)
+            elif path == "/api/campaigns":
+                payload = self._read_json()
+                revision = payload.get("expected_revision")
+                if isinstance(revision, bool) or not isinstance(revision, int):
+                    raise ValueError("CAMPAIGN_REVISION_REQUIRED")
+                self.server.dashboard.create_campaign_draft(revision)
+                result = self.server.dashboard.campaign_catalog()
+            elif campaign_select:
+                parts = path.strip("/").split("/")
+                self._read_json()
+                result = self.server.dashboard.select_campaign(
+                    unquote(parts[2])
+                )
+            elif campaign_launch:
+                parts = path.strip("/").split("/")
+                payload = self._read_json()
+                revision = payload.get("expected_revision")
+                if isinstance(revision, bool) or not isinstance(revision, int):
+                    raise ValueError("CAMPAIGN_REVISION_REQUIRED")
+                result = self.server.dashboard.run_campaign_simulation(
+                    unquote(parts[2]),
+                    expected_revision=revision,
+                )
+            elif campaign_goal_action:
+                parts = path.strip("/").split("/")
+                payload = self._read_json()
+                revision = payload.get("expected_revision")
+                if isinstance(revision, bool) or not isinstance(revision, int):
+                    raise ValueError("CAMPAIGN_REVISION_REQUIRED")
+                draft_id = unquote(parts[2])
+                if parts[4] == "technical":
+                    result = (
+                        self.server.dashboard.run_goal_technical_simulation(
+                            draft_id,
+                            expected_revision=revision,
+                        )
+                    )
+                else:
+                    result = (
+                        self.server.dashboard.decide_pending_goal_simulation(
+                            str(payload.get("semantic_decision", "")),
+                            draft_id=draft_id,
+                            expected_revision=revision,
+                            run_id=str(payload.get("run_id", "")),
+                        )
+                    )
             elif path == "/api/workflows/campaign":
-                result = self.server.dashboard.run_campaign_simulation()
+                payload = self._read_json()
+                draft_id = payload.get("draft_id")
+                if not isinstance(draft_id, str) or not draft_id.strip():
+                    raise ValueError("CAMPAIGN_DRAFT_ID_REQUIRED")
+                revision = payload.get("expected_revision")
+                if isinstance(revision, bool) or not isinstance(revision, int):
+                    raise ValueError("CAMPAIGN_REVISION_REQUIRED")
+                result = self.server.dashboard.run_campaign_simulation(
+                    draft_id,
+                    expected_revision=revision,
+                )
             elif path == "/api/workflows/goal":
                 payload = self._read_json()
                 action = str(payload.get("action", ""))
+                draft_id = str(payload.get("draft_id", ""))
+                revision = payload.get("expected_revision")
+                if not draft_id:
+                    raise ValueError("CAMPAIGN_DRAFT_ID_REQUIRED")
+                if isinstance(revision, bool) or not isinstance(revision, int):
+                    raise ValueError("CAMPAIGN_REVISION_REQUIRED")
                 if action == "technical":
-                    result = self.server.dashboard.run_goal_technical_simulation()
+                    result = self.server.dashboard.run_goal_technical_simulation(
+                        draft_id,
+                        expected_revision=revision,
+                    )
                 elif action == "semantic_decision":
                     result = self.server.dashboard.decide_pending_goal_simulation(
-                        str(payload.get("semantic_decision", ""))
+                        str(payload.get("semantic_decision", "")),
+                        draft_id=draft_id,
+                        expected_revision=revision,
+                        run_id=str(payload.get("run_id", "")),
                     )
                 else:
                     raise ValueError("GOAL_WORKFLOW_ACTION_INVALID")
             elif path == "/api/workflows/impact":
                 payload = self._read_json()
+                source_run_id = payload.get("source_run_id")
+                if source_run_id is not None and not isinstance(
+                    source_run_id,
+                    str,
+                ):
+                    raise ValueError("IMPACT_SOURCE_RUN_ID_INVALID")
                 result = self.server.dashboard.run_impact_fixture(
-                    str(payload.get("fixture", ""))
+                    str(payload.get("fixture", "")),
+                    source_run_id=source_run_id,
                 )
             else:
                 result = self.server.dashboard.run_full_evidence()
@@ -285,6 +489,13 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                 str(error),
             )
             return
+        except DashboardCampaignRejected as error:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                error.reason_code,
+                str(error),
+            )
+            return
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
             self._send_error(
                 HTTPStatus.BAD_REQUEST,
@@ -295,16 +506,42 @@ class UiRequestHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         path = urlparse(self.path).path
-        if path != "/api/test-automation":
+        campaign_update = (
+            path.startswith("/api/campaigns/")
+            and len(path.strip("/").split("/")) == 3
+        )
+        if path not in {"/api/test-automation", "/api/campaign"} and not (
+            campaign_update
+        ):
             self._send_error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "Route not found.")
             return
         if not self._allow_json_mutation():
             return
         try:
-            settings = self.server.dashboard.configure_test_automation(
-                self._read_json()
-            )
+            payload = self._read_json()
+            if path == "/api/test-automation":
+                result = self.server.dashboard.configure_test_automation(payload)
+            else:
+                revision = payload.pop("expected_revision", None)
+                if isinstance(revision, bool) or not isinstance(revision, int):
+                    raise ValueError("CAMPAIGN_REVISION_REQUIRED")
+                result = self.server.dashboard.save_campaign_draft(
+                    payload,
+                    revision,
+                    (
+                        unquote(path.strip("/").split("/")[2])
+                        if campaign_update
+                        else None
+                    ),
+                )
         except UiRunRejected as error:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                error.reason_code,
+                str(error),
+            )
+            return
+        except DashboardCampaignRejected as error:
             self._send_error(
                 HTTPStatus.BAD_REQUEST,
                 error.reason_code,
@@ -318,7 +555,43 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                 "Request body must be a valid JSON object.",
             )
             return
-        self._send_json(HTTPStatus.OK, settings)
+        self._send_json(HTTPStatus.OK, result)
+
+    def do_DELETE(self) -> None:
+        path = urlparse(self.path).path
+        parts = path.strip("/").split("/")
+        if not (
+            path.startswith("/api/campaigns/")
+            and len(parts) == 3
+        ):
+            self._send_error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "Route not found.")
+            return
+        if not self._allow_json_mutation():
+            return
+        try:
+            payload = self._read_json()
+            revision = payload.get("expected_revision")
+            if isinstance(revision, bool) or not isinstance(revision, int):
+                raise ValueError("CAMPAIGN_REVISION_REQUIRED")
+            result = self.server.dashboard.delete_campaign_draft(
+                unquote(parts[2]),
+                revision,
+            )
+        except DashboardCampaignRejected as error:
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                error.reason_code,
+                str(error),
+            )
+            return
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            self._send_error(
+                HTTPStatus.BAD_REQUEST,
+                "INVALID_REQUEST",
+                "Request body must be a valid JSON object.",
+            )
+            return
+        self._send_json(HTTPStatus.OK, result)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -331,11 +604,31 @@ class UiRequestHandler(BaseHTTPRequestHandler):
 
     def _allow_json_mutation(self) -> bool:
         host = self.headers.get("Host", "")
+        origin = self.headers.get("Origin")
+        if self.server.public_demo:
+            parsed_origin = urlparse(origin or "")
+            public_host = parsed_origin.hostname or ""
+            local_demo = public_host in {"127.0.0.1", "localhost"}
+            tunnel_demo = public_host.endswith(
+                (".trycloudflare.com", ".lhr.life", ".vercel.app")
+            )
+            if (
+                parsed_origin.scheme not in {"http", "https"}
+                or parsed_origin.netloc.casefold() != host.casefold()
+                or not (local_demo or tunnel_demo)
+            ):
+                self.close_connection = True
+                self._send_error(
+                    HTTPStatus.FORBIDDEN,
+                    "CROSS_ORIGIN_REQUEST_REJECTED",
+                    "State-changing requests must come from the demo page.",
+                )
+                return False
+            return self._allow_json_content_type()
         allowed_hosts = {
             f"127.0.0.1:{self.server.server_port}",
             f"localhost:{self.server.server_port}",
         }
-        origin = self.headers.get("Origin")
         allowed_origins = {f"http://{value}" for value in allowed_hosts}
         if host not in allowed_hosts or (
             origin is not None and origin not in allowed_origins
@@ -347,6 +640,9 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                 "State-changing requests are accepted only from this local UI.",
             )
             return False
+        return self._allow_json_content_type()
+
+    def _allow_json_content_type(self) -> bool:
         content_type = self.headers.get("Content-Type", "")
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length == 0 and not content_type:
@@ -513,6 +809,7 @@ class UiRequestHandler(BaseHTTPRequestHandler):
 class UiHttpServer(ThreadingHTTPServer):
     service: UiRunService
     dashboard: DashboardApplication
+    public_demo: bool
 
     def start_test_automation(self) -> None:
         self._automation_stop = threading.Event()
@@ -543,8 +840,10 @@ def build_server(
     port: int = 8878,
     runs_root: Path = Path("runs"),
     authenticator: Any | None = None,
+    public_demo: bool = False,
 ) -> UiHttpServer:
     server = UiHttpServer(("127.0.0.1", port), UiRequestHandler)
+    server.public_demo = public_demo
     server.service = UiRunService(runs_root)
     server.dashboard = DashboardApplication(
         runs_root,
@@ -560,10 +859,17 @@ def serve_ui(
     port: int = 8878,
     runs_root: Path = Path("runs"),
     open_browser: bool = True,
+    public_demo: bool = False,
 ) -> None:
-    server = build_server(port=port, runs_root=runs_root)
+    server = build_server(
+        port=port,
+        runs_root=runs_root,
+        public_demo=public_demo,
+    )
     url = f"http://127.0.0.1:{server.server_port}"
     print(f"MOX-ADV UI: {url}")
+    if public_demo:
+        print("Temporary public-demo origin support is enabled.")
     print("Press Ctrl+C to stop.")
     if open_browser:
         threading.Timer(0.25, lambda: webbrowser.open(url)).start()

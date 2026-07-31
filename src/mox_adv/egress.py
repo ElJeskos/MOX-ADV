@@ -30,6 +30,7 @@ class MatrixAccessClass(str, Enum):
 
 class CredentialAccess(str, Enum):
     DIRECT_REPORTS_READ_ONLY = "direct_reports_read_only"
+    METRIKA_PROD_READ_ONLY = "metrika_read_only"
     DIRECT_PILOT_WRITE = "one_allowlisted_account_write_disabled_by_default"
     METRIKA_TEST = "one_test_counter_read_write"
     METRIKA_PILOT = "one_pilot_counter_candidate_goal_write"
@@ -39,6 +40,7 @@ class CredentialAccess(str, Enum):
 
 class CredentialProfile(str, Enum):
     DIRECT_PROD_READ = "DIRECT_PROD_READ"
+    METRIKA_PROD_READ = "METRIKA_PROD_READ"
     DIRECT_PILOT_WRITE = "DIRECT_PILOT_WRITE"
     METRIKA_TEST_WRITE = "METRIKA_TEST_WRITE"
     METRIKA_PILOT_WRITE = "METRIKA_PILOT_WRITE"
@@ -51,13 +53,20 @@ _CREDENTIAL_ACCESS_BY_MATRIX_CLASS = {
         {CredentialAccess.DIRECT_REPORTS_READ_ONLY}
     ),
     (EgressSystem.DIRECT, MatrixAccessClass.MANAGEMENT_READBACK): frozenset(
-        {CredentialAccess.DIRECT_PILOT_WRITE}
+        {
+            CredentialAccess.DIRECT_REPORTS_READ_ONLY,
+            CredentialAccess.DIRECT_PILOT_WRITE,
+        }
     ),
     (EgressSystem.DIRECT, MatrixAccessClass.INTEGRATION_WRITE_ONLY): frozenset(
         {CredentialAccess.DIRECT_PILOT_WRITE}
     ),
     (EgressSystem.METRIKA, MatrixAccessClass.READ_ONLY): frozenset(
-        {CredentialAccess.METRIKA_TEST, CredentialAccess.METRIKA_PILOT}
+        {
+            CredentialAccess.METRIKA_PROD_READ_ONLY,
+            CredentialAccess.METRIKA_TEST,
+            CredentialAccess.METRIKA_PILOT,
+        }
     ),
     (EgressSystem.METRIKA, MatrixAccessClass.GOAL_READBACK): frozenset(
         {CredentialAccess.METRIKA_TEST, CredentialAccess.METRIKA_PILOT}
@@ -71,6 +80,7 @@ _CREDENTIAL_ACCESS_BY_MATRIX_CLASS = {
 }
 _PROFILE_BINDING_FIELD = {
     CredentialProfile.DIRECT_PROD_READ: "direct_account",
+    CredentialProfile.METRIKA_PROD_READ: "metrika_counter",
     CredentialProfile.DIRECT_PILOT_WRITE: "direct_account",
     CredentialProfile.METRIKA_TEST_WRITE: "test_counter",
     CredentialProfile.METRIKA_PILOT_WRITE: "pilot_counter",
@@ -133,7 +143,11 @@ class EgressAuthority:
 class HttpEgressGuard:
     """Authorize only an exact matrix entry and reject every redirect."""
 
-    def __init__(self, policy: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        policy: Mapping[str, Any],
+        production_read_bindings: Mapping[str, Any] | None = None,
+    ) -> None:
         record = policy.get("record")
         self._production_write_authorized = bool(
             isinstance(record, Mapping)
@@ -157,10 +171,24 @@ class HttpEgressGuard:
             for item in policy["credentials"]["profiles"]
         }
         pilot_bindings = policy["bindings"]["pilot"]
-        self._profile_bindings = {
-            profile: pilot_bindings[_PROFILE_BINDING_FIELD[profile]]
-            for profile in CredentialProfile
-        }
+        read_bindings = production_read_bindings or {}
+        self._profile_bindings = {}
+        for profile in CredentialProfile:
+            field = _PROFILE_BINDING_FIELD[profile]
+            if profile in {
+                CredentialProfile.DIRECT_PROD_READ,
+                CredentialProfile.METRIKA_PROD_READ,
+            }:
+                value = read_bindings.get(field)
+                if value is None:
+                    value = pilot_bindings.get(
+                        "pilot_counter"
+                        if profile == CredentialProfile.METRIKA_PROD_READ
+                        else field
+                    )
+            else:
+                value = pilot_bindings[field]
+            self._profile_bindings[profile] = value
         self._profile_counters = {
             profile: pilot_bindings[field]
             for profile, field in _PROFILE_COUNTER_FIELD.items()

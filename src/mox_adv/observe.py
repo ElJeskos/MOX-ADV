@@ -24,9 +24,12 @@ from mox_adv.contracts import (
     AuditVerification,
     BaselineAggregate,
     ConnectedAnalytics,
+    DirectCampaignStateBlock,
     DirectCampaignStateReadQuery,
+    DirectReportBlock,
     DirectReportsReadQuery,
     IntegratedPerformanceSnapshot,
+    MetrikaReportBlock,
     MetrikaReportReadQuery,
     RunOutcome,
     TrustedAnalyticsScope,
@@ -173,6 +176,35 @@ def read_observe_snapshot(
             attribution=str(policy["attribution"]["metrika"]),
         )
     )
+    return build_observe_snapshot_from_blocks(
+        policy=policy,
+        observation_id=observation_id,
+        generated_at=generated_at,
+        period_start=period_start,
+        period_end=period_end,
+        trusted_scope=trusted_scope,
+        direct_block=direct_block,
+        state_block=state_block,
+        metrika_block=metrika_block,
+        baseline=baseline,
+    )
+
+
+def build_observe_snapshot_from_blocks(
+    *,
+    policy: Mapping[str, Any],
+    observation_id: str,
+    generated_at: str,
+    period_start: str,
+    period_end: str,
+    trusted_scope: TrustedAnalyticsScope,
+    direct_block: DirectReportBlock,
+    state_block: DirectCampaignStateBlock,
+    metrika_block: MetrikaReportBlock,
+    baseline: Optional[BaselineAggregate] = None,
+) -> IntegratedPerformanceSnapshot:
+    """Normalize already collected typed blocks at their completion time."""
+
     connected = ConnectedAnalytics(
         observation_id=observation_id,
         generated_at=generated_at,

@@ -40,6 +40,7 @@ def draft_payload() -> dict[str, object]:
     return {
         "schema_version": "campaign-draft-v1",
         "draft_id": "draft-campaign-1",
+        "name": "Lead service",
         "business_goal": {
             "event": "lead_submitted",
             "meaning": "A visitor submitted the lead form.",
@@ -142,7 +143,9 @@ class CampaignDraftValidationTests(unittest.TestCase):
         draft = validate_campaign_draft(draft_payload(), policy, safety_bindings())
 
         self.assertEqual("UNIFIED_CAMPAIGN", draft.campaign_type)
-        self.assertEqual(("A", "B"), tuple(ad["variant_id"] for ad in draft.groups[0]["ads"]))
+        self.assertEqual(
+            ("A", "B"), tuple(ad["variant_id"] for ad in draft.groups[0]["ads"])
+        )
 
         rejected_values = []
         wrong_campaign = draft_payload()
@@ -159,9 +162,9 @@ class CampaignDraftValidationTests(unittest.TestCase):
         rejected_values.append(duplicate_copy)
 
         foreign_landing = draft_payload()
-        foreign_landing["groups"][0]["ads"][1][
-            "landing_page"
-        ] = "https://other.example/lead"
+        foreign_landing["groups"][0]["ads"][1]["landing_page"] = (
+            "https://other.example/lead"
+        )
         rejected_values.append(foreign_landing)
 
         prohibited_copy = draft_payload()
@@ -169,9 +172,7 @@ class CampaignDraftValidationTests(unittest.TestCase):
         rejected_values.append(prohibited_copy)
 
         unprepared_media = draft_payload()
-        unprepared_media["groups"][0]["ads"][1][
-            "media_reference"
-        ] = "unprepared-media"
+        unprepared_media["groups"][0]["ads"][1]["media_reference"] = "unprepared-media"
         unprepared_media["media_references"].append("unprepared-media")
         rejected_values.append(unprepared_media)
 
@@ -221,7 +222,9 @@ class CampaignLifecycleTests(unittest.TestCase):
             safety_bindings=safety_bindings(),
         )
 
-    def test_saga_resumes_each_ordered_step_and_repeating_key_is_idempotent(self) -> None:
+    def test_saga_resumes_each_ordered_step_and_repeating_key_is_idempotent(
+        self,
+    ) -> None:
         expected_steps = (
             "CAMPAIGN_ADD",
             "AD_GROUP_ADD",
@@ -235,13 +238,13 @@ class CampaignLifecycleTests(unittest.TestCase):
 
         for expected_completed_count in range(1, len(expected_steps) + 1):
             result = self.service().execute(self.request, NOW, max_steps=1)
-            self.assertEqual(expected_steps[:expected_completed_count], result.completed_steps)
+            self.assertEqual(
+                expected_steps[:expected_completed_count], result.completed_steps
+            )
             if expected_completed_count == 1:
                 self.assertEqual(
                     "USED",
-                    self.store.campaign_approval_status(
-                        self.request.approval_id
-                    ),
+                    self.store.campaign_approval_status(self.request.approval_id),
                 )
 
         self.assertEqual(CampaignSagaState.APPLIED, result.status)
@@ -287,7 +290,9 @@ class CampaignLifecycleTests(unittest.TestCase):
 
         self.assertEqual(calls_before, tuple(self.adapter.calls))
 
-    def test_missing_expired_or_used_creation_reservation_blocks_before_write(self) -> None:
+    def test_missing_expired_or_used_creation_reservation_blocks_before_write(
+        self,
+    ) -> None:
         cases = (
             replace(self.request, reservation_id="missing"),
             replace(self.request, proposal_id="different-proposal"),
@@ -340,7 +345,9 @@ class CampaignLifecycleTests(unittest.TestCase):
             self.store.campaign_approval_status(self.request.approval_id),
         )
 
-    def test_restart_after_persisted_dispatch_never_repeats_an_unknown_write(self) -> None:
+    def test_restart_after_persisted_dispatch_never_repeats_an_unknown_write(
+        self,
+    ) -> None:
         canonical_plan = self.request.canonical_plan(str(self.policy["policy_id"]))
         approver = self.policy["principals"]["approver"]
         self.store.start_or_load(
@@ -377,7 +384,11 @@ class CampaignLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(
             {"Campaigns", "AdGroups", "Ads", "Keywords"},
-            {service_name for service_name, method, _ in adapter.calls if method == "delete"},
+            {
+                service_name
+                for service_name, method, _ in adapter.calls
+                if method == "delete"
+            },
         )
 
     def test_failed_compensation_requires_reconciliation(self) -> None:
@@ -440,7 +451,9 @@ class CampaignLifecycleTests(unittest.TestCase):
             unbound_service.execute(self.request, NOW)
         self.assertEqual([], self.adapter.calls)
 
-    def test_full_readback_rejects_structure_that_diverges_from_canonical_plan(self) -> None:
+    def test_full_readback_rejects_structure_that_diverges_from_canonical_plan(
+        self,
+    ) -> None:
         first = self.service().execute(self.request, NOW, max_steps=7)
         campaign_id = next(
             item.object_id
@@ -695,7 +708,9 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
         self.assertEqual(required, observed)
         self.assertEqual((), self.adapter.object_ids())
 
-    def test_invalid_transition_and_foreign_archive_delete_are_preflight_rejected(self) -> None:
+    def test_invalid_transition_and_foreign_archive_delete_are_preflight_rejected(
+        self,
+    ) -> None:
         foreign_campaign = self.adapter.seed_object(
             "Campaigns",
             {"type": "UNIFIED_CAMPAIGN", "state": "ON"},
@@ -710,7 +725,9 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
 
         self.assertEqual([], self.adapter.calls)
 
-    def test_non_fake_connector_is_disabled_without_validated_pilot_authority(self) -> None:
+    def test_non_fake_connector_is_disabled_without_validated_pilot_authority(
+        self,
+    ) -> None:
         class NonFakeAdapter:
             is_fake = False
 

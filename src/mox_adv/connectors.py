@@ -135,8 +135,8 @@ class DirectReportsReadConnectorV1:
             VersionedReadRequest(
                 system="DIRECT_REPORTS",
                 host="api.direct.yandex.com",
-                path="/json/v5/reports",
-                version="v5",
+                path="/json/v501/reports",
+                version="v501",
                 service="Reports",
                 method="get",
                 http_verb="POST",
