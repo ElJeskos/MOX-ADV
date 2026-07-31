@@ -10,6 +10,7 @@ import unittest
 from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Optional
 from unittest import mock
@@ -33,8 +34,12 @@ from mox_adv.control_state import (
     AuthenticatedPrincipal,
     ControlRejected,
     DurableControlState,
+    ElevatedAuthenticatedPrincipal,
     ExecutionStatus,
+    MacOSElevatedSecurityVerifier,
     MacOSLocalPrincipalAuthenticator,
+    TerminalExecutionRequest,
+    TerminalNoWritePlan,
 )
 from mox_adv.egress import (
     CredentialProfile,
@@ -52,6 +57,7 @@ from mox_adv.trust_boundary import (
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "config" / "gate0-policy.json"
+CASE04_FIXTURES = ROOT / "fixtures" / "policy-executor-case04.json"
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
 
 
@@ -62,18 +68,16 @@ class FixedAuthenticator:
             authentication="authenticated_macos_user",
         )
 
-    def elevated_reauthenticate(self) -> AuthenticatedPrincipal:
-        return self.authenticate()
-
-
-class RecordingElevatedVerifier:
-    def __init__(self, allowed: bool) -> None:
-        self.allowed = allowed
-        self.calls = 0
-
-    def verify(self, principal: AuthenticatedPrincipal) -> bool:
-        self.calls += 1
-        return self.allowed and principal.identity == "sviridov"
+    def elevated_reauthenticate(self) -> ElevatedAuthenticatedPrincipal:
+        with mock.patch.object(
+            MacOSElevatedSecurityVerifier,
+            "verify",
+            return_value=True,
+        ):
+            return ElevatedAuthenticatedPrincipal.verified(
+                self.authenticate(),
+                MacOSElevatedSecurityVerifier(),
+            )
 
 
 class RejectingPreWriteAudit:
@@ -200,7 +204,24 @@ class CommandContractTests(unittest.TestCase):
                 if "BUDGET" in action or "BID" in action:
                     diff["relative_step_percent"] = 10
                 elif action == "SET_AD_VARIANT":
-                    diff["variant_id"] = target
+                    current = {
+                        "variant_id": current,
+                        "title": "Prepared title A",
+                        "text": "Prepared text A",
+                    }
+                    target = {
+                        "variant_id": target,
+                        "title": "Prepared title B",
+                        "text": "Prepared text B",
+                    }
+                    diff.update(
+                        {
+                            "variant_id": target["variant_id"],
+                            "title": target["title"],
+                            "text": target["text"],
+                            "source_plan_hash": "sha256:" + "7" * 64,
+                        }
+                    )
                 else:
                     diff["target_state"] = target
                 prepared = replace(
@@ -222,10 +243,197 @@ class CommandContractTests(unittest.TestCase):
                 self.assertEqual(prepared.proposal_id, command.proposal_id)
                 self.assertEqual(prepared.execution_key(), command.execution_key)
                 self.assertTrue(command.readback_required)
+                if action == "SET_AD_VARIANT":
+                    self.assertEqual("Prepared title B", command.title)
+                    self.assertEqual("Prepared text B", command.text)
                 self.assertEqual(
                     "sha256:" + "2" * 64,
                     command.expected_fingerprint,
                 )
+
+
+class RequiredCase04FixtureTests(unittest.TestCase):
+    def test_all_eight_named_fixtures_cross_calculation_policy_executor_readback(
+        self,
+    ) -> None:
+        policy = load_policy()
+        document = json.loads(CASE04_FIXTURES.read_text(encoding="utf-8"))
+        fixtures = document["fixtures"]
+        expected_names = {
+            "BUDGET_INCREASE_ON",
+            "BUDGET_DECREASE_ON",
+            "BID_INCREASE_ON",
+            "BID_DECREASE_ON",
+            "LOW_CTR_ON",
+            "NO_CONVERSION_ON",
+            "EFFECTIVE_SUSPENDED",
+            "INSUFFICIENT_ON",
+        }
+        self.assertEqual(expected_names, {item["name"] for item in fixtures})
+        self.assertEqual(8, len(fixtures))
+
+        for fixture in fixtures:
+            with self.subTest(fixture=fixture["name"]):
+                with tempfile.TemporaryDirectory() as temporary:
+                    state = DurableControlState(
+                        Path(temporary) / "control.sqlite3"
+                    )
+                    adapter = FakeWriteAdapter()
+                    action_name = fixture["action"]
+                    cpa = (
+                        "NOT_APPLICABLE"
+                        if fixture["conversions"] == 0
+                        else str(
+                            Decimal(fixture["spend_rub"])
+                            / Decimal(fixture["conversions"])
+                        )
+                    )
+                    utilization = str(
+                        Decimal(fixture["spend_rub"])
+                        / Decimal(fixture["weekly_budget_rub"])
+                        * Decimal(100)
+                    )
+                    ctr = str(
+                        Decimal(fixture["clicks"])
+                        / Decimal(fixture["impressions"])
+                        * Decimal(100)
+                    )
+                    self.assertGreaterEqual(fixture["visits"], 0)
+
+                    if action_name == "KEEP":
+                        plan = TerminalNoWritePlan(
+                            proposal_id=fixture["proposal_name"],
+                            proposal_hash="sha256:" + "8" * 64,
+                            snapshot_id="snapshot-" + fixture["name"].lower(),
+                            policy_version=str(policy["policy_id"]),
+                            status="INSUFFICIENT_DATA",
+                            action="KEEP",
+                            reason_code=None,
+                        )
+                        state.register_terminal_fixture_plan(plan)
+                        outcome = ApprovalExecutionService(
+                            policy,
+                            state,
+                            adapter,
+                            clock=lambda: NOW,
+                        ).execute(
+                            TerminalExecutionRequest(
+                                proposal_id=plan.proposal_id
+                            )
+                        )
+                        self.assertEqual(ExecutionStatus.NO_CHANGE, outcome.status)
+                        self.assertEqual(0, adapter.write_calls)
+                        continue
+
+                    action = OptimizationAction(action_name)
+                    if "WEEKLY_BUDGET" in action_name:
+                        current = fixture["weekly_budget_rub"] * 1_000_000
+                        target = fixture["expected_value"] * 1_000_000
+                        diff = {
+                            "operation": action_name,
+                            "relative_step_percent": 10,
+                        }
+                    elif "SEARCH_BID" in action_name:
+                        current = fixture["search_bid_rub"] * 1_000_000
+                        target = fixture["expected_value"] * 1_000_000
+                        diff = {
+                            "operation": action_name,
+                            "relative_step_percent": 10,
+                        }
+                    elif action_name == "SET_AD_VARIANT":
+                        variants = fixture["prepared_variants"]
+                        current = {
+                            "variant_id": "A",
+                            **variants["A"],
+                        }
+                        target = {
+                            "variant_id": "B",
+                            **variants["B"],
+                        }
+                        diff = {
+                            "operation": action_name,
+                            "variant_id": "B",
+                            "title": target["title"],
+                            "text": target["text"],
+                            "source_plan_hash": "sha256:" + "9" * 64,
+                        }
+                    else:
+                        current = fixture["state"]
+                        target = fixture["expected_value"]
+                        diff = {
+                            "operation": action_name,
+                            "target_state": target,
+                        }
+                    prepared = PreparedChange(
+                        proposal_id=fixture["proposal_name"],
+                        proposal_hash="sha256:" + "7" * 64,
+                        scope=make_scope(),
+                        action=action,
+                        current_value=current,
+                        target_value=target,
+                        expected_diff=diff,
+                        snapshot_id="snapshot-" + fixture["name"].lower(),
+                        snapshot_generated_at="2026-07-29T11:55:00+00:00",
+                        direct_watermark="2026-07-29T11:55:00+00:00",
+                        metrika_watermark="2026-07-29T11:55:00+00:00",
+                        policy_version=str(policy["policy_id"]),
+                        expected_fingerprint="sha256:" + "6" * 64,
+                        risk="CASE04_FIXTURE",
+                    )
+                    state.register_prepared_change(prepared)
+                    state.grant_approval(
+                        prepared.proposal_id,
+                        NOW + timedelta(minutes=15),
+                        "Approve exact named Case 04 fixture.",
+                        FixedAuthenticator().authenticate(),
+                        NOW,
+                    )
+                    facts = ExecutionFacts(
+                        mode="APPROVAL_REQUIRED",
+                        automation_enabled=True,
+                        comparability_status="COMPARABLE",
+                        confidence_status="READY",
+                        financial_recommendations_allowed=True,
+                        direct_age_minutes=5,
+                        metrika_age_minutes=5,
+                        watermark_skew_minutes=1,
+                        clicks=fixture["clicks"],
+                        conversions=fixture["conversions"],
+                        impressions=fixture["impressions"],
+                        spend_rub=fixture["spend_rub"],
+                        cpa_rub=cpa,
+                        budget_utilization_percent=utilization,
+                        ctr_percent=ctr,
+                        campaign_state=fixture["state"],
+                        campaign_strategy="HIGHEST_POSITION",
+                        current_fingerprint=prepared.expected_fingerprint,
+                        cooldown_active=False,
+                        actions_in_last_24h=0,
+                        cumulative_daily_change_percent=0,
+                        monetary_exposure_rub=0,
+                        kill_switch_available=True,
+                    )
+                    request = ExecutionRequest(
+                        proposal_id=prepared.proposal_id,
+                        execution_key=prepared.execution_key(),
+                        scope=prepared.scope,
+                        facts=facts,
+                    )
+                    service = ApprovalExecutionService(
+                        policy,
+                        state,
+                        FakeWriteAdapter(
+                            initial_state={
+                                prepared.target_key(): prepared.current_value
+                            }
+                        ),
+                        clock=lambda: NOW,
+                    )
+                    decision = service.policy.evaluate(prepared, request)
+                    self.assertTrue(decision.allowed, decision.reason_code)
+                    outcome = service.execute(request)
+                    self.assertEqual(ExecutionStatus.APPLIED, outcome.status)
+                    self.assertEqual(target, outcome.observed_value)
 
 
 class ApprovalExecutionTests(unittest.TestCase):
@@ -873,32 +1081,38 @@ class KillSwitchAndCliTests(unittest.TestCase):
     def test_elevated_reauthentication_uses_a_separate_fail_closed_verifier(
         self,
     ) -> None:
-        allowed = RecordingElevatedVerifier(True)
-        with mock.patch(
-            "mox_adv.control_state.getpass.getuser",
-            return_value="sviridov",
-        ):
-            principal = MacOSLocalPrincipalAuthenticator(
-                elevated_verifier=allowed
-            ).elevated_reauthenticate()
-        self.assertEqual("sviridov", principal.identity)
-        self.assertEqual(1, allowed.calls)
-
-        denied = RecordingElevatedVerifier(False)
         with (
             mock.patch(
                 "mox_adv.control_state.getpass.getuser",
                 return_value="sviridov",
             ),
+            mock.patch(
+                "mox_adv.control_state.subprocess.run",
+                return_value=mock.Mock(returncode=0),
+            ) as allowed,
+        ):
+            principal = (
+                MacOSLocalPrincipalAuthenticator().elevated_reauthenticate()
+            )
+        self.assertEqual("sviridov", principal.identity)
+        self.assertEqual(1, allowed.call_count)
+
+        with (
+            mock.patch(
+                "mox_adv.control_state.getpass.getuser",
+                return_value="sviridov",
+            ),
+            mock.patch(
+                "mox_adv.control_state.subprocess.run",
+                return_value=mock.Mock(returncode=1),
+            ) as denied,
             self.assertRaisesRegex(
                 ControlRejected,
                 "ELEVATED_REAUTHENTICATION_FAILED",
             ),
         ):
-            MacOSLocalPrincipalAuthenticator(
-                elevated_verifier=denied
-            ).elevated_reauthenticate()
-        self.assertEqual(1, denied.calls)
+            MacOSLocalPrincipalAuthenticator().elevated_reauthenticate()
+        self.assertEqual(1, denied.call_count)
 
 
 class EgressGuardTests(unittest.TestCase):

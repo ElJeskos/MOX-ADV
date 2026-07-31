@@ -33,4 +33,11 @@ A successful pilot write produces a new snapshot after the observation window an
 The report may inform a later LLM recommendation, but every later action requires a new proposal and a new confirmation.
 Without a pre-approved experimental design, the observed result is not described as causal impact.
 
+The loop does not end at a successful write.
+A serving-impacting action opens an observation window, after which deterministic code creates an `ImpactReportV1`.
+The orchestrator then starts a new analysis run and requires exactly one new immutable post-change `OptimizationProposalV1`.
+
+MCP may adapt high-level commands to the orchestrator or internal API.
+It is optional and is never the core contract, source of authority, or security boundary.
+
 [^requirements-v2]: [MOX-ADV prototype requirements](../../requirements-v2-prototype.md), goal, `FR-001`, `FR-005` through `FR-009`, and `NFR-004`.

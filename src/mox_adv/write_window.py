@@ -34,11 +34,21 @@ class DurableWriteWindowCoordinator:
                 "durable cooldown and observation window block the unsent command.",
             )
 
+    def release(self, execution_key: str) -> None:
+        try:
+            self.gate.release(execution_key)
+        except (MonitoringRejected, sqlite3.Error) as error:
+            raise self._state_unavailable() from error
+
     def settle(self, execution_key: str, status: ExecutionStatus) -> None:
         try:
             if status == ExecutionStatus.APPLIED:
                 self.gate.activate(execution_key, self.clock())
-            elif status == ExecutionStatus.FAILED:
+            elif status in {
+                ExecutionStatus.BLOCKED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.NO_CHANGE,
+            }:
                 self.gate.release(execution_key)
         except (MonitoringRejected, sqlite3.Error) as error:
             raise self._state_unavailable() from error

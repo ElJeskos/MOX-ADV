@@ -265,7 +265,7 @@ class IntegratedAnalyticsTests(unittest.TestCase):
         )
         self.assertFalse(snapshot.financial_recommendations_allowed)
 
-    def test_pacing_uses_expected_spend_at_current_period_point(self) -> None:
+    def test_pacing_rejects_a_report_partial_to_the_budget_period(self) -> None:
         policy, fixture = linked_input()
         fixture["generated_at"] = "2026-07-24T12:00:00+00:00"
         fixture["direct_report"]["source"] = "DIRECT_REPORTS"
@@ -281,12 +281,19 @@ class IntegratedAnalyticsTests(unittest.TestCase):
 
         snapshot = build_snapshot(fixture, policy)
 
-        self.assertEqual("COMPARABLE", snapshot.comparability_status)
+        self.assertEqual("PARTIAL", snapshot.comparability_status)
+        self.assertIn(
+            "PACING_BUDGET_PERIOD_MISMATCH",
+            snapshot.data_quality_gaps,
+        )
         self.assertEqual(
             "20.00",
             snapshot.display_metrics["budget_utilization_percent"],
         )
-        self.assertEqual("40.00", snapshot.display_metrics["pacing_percent"])
+        self.assertEqual(
+            "NOT_APPLICABLE",
+            snapshot.display_metrics["pacing_percent"],
+        )
 
     def test_pacing_budget_period_start_boundary_is_not_applicable(self) -> None:
         policy, fixture = linked_input()
@@ -300,7 +307,11 @@ class IntegratedAnalyticsTests(unittest.TestCase):
 
         snapshot = build_snapshot(fixture, policy)
 
-        self.assertEqual("COMPARABLE", snapshot.comparability_status)
+        self.assertEqual("PARTIAL", snapshot.comparability_status)
+        self.assertIn(
+            "PACING_BUDGET_PERIOD_MISMATCH",
+            snapshot.data_quality_gaps,
+        )
         self.assertEqual(
             "NOT_APPLICABLE",
             snapshot.display_metrics["pacing_percent"],

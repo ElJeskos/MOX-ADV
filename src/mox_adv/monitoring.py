@@ -835,6 +835,7 @@ class DurableWriteWindowGate:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(str(self.path), isolation_level=None)
         try:
+            connection.execute("PRAGMA busy_timeout = 250")
             yield connection
         except BaseException:
             connection.rollback()
@@ -876,9 +877,9 @@ class MonitoringScheduler:
         self.anomaly_policy = Gate0AnomalyPolicy(policy)
 
     def poll(self) -> MonitoringOutcome:
-        now = _utc(self.clock())
+        claimed_at = _utc(self.clock())
         interval = timedelta(minutes=int(self.policy["monitoring"]["poll_minutes"]))
-        claim = self.store.claim_poll(now, interval, self.lease_timeout)
+        claim = self.store.claim_poll(claimed_at, interval, self.lease_timeout)
         if claim is None:
             return MonitoringOutcome(status="NOT_DUE", snapshot_id=None)
         try:
@@ -893,11 +894,12 @@ class MonitoringScheduler:
                 snapshot.as_dict()
             ):
                 raise MonitoringRejected("Snapshot fingerprint is invalid.")
+            evaluated_at = _utc(self.clock())
             self.store.heartbeat_poll(claim, _utc(self.clock()), self.lease_timeout)
-            anomalies = self.anomaly_policy.evaluate(monitoring_read, now)
+            anomalies = self.anomaly_policy.evaluate(monitoring_read, evaluated_at)
             write_blocked, block_reason = self._write_window(
                 monitoring_read.last_applied_write_at,
-                now,
+                evaluated_at,
             )
             safe_for_financial_proposal = (
                 snapshot.comparability_status == "COMPARABLE"
@@ -924,7 +926,7 @@ class MonitoringScheduler:
                     reason_code=anomaly.reason_code,
                     observed_value=anomaly.observed_value,
                     threshold=anomaly.threshold,
-                    created_at=now.isoformat(),
+                    created_at=evaluated_at.isoformat(),
                 )
                 for anomaly in anomalies
             )
@@ -932,7 +934,7 @@ class MonitoringScheduler:
                 claim,
                 snapshot,
                 proposal_reason_codes,
-                _utc(self.clock()),
+                evaluated_at,
             )
             outcome = MonitoringOutcome(
                 status="POLLED",

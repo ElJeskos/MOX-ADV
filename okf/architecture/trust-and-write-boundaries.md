@@ -39,4 +39,8 @@ Before a write, deterministic checks bind the allowlisted scope, exact proposal 
 A timeout triggers readback rather than a blind retry.
 An unknown result blocks the next write until manual verification.
 
+A timeout or lost response never permits a blind write retry.
+Readback and reconciliation classify the observed state as applied, failed, or unknown.
+An unknown result blocks further actions until human reconciliation.
+
 [^requirements-v2]: [MOX-ADV prototype requirements](../../requirements-v2-prototype.md), `FR-004`, `FR-005`, `FR-008`, `NFR-003`, and `NFR-004`.

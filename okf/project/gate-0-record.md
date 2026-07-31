@@ -3,6 +3,7 @@ type: Decision Record
 title: Gate 0 Record
 description: Points consumers to the approved machine-readable Gate 0 decisions and their production-write boundary.
 tags: [project, readiness, gate-0, safety]
+timestamp: "2026-07-29T19:43:56Z"
 generated:
   by: "codex/gpt-5"
   at: "2026-07-29T19:43:56Z"

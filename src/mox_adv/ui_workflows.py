@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlencode
 
+from mox_adv.application_control import ApplicationWriteBoundary
 from mox_adv.campaign_lifecycle import (
     CampaignApproval,
     CampaignCreationRequest,
@@ -58,6 +59,9 @@ from mox_adv.impact import (
     ImpactObservation,
     ImpactRejected,
 )
+from mox_adv.lifecycle_authority import LifecycleAuthorityService
+from mox_adv.mandate_signing import HMACMandateSigner
+from mox_adv.control_state import TrustedScope
 
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 ControlledPilotExecutor = Callable[
@@ -251,7 +255,17 @@ class DashboardWorkflowFacade:
         )
         request = self._campaign_request(run_id, proposal_id, draft)
         state_path = run_directory / "campaign_state.sqlite3"
-        store = CampaignSagaStore(state_path)
+        write_boundary = ApplicationWriteBoundary.for_isolated_test(
+            state_path,
+            self.policy,
+            lambda: now,
+        )
+        lifecycle_authority = LifecycleAuthorityService(
+            self.policy,
+            _SimulatedPrincipalAuthenticator(self.policy),
+            HMACMandateSigner(b"dashboard-lifecycle-authority-key"),
+        )
+        store = CampaignSagaStore(state_path, lifecycle_authority)
         simulation = self.policy["bindings"]["simulation"]
         store.register_creation_reservation(
             CampaignCreationReservation(
@@ -274,13 +288,26 @@ class DashboardWorkflowFacade:
                 approver=str(principal["identity"]),
                 authentication=str(principal["authentication"]),
                 expires_at=now + timedelta(minutes=15),
-            )
+            ),
+            now,
         )
         adapter = FakeDirectManagementAdapter()
         service = CampaignLifecycleService(
             self.policy,
             store,
-            DirectManagementConnectorV1(self.policy, adapter, store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                store,
+                write_boundary=write_boundary,
+                trusted_scope=TrustedScope(
+                    organization=str(simulation["organization"]),
+                    connection=str(simulation["connection"]),
+                    account=str(simulation["direct_account"]),
+                    campaign="dashboard-campaign-lifecycle",
+                    writer=str(simulation["single_writer"]),
+                ),
+            ),
             self.campaign_safety,
         )
         saga = service.execute(request, now)
@@ -632,7 +659,17 @@ class DashboardWorkflowFacade:
         site_zone = str(simulation["test_site_zone"])
         reservation_id = str(simulation["test_candidate_goal_reservation"])
         state_path = run_directory / "goal_state.sqlite3"
-        store = GoalLifecycleStore(state_path)
+        write_boundary = ApplicationWriteBoundary.for_isolated_test(
+            state_path,
+            self.policy,
+            lambda: now,
+        )
+        lifecycle_authority = LifecycleAuthorityService(
+            self.policy,
+            _SimulatedPrincipalAuthenticator(self.policy),
+            HMACMandateSigner(b"dashboard-lifecycle-authority-key"),
+        )
+        store = GoalLifecycleStore(state_path, lifecycle_authority)
         goal_adapter = FakeMetrikaGoalAdapter(
             (counter_id, str(simulation["pilot_counter"]))
         )
@@ -648,6 +685,7 @@ class DashboardWorkflowFacade:
             goal_adapter,
             site_adapter,
             _SimulatedPrincipalAuthenticator(self.policy),
+            write_boundary,
         )
         store.register_reservation(
             GoalCreationReservation(
@@ -675,7 +713,7 @@ class DashboardWorkflowFacade:
                 preview["authority_requirement"]["goal_creation"]["exact_binding"]
             ),
         )
-        store.register_authority(creation_authority)
+        store.register_authority(creation_authority, now)
         candidate = service.create_candidate(
             run_id=run_id,
             proposal_id=proposal_id,
@@ -709,7 +747,7 @@ class DashboardWorkflowFacade:
                 exact_diff=exact_site_diff,
             ),
         )
-        store.register_authority(publication_authority)
+        store.register_authority(publication_authority, now)
         publication = service.publish_candidate_event(
             candidate.candidate_id,
             authority_id=publication_authority.authority_id,
@@ -858,7 +896,17 @@ class DashboardWorkflowFacade:
             raise DashboardWorkflowRejected("TECHNICAL_VERIFICATION_SESSION_NOT_FOUND")
         result = json.loads(technical_path.read_text(encoding="utf-8"))
         candidate_id = str(result.get("candidate_id", ""))
-        store = GoalLifecycleStore(state_path)
+        lifecycle_authority = LifecycleAuthorityService(
+            self.policy,
+            _SimulatedPrincipalAuthenticator(self.policy),
+            HMACMandateSigner(b"dashboard-lifecycle-authority-key"),
+        )
+        write_boundary = ApplicationWriteBoundary.for_isolated_test(
+            state_path,
+            self.policy,
+            lambda: datetime.now(timezone.utc),
+        )
+        store = GoalLifecycleStore(state_path, lifecycle_authority)
         candidate = store.load_candidate(candidate_id)
         publication = store.load_publication(candidate_id)
         simulation = self.policy["bindings"]["simulation"]
@@ -893,6 +941,7 @@ class DashboardWorkflowFacade:
             goal_adapter,
             site_adapter,
             _SimulatedPrincipalAuthenticator(self.policy),
+            write_boundary,
         )
         session = {
             "result": result,

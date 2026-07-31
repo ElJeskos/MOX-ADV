@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import socket
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -32,9 +35,7 @@ from mox_adv.trust_boundary import (
 
 CAPABILITY_ACCEPTANCE_CASES = required_capability_contract()
 REQUIRED_CAPABILITIES = tuple(CAPABILITY_ACCEPTANCE_CASES)
-LOCAL_E2E_EXERCISED_CAPABILITIES = frozenset(REQUIRED_CAPABILITIES) - {
-    "CLOSED_LOOP_CONTROL"
-}
+LOCAL_E2E_EXERCISED_CAPABILITIES = frozenset(REQUIRED_CAPABILITIES)
 CAPABILITY_EVIDENCE_PATHS = {
     "CAMPAIGN_LIFECYCLE": (
         "lifecycle-evidence.json",
@@ -83,10 +84,12 @@ CAPABILITY_EVIDENCE_PATHS = {
     "TOOL_CONTRACT": (
         "change_diff.json",
         "lifecycle-evidence.json",
+        "direct-matrix-evidence.json",
         "external-egress.jsonl",
     ),
     "ORIGINAL_INTEGRATION_COVERAGE": (
         "lifecycle-evidence.json",
+        "direct-matrix-evidence.json",
         "external-egress.jsonl",
     ),
     "SAFETY_CORE": (
@@ -95,7 +98,15 @@ CAPABILITY_EVIDENCE_PATHS = {
         "signed-audit-anchor.json",
         "artifact-manifest.json",
     ),
-    "CLOSED_LOOP_CONTROL": (),
+    "CLOSED_LOOP_CONTROL": (
+        "closed-loop-envelope.json",
+        "observe-evidence.json",
+        "proposal.json",
+        "approval.json",
+        "change_diff.json",
+        "impact_report.json",
+        "events.jsonl",
+    ),
 }
 REQUIRED_SUPPLEMENTAL_ARTIFACTS = frozenset(
     {
@@ -106,6 +117,41 @@ REQUIRED_SUPPLEMENTAL_ARTIFACTS = frozenset(
         "observe-evidence.json",
         "monitoring-evidence.json",
         "lifecycle-evidence.json",
+        "closed-loop-envelope.json",
+        "direct-matrix-evidence.json",
+    }
+)
+REQUIRED_DIRECT_METHODS = frozenset(
+    {
+        ("Campaigns", "add"),
+        ("Campaigns", "get"),
+        ("Campaigns", "update"),
+        ("Campaigns", "suspend"),
+        ("Campaigns", "resume"),
+        ("Campaigns", "archive"),
+        ("Campaigns", "unarchive"),
+        ("Campaigns", "delete"),
+        ("AdGroups", "add"),
+        ("AdGroups", "get"),
+        ("AdGroups", "update"),
+        ("AdGroups", "delete"),
+        ("Ads", "add"),
+        ("Ads", "get"),
+        ("Ads", "update"),
+        ("Ads", "suspend"),
+        ("Ads", "resume"),
+        ("Ads", "archive"),
+        ("Ads", "unarchive"),
+        ("Ads", "moderate"),
+        ("Ads", "delete"),
+        ("Keywords", "add"),
+        ("Keywords", "get"),
+        ("Keywords", "update"),
+        ("Keywords", "suspend"),
+        ("Keywords", "resume"),
+        ("Keywords", "delete"),
+        ("KeywordBids", "get"),
+        ("KeywordBids", "set"),
     }
 )
 REQUIRED_RUN_SUMMARY_FIELDS = frozenset(
@@ -121,6 +167,7 @@ REQUIRED_RUN_SUMMARY_FIELDS = frozenset(
         "input_tokens",
         "output_tokens",
         "cost_rub",
+        "model_cost",
         "duration_ms",
         "stage_durations_ms",
         "proposal_id",
@@ -436,6 +483,26 @@ def _report(
         f"Внешних read-запросов: `{len(egress.records)}`.",
         f"Локально перехваченных browser events: `{len(egress.browser_interceptions)}`.",
         (
+            "Модельный тариф: `"
+            + str(run_summary["model_cost"]["provider"])
+            + "/"
+            + str(run_summary["model_cost"]["model_id"])
+            + "`, input `"
+            + str(run_summary["model_cost"]["input_usd_per_million"])
+            + " USD/1M`, output `"
+            + str(run_summary["model_cost"]["output_usd_per_million"])
+            + " USD/1M`."
+        ),
+        (
+            "Курс: `"
+            + str(run_summary["model_cost"]["exchange_rate_rub_per_usd"])
+            + " RUB/USD`; начислено `"
+            + str(run_summary["model_cost"]["charged_cost_rub"])
+            + " ₽` из лимита `"
+            + str(run_summary["model_cost"]["limit_rub"])
+            + " ₽`."
+        ),
+        (
             "Заблокированных browser WebSocket-подключений: `"
             + str(len(egress.browser_websocket_attempts))
             + "`."
@@ -490,6 +557,7 @@ def _validate_run_summary(
     for field in (
         "provenance",
         "metrics",
+        "model_cost",
         "stage_durations_ms",
         "policy_decision",
         "execution",
@@ -500,6 +568,45 @@ def _validate_run_summary(
         value = run_summary[field]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError("The final E2E numeric metadata is invalid.")
+    model_cost = run_summary["model_cost"]
+    required_model_cost = {
+        "provider",
+        "model_id",
+        "currency",
+        "exchange_rate_rub_per_usd",
+        "input_usd_per_million",
+        "output_usd_per_million",
+        "limit_rub",
+        "warning_percent",
+        "charged_cost_rub",
+        "reserved_cost_rub",
+        "call_count",
+        "warning",
+        "exhausted",
+        "configuration_hash",
+    }
+    if (
+        set(model_cost) != required_model_cost
+        or model_cost["provider"] != run_summary["provider"]
+        or model_cost["model_id"] != run_summary["model_id"]
+        or model_cost["currency"] != "RUB"
+        or not isinstance(model_cost["call_count"], int)
+        or isinstance(model_cost["call_count"], bool)
+        or model_cost["call_count"] < 1
+        or not isinstance(model_cost["warning"], bool)
+        or not isinstance(model_cost["exhausted"], bool)
+        or not str(model_cost["configuration_hash"]).startswith("sha256:")
+        or any(
+            not isinstance(model_cost[field], str) or not model_cost[field]
+            for field in required_model_cost
+            - {
+                "call_count",
+                "warning",
+                "exhausted",
+            }
+        )
+    ):
+        raise ValueError("The final E2E model-cost evidence is invalid.")
     execution = run_summary["execution"]
     required_execution = {
         "technical_command",
@@ -516,15 +623,61 @@ def _validate_run_summary(
     approval = supplemental_artifacts["approval.json"]
     change_diff = supplemental_artifacts["change_diff.json"]
     impact = supplemental_artifacts["impact_report.json"]
+    observe = supplemental_artifacts["observe-evidence.json"]
+    envelope = supplemental_artifacts["closed-loop-envelope.json"]
+    direct_matrix = supplemental_artifacts["direct-matrix-evidence.json"]
+    approval_change = change_diff.get("approval_required", {})
+    impact_baseline = impact.get("baseline", {})
+    impact_post = impact.get("post_change", {})
+    matrix_methods = direct_matrix.get("methods")
+    if not isinstance(matrix_methods, list):
+        raise ValueError("The final Direct matrix evidence is invalid.")
+    observed_direct_methods = {
+        (item.get("service"), item.get("method"))
+        for item in matrix_methods
+        if isinstance(item, Mapping)
+    }
     if (
         proposal.get("proposal_id") != run_summary["proposal_id"]
+        or proposal.get("snapshot_id") != run_summary["snapshot_id"]
         or not approval.get("approval_id")
         or approval.get("proposal_id") != run_summary["proposal_id"]
         or not approval.get("used_at")
-        or not change_diff.get("approval_required")
-        or change_diff["approval_required"].get("proposal_id")
-        != run_summary["proposal_id"]
+        or approval_change.get("proposal_id") != run_summary["proposal_id"]
+        or observe.get("snapshot_id") != run_summary["snapshot_id"]
+        or not observe.get("campaign")
         or impact.get("status") != "OBSERVED_POST_CHANGE"
+        or impact_baseline.get("snapshot_id") != run_summary["snapshot_id"]
+        or impact_baseline.get("campaign") != observe.get("campaign")
+        or impact_post.get("campaign") != observe.get("campaign")
+        or envelope.get("snapshot_id") != run_summary["snapshot_id"]
+        or envelope.get("proposal_id") != run_summary["proposal_id"]
+        or envelope.get("execution_key")
+        != approval_change.get("execution_key")
+        or envelope.get("change_id") != impact.get("change_id")
+        or envelope.get("campaign") != observe.get("campaign")
+        or envelope.get("campaign") != approval_change.get("campaign")
+        or envelope.get("impact_campaign") != impact_baseline.get("campaign")
+        or envelope.get("post_snapshot_id") != impact_post.get("snapshot_id")
+        or envelope.get("readback_status") != approval_change.get("status")
+        or envelope.get("next_decision") != impact.get("next_decision")
+        or envelope.get("evidence_type") != "SIMULATED"
+        or envelope.get("capability_status") != "NOT_PROVEN"
+        or direct_matrix.get("evidence_type") != "SIMULATED"
+        or direct_matrix.get("capability_status") != "NOT_PROVEN"
+        or direct_matrix.get("external_write_sent") is not False
+        or direct_matrix.get("method_count")
+        != len(matrix_methods)
+        or observed_direct_methods != REQUIRED_DIRECT_METHODS
+        or any(
+            not isinstance(item, Mapping)
+            or item.get("evidence_type") != "SIMULATED"
+            or item.get("capability_status") != "NOT_PROVEN"
+            or not item.get("fixture_id")
+            or not item.get("request_response_evidence")
+            or not item.get("cleanup_record")
+            for item in matrix_methods
+        )
     ):
         raise ValueError("The final E2E stage artifacts are inconsistent.")
 
@@ -535,6 +688,160 @@ def _artifact_digest(path: Path) -> Mapping[str, Any]:
         "sha256": hashlib.sha256(content).hexdigest(),
         "size_bytes": len(content),
     }
+
+
+def record_completed_stage_artifacts(
+    workspace: RunWorkspace,
+    *,
+    stage: str,
+    artifacts: Mapping[str, Mapping[str, Any]],
+) -> None:
+    if not stage or not artifacts:
+        raise ValueError("Completed stage evidence must be named and non-empty.")
+    invalid = set(artifacts).difference(REQUIRED_SUPPLEMENTAL_ARTIFACTS)
+    if invalid:
+        raise ValueError("Completed stage evidence contains an unknown artifact.")
+    registry_path = workspace.path / "completed-stage-evidence.json"
+    if registry_path.exists():
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    else:
+        registry = {
+            "schema_version": "readonly-e2e-completed-stages-v1",
+            "stages": {},
+        }
+    if (
+        not isinstance(registry, Mapping)
+        or registry.get("schema_version")
+        != "readonly-e2e-completed-stages-v1"
+        or not isinstance(registry.get("stages"), Mapping)
+    ):
+        raise ValueError("Completed stage evidence registry is invalid.")
+    stages = {
+        str(name): dict(value)
+        for name, value in registry["stages"].items()
+        if isinstance(value, Mapping)
+    }
+    recorded = {}
+    for name, value in artifacts.items():
+        workspace.write_json(name, value)
+        recorded[name] = _artifact_digest(workspace.path / name)
+    stages[stage] = recorded
+    _replace_json(
+        workspace.path / "completed-stage-evidence.json",
+        {
+            "schema_version": "readonly-e2e-completed-stages-v1",
+            "stages": stages,
+        },
+    )
+
+
+def _replace_json(path: Path, value: Mapping[str, Any]) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix="." + path.name + ".",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(
+                value,
+                stream,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def _write_or_verify_json(
+    workspace: RunWorkspace,
+    name: str,
+    value: Mapping[str, Any],
+) -> None:
+    path = workspace.path / name
+    expected = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    if path.exists():
+        if path.read_text(encoding="utf-8") != expected:
+            raise ValueError(
+                "Completed stage evidence changed before finalization."
+            )
+        return
+    workspace.write_json(name, value)
+
+
+def _verified_completed_stage_artifacts(
+    workspace: RunWorkspace,
+) -> tuple[Mapping[str, Any], tuple[str, ...]]:
+    registry_path = workspace.path / "completed-stage-evidence.json"
+    if not registry_path.exists():
+        return (
+            {
+                "schema_version": "readonly-e2e-completed-stages-v1",
+                "stages": {},
+            },
+            (),
+        )
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return (
+            {
+                "schema_version": "readonly-e2e-completed-stages-v1",
+                "stages": {},
+            },
+            (),
+        )
+    if (
+        not isinstance(registry, Mapping)
+        or registry.get("schema_version")
+        != "readonly-e2e-completed-stages-v1"
+        or not isinstance(registry.get("stages"), Mapping)
+    ):
+        return (
+            {
+                "schema_version": "readonly-e2e-completed-stages-v1",
+                "stages": {},
+            },
+            (),
+        )
+    verified_stages: dict[str, dict[str, Any]] = {}
+    paths: set[str] = set()
+    for stage, recorded in registry["stages"].items():
+        if not isinstance(stage, str) or not isinstance(recorded, Mapping):
+            continue
+        verified = {}
+        for name, digest in recorded.items():
+            path = workspace.path / str(name)
+            if (
+                name in REQUIRED_SUPPLEMENTAL_ARTIFACTS
+                and isinstance(digest, Mapping)
+                and path.is_file()
+                and dict(digest) == _artifact_digest(path)
+            ):
+                verified[str(name)] = dict(digest)
+                paths.add(str(name))
+        if verified:
+            verified_stages[stage] = verified
+    return (
+        {
+            "schema_version": "readonly-e2e-completed-stages-v1",
+            "stages": verified_stages,
+        },
+        tuple(sorted(paths)),
+    )
 
 
 def _write_artifact_manifest(
@@ -615,6 +922,7 @@ def write_final_e2e_artifacts(
     supplemental_artifacts: Mapping[str, Mapping[str, Any]],
     run_summary: Mapping[str, Any],
     additional_text_artifacts: Callable[[Path], Mapping[str, str]] | None = None,
+    workspace: RunWorkspace | None = None,
 ) -> Path:
     """Write one immutable E2E evidence bundle and deterministic fingerprint."""
 
@@ -622,7 +930,13 @@ def write_final_e2e_artifacts(
         raise ValueError("Every local E2E check must pass before finalization.")
     _validate_run_summary(run_summary, supplemental_artifacts)
     egress.assert_read_only()
-    workspace = RunWorkspace.create(runs_root, run_id)
+    workspace = (
+        RunWorkspace.create(runs_root, run_id)
+        if workspace is None
+        else workspace
+    )
+    if workspace.path != runs_root / run_id:
+        raise ValueError("The supplied E2E workspace is not bound to run_id.")
     capabilities = final_capability_evidence()
     journal = SQLiteAuditJournal(
         workspace.path / ".audit.sqlite3",
@@ -685,7 +999,7 @@ def write_final_e2e_artifacts(
     journal.close()
 
     for name, value in supplemental_artifacts.items():
-        workspace.write_json(name, value)
+        _write_or_verify_json(workspace, name, value)
     egress_text = "".join(
         canonical_json(record.as_dict()) + "\n" for record in egress.records
     )
@@ -698,6 +1012,21 @@ def write_final_e2e_artifacts(
         capabilities=capabilities,
     )
 
+    stable_run_summary = {
+        key: value
+        for key, value in run_summary.items()
+        if key not in {"duration_ms", "stage_durations_ms"}
+    }
+    stable_model_cost = dict(run_summary["model_cost"])
+    for field in (
+        "charged_cost_rub",
+        "reserved_cost_rub",
+        "call_count",
+        "warning",
+        "exhausted",
+    ):
+        stable_model_cost.pop(field)
+    stable_run_summary["model_cost"] = stable_model_cost
     semantic = {
         "schema_version": "readonly-e2e-stability-v1",
         "policy_version": policy_version,
@@ -710,11 +1039,7 @@ def write_final_e2e_artifacts(
         "browser_interceptions": [dict(item) for item in egress.browser_interceptions],
         "browser_websocket_attempts": list(egress.browser_websocket_attempts),
         "external_write_sent": False,
-        "run_summary": {
-            key: value
-            for key, value in run_summary.items()
-            if key not in {"duration_ms", "stage_durations_ms"}
-        },
+        "run_summary": stable_run_summary,
         "supplemental_artifacts": {
             name: dict(supplemental_artifacts[name])
             for name in sorted(supplemental_artifacts)
@@ -750,6 +1075,7 @@ def write_final_e2e_artifacts(
         "input_tokens": run_summary["input_tokens"],
         "output_tokens": run_summary["output_tokens"],
         "cost_rub": run_summary["cost_rub"],
+        "model_cost": run_summary["model_cost"],
         "duration_ms": run_summary["duration_ms"],
         "stage_durations_ms": run_summary["stage_durations_ms"],
         "proposal_id": run_summary["proposal_id"],
@@ -808,4 +1134,99 @@ def write_final_e2e_artifacts(
         policy_version=policy_version,
     )
     verify_e2e_artifact_manifest(workspace.path)
+    return workspace.path
+
+
+def write_failed_e2e_artifacts(
+    workspace: RunWorkspace,
+    *,
+    run_id: str,
+    policy_version: str,
+    reason_code: str,
+    detail: str,
+) -> Path:
+    """Ensure every failed E2E run retains the three mandatory artifacts."""
+
+    events = (
+        {
+            "sequence": 1,
+            "event_type": "e2e.started",
+            "run_id": run_id,
+            "external_write_allowed": False,
+            "event_send_allowed": False,
+        },
+        {
+            "sequence": 2,
+            "event_type": "e2e.failed",
+            "run_id": run_id,
+            "reason_code": reason_code,
+        },
+    )
+    completed_registry, completed_paths = _verified_completed_stage_artifacts(
+        workspace
+    )
+    result = {
+        "schema_version": "readonly-e2e-result-v1",
+        "policy_version": policy_version,
+        "run_id": run_id,
+        "status": "FAILED",
+        "execution_status": "BLOCKED",
+        "evidence_type": "SIMULATED",
+        "external_write_sent": False,
+        "external_event_sent": False,
+        "blocking_code": reason_code,
+        "completed_stage_artifacts": list(completed_paths),
+    }
+    report = "\n".join(
+        (
+            "# Неуспешный read-only E2E запуск MOX-ADV",
+            "",
+            "Запуск остановлен безопасно.",
+            "Внешние write-запросы и события не отправлялись.",
+            f"Код: `{reason_code}`.",
+            f"Деталь: {detail}",
+            "",
+        )
+    )
+    parent = workspace.path.parent
+    staging_path = Path(
+        tempfile.mkdtemp(
+            prefix=".failed-bundle-" + run_id + ".",
+            dir=str(parent),
+        )
+    )
+    stale_path = Path(
+        tempfile.mkdtemp(
+            prefix=".stale-bundle-" + run_id + ".",
+            dir=str(parent),
+        )
+    )
+    os.rmdir(stale_path)
+    staging = RunWorkspace(staging_path)
+    try:
+        staging.write_text(
+            "events.jsonl",
+            "".join(canonical_json(event) + "\n" for event in events),
+        )
+        staging.write_json("result.json", result)
+        staging.write_text("report.md", report)
+        for name in completed_paths:
+            shutil.copy2(workspace.path / name, staging.path / name)
+        if completed_paths:
+            staging.write_json(
+                "completed-stage-evidence.json",
+                completed_registry,
+            )
+        os.replace(workspace.path, stale_path)
+        try:
+            os.replace(staging_path, workspace.path)
+        except BaseException:
+            os.replace(stale_path, workspace.path)
+            raise
+        shutil.rmtree(stale_path)
+    finally:
+        if staging_path.exists():
+            shutil.rmtree(staging_path)
+        if stale_path.exists() and workspace.path.exists():
+            shutil.rmtree(stale_path)
     return workspace.path

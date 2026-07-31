@@ -38,6 +38,7 @@ from mox_adv.control_state import (
 )
 from mox_adv.fake_write_adapter import FakeWriteAdapter
 from mox_adv.mandate_store import DurableMandateAuthority
+from mox_adv.model_cost import DurableModelCostLedger
 from mox_adv.model_provider import DeterministicFakeModelProvider
 from mox_adv.observe import run_observe_fixture
 from mox_adv.proposal_store import ImmutableProposalStore
@@ -1000,6 +1001,10 @@ class UiRunService:
         self.runs_root = runs_root
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self.policy = _read_json(POLICY_PATH)
+        self.model_cost_ledger = DurableModelCostLedger.for_application(
+            self.runs_root,
+            self.policy,
+        )
         self.production_reader = production_reader or YandexProductionReader()
         self.automation_store = AutomationStore(
             self.runs_root / "ui-test-automation.sqlite3",
@@ -1474,6 +1479,8 @@ class UiRunService:
             recommendation = RecommendationService(
                 DeterministicFakeModelProvider(),
                 ImmutableProposalStore(run_directory / "proposals"),
+                run_policy,
+                self.model_cost_ledger,
             ).recommend(
                 projection=projection,
                 run_id=run_id,
@@ -1519,6 +1526,8 @@ class UiRunService:
                     proposal,
                     str(unsafe_trigger["reason_code"]),
                 )
+            elif read_only or effective_operating_mode == "RECOMMEND":
+                execution = _read_only_execution(snapshot, proposal)
             elif proposal.expected_diff["operation"] == "NO_CHANGE":
                 execution, _ = _execute_simulated_change(
                     run_directory=run_directory,
@@ -1528,8 +1537,6 @@ class UiRunService:
                     proposal_hash=recommendation.canonical_hash,
                     now=now,
                 )
-            elif read_only or effective_operating_mode == "RECOMMEND":
-                execution = _read_only_execution(snapshot, proposal)
             elif effective_operating_mode == "APPROVAL_REQUIRED":
                 prepared, step = _prepare_simulated_change(
                     policy=run_policy,

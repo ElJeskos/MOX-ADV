@@ -9,13 +9,18 @@ import os
 import sqlite3
 import subprocess
 from contextlib import contextmanager, suppress
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Protocol, Tuple
 
-from mox_adv.commands import OptimizationAction
+from mox_adv.commands import (
+    ACTION_SPECS,
+    ActionFamily,
+    OptimizationAction,
+    calculate_relative_target,
+)
 from mox_adv.interrupt_state import (
     DurableInterruptState,
     InterruptStateUnavailable,
@@ -77,6 +82,41 @@ class AuthenticatedPrincipal:
     authentication: str
 
 
+_ELEVATED_PRINCIPAL_SEAL = object()
+
+
+@dataclass(frozen=True)
+class ElevatedAuthenticatedPrincipal(AuthenticatedPrincipal):
+    _seal: object
+
+    @classmethod
+    def verified(
+        cls,
+        principal: AuthenticatedPrincipal,
+        verifier: "ElevatedReauthenticationVerifier",
+    ) -> "ElevatedAuthenticatedPrincipal":
+        if (
+            type(principal) is not AuthenticatedPrincipal
+            or type(verifier) is not MacOSElevatedSecurityVerifier
+            or not verifier.verify(principal)
+        ):
+            raise ControlRejected(
+                "ELEVATED_REAUTHENTICATION_FAILED",
+                "elevated reauthentication did not succeed.",
+            )
+        return cls(
+            identity=principal.identity,
+            authentication=principal.authentication,
+            _seal=_ELEVATED_PRINCIPAL_SEAL,
+        )
+
+    def is_verified(self) -> bool:
+        return (
+            type(self) is ElevatedAuthenticatedPrincipal
+            and self._seal is _ELEVATED_PRINCIPAL_SEAL
+        )
+
+
 class ElevatedReauthenticationVerifier(Protocol):
     def verify(self, principal: AuthenticatedPrincipal) -> bool: ...
 
@@ -109,6 +149,14 @@ class MacOSLocalPrincipalAuthenticator:
         expected_identity: str = "sviridov",
         elevated_verifier: Optional[ElevatedReauthenticationVerifier] = None,
     ) -> None:
+        if (
+            elevated_verifier is not None
+            and type(elevated_verifier) is not MacOSElevatedSecurityVerifier
+        ):
+            raise ControlRejected(
+                "ELEVATED_REAUTHENTICATION_FAILED",
+                "elevated verifier is not a trusted OS verifier.",
+            )
         self.expected_identity = expected_identity
         self.elevated_verifier = (
             MacOSElevatedSecurityVerifier()
@@ -128,14 +176,12 @@ class MacOSLocalPrincipalAuthenticator:
             authentication="authenticated_macos_user",
         )
 
-    def elevated_reauthenticate(self) -> AuthenticatedPrincipal:
+    def elevated_reauthenticate(self) -> ElevatedAuthenticatedPrincipal:
         principal = self.authenticate()
-        if not self.elevated_verifier.verify(principal):
-            raise ControlRejected(
-                "ELEVATED_REAUTHENTICATION_FAILED",
-                "macOS elevated reauthentication did not succeed.",
-            )
-        return principal
+        return ElevatedAuthenticatedPrincipal.verified(
+            principal,
+            self.elevated_verifier,
+        )
 
 
 class CampaignApprovalRepository:
@@ -152,6 +198,7 @@ class CampaignApprovalRepository:
         authentication: str,
         execution_key: str,
         now_text: str,
+        proof_verifier: Callable[[sqlite3.Row], None],
     ) -> None:
         approval = connection.execute(
             "SELECT * FROM campaign_approvals WHERE approval_id = ?",
@@ -162,6 +209,7 @@ class CampaignApprovalRepository:
                 "CAMPAIGN_APPROVAL_NOT_FOUND",
                 "campaign approval does not exist.",
             )
+        proof_verifier(approval)
         if (
             approval["status"] != "AVAILABLE"
             or approval["proposal_id"] != proposal_id
@@ -169,6 +217,10 @@ class CampaignApprovalRepository:
             or approval["approver"] != approver
             or approval["authentication"] != authentication
             or approval["expires_at"] <= now_text
+            or not str(approval["authority_hash"] or "").startswith("sha256:")
+            or not approval["signature"]
+            or not approval["issued_at"]
+            or not approval["authority_json"]
         ):
             raise ControlRejected(
                 "CAMPAIGN_APPROVAL_NOT_AUTHORIZED",
@@ -331,6 +383,120 @@ class PreparedChange:
         )
 
 
+_PREPARED_AD_VARIANT_SEAL = object()
+
+
+@dataclass(frozen=True)
+class PreparedAdVariantCatalog:
+    source_plan_hash: str
+    variants: Tuple[Tuple[str, str, str], ...]
+    _seal: object = field(repr=False, compare=False)
+
+    @classmethod
+    def from_campaign_plan(
+        cls,
+        canonical_plan: Mapping[str, Any],
+    ) -> "PreparedAdVariantCatalog":
+        try:
+            if canonical_plan["schema_version"] != "campaign-creation-plan-v1":
+                raise KeyError("schema_version")
+            groups = canonical_plan["draft"]["groups"]
+            ads = groups[0]["ads"]
+            variants = {
+                item["variant_id"]: {
+                    "variant_id": item["variant_id"],
+                    "title": item["title"],
+                    "text": item["text"],
+                }
+                for item in ads
+            }
+        except (IndexError, KeyError, TypeError) as error:
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "campaign plan has no trusted ad variants.",
+            ) from error
+        if (
+            set(variants) != {"A", "B"}
+            or any(
+                type(value["variant_id"]) is not str
+                or type(value["title"]) is not str
+                or type(value["text"]) is not str
+                or not value["title"].strip()
+                or not value["text"].strip()
+                for value in variants.values()
+            )
+        ):
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "campaign plan ad variants are incomplete.",
+            )
+        return cls(
+            source_plan_hash=canonical_hash(canonical_plan),
+            variants=tuple(
+                sorted(
+                    (
+                        variant_id,
+                        value["title"],
+                        value["text"],
+                    )
+                    for variant_id, value in variants.items()
+                )
+            ),
+            _seal=_PREPARED_AD_VARIANT_SEAL,
+        )
+
+    def exact_copy(self, variant_id: str) -> Mapping[str, str]:
+        variants = {
+            item_id: {
+                "variant_id": item_id,
+                "title": title,
+                "text": text,
+            }
+            for item_id, title, text in self.variants
+        }
+        try:
+            value = variants[variant_id]
+        except KeyError as error:
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "requested ad variant is not prepared.",
+            ) from error
+        if (
+            type(self) is not PreparedAdVariantCatalog
+            or self._seal is not _PREPARED_AD_VARIANT_SEAL
+            or not self.source_plan_hash.startswith("sha256:")
+            or set(variants) != {"A", "B"}
+            or set(value) != {"variant_id", "title", "text"}
+            or value["variant_id"] != variant_id
+            or not value["title"].strip()
+            or not value["text"].strip()
+        ):
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "prepared ad variant catalog is invalid.",
+            )
+        return dict(value)
+
+
+@dataclass(frozen=True)
+class TerminalNoWritePlan:
+    proposal_id: str
+    proposal_hash: str
+    snapshot_id: str
+    policy_version: str
+    status: str
+    action: str
+    reason_code: Optional[str]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class TerminalExecutionRequest:
+    proposal_id: str
+
+
 @dataclass(frozen=True)
 class ApprovalRecord:
     approval_id: str
@@ -363,6 +529,14 @@ class ExecutionRecord:
     detail: Optional[str]
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class ExecutionUsage:
+    actions_in_last_24h: int
+    cumulative_daily_change_percent: int
+    monetary_exposure_rub: int
+    latest_effective_write_at: Optional[datetime]
 
 
 class DurableControlState:
@@ -409,7 +583,17 @@ class DurableControlState:
                 CREATE TABLE IF NOT EXISTS prepared_changes (
                     proposal_id TEXT PRIMARY KEY,
                     canonical_json TEXT NOT NULL,
-                    canonical_hash TEXT NOT NULL
+                    canonical_hash TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'FIXTURE',
+                    proposal_json TEXT,
+                    snapshot_json TEXT
+                );
+                CREATE TABLE IF NOT EXISTS terminal_no_write_plans (
+                    proposal_id TEXT PRIMARY KEY,
+                    canonical_json TEXT NOT NULL,
+                    canonical_hash TEXT NOT NULL,
+                    proposal_json TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS approvals (
                     approval_id TEXT PRIMARY KEY,
@@ -436,7 +620,11 @@ class DurableControlState:
                     expires_at TEXT NOT NULL,
                     status TEXT NOT NULL,
                     reserved_execution_key TEXT,
-                    used_at TEXT
+                    used_at TEXT,
+                    authority_hash TEXT,
+                    signature TEXT,
+                    issued_at TEXT,
+                    authority_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS kill_switches (
                     scope TEXT PRIMARY KEY,
@@ -470,25 +658,117 @@ class DurableControlState:
                 BEGIN
                     SELECT RAISE(ABORT, 'immutable approval fields');
                 END;
+                CREATE TRIGGER IF NOT EXISTS prepared_changes_no_update
+                BEFORE UPDATE ON prepared_changes
+                BEGIN
+                    SELECT RAISE(ABORT, 'immutable prepared change');
+                END;
+                CREATE TRIGGER IF NOT EXISTS terminal_no_write_plans_no_update
+                BEFORE UPDATE ON terminal_no_write_plans
+                BEGIN
+                    SELECT RAISE(ABORT, 'immutable terminal plan');
+                END;
                 """
+            )
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(prepared_changes)"
+                ).fetchall()
+            }
+            if "source" not in columns:
+                connection.execute(
+                    "ALTER TABLE prepared_changes "
+                    "ADD COLUMN source TEXT NOT NULL DEFAULT 'FIXTURE'"
+                )
+            if "proposal_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE prepared_changes ADD COLUMN proposal_json TEXT"
+                )
+            if "snapshot_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE prepared_changes ADD COLUMN snapshot_json TEXT"
+                )
+            campaign_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(campaign_approvals)"
+                ).fetchall()
+            }
+            for name in (
+                "authority_hash",
+                "signature",
+                "issued_at",
+                "authority_json",
+            ):
+                if name not in campaign_columns:
+                    connection.execute(
+                        "ALTER TABLE campaign_approvals ADD COLUMN "
+                        + name
+                        + " TEXT"
+                    )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS "
+                "campaign_approvals_immutable_fields "
+                "BEFORE UPDATE OF approval_id, proposal_id, binding_hash, "
+                "approver, authentication, expires_at, authority_hash, "
+                "signature, issued_at, authority_json ON campaign_approvals "
+                "BEGIN SELECT RAISE(ABORT, "
+                "'immutable campaign approval fields'); END"
             )
 
     def register_campaign_approval_authority(
         self,
         *,
-        approval_id: str,
-        proposal_id: str,
-        binding_hash: str,
-        approver: str,
-        authentication: str,
-        expires_at: datetime,
+        authority_service: Any,
+        verified: Any,
     ) -> None:
+        from mox_adv.lifecycle_authority import (
+            LifecycleAuthorityService,
+            VerifiedLifecycleAuthority,
+        )
+
+        if (
+            type(authority_service) is not LifecycleAuthorityService
+            or type(verified) is not VerifiedLifecycleAuthority
+        ):
+            raise ControlRejected(
+                "AUTHORITY_NOT_AUTHENTICATED",
+                "campaign approval requires a verified authority capability.",
+            )
+        approval = authority_service.verify(
+            verified,
+            "CAMPAIGN_APPROVAL",
+        )
+        proof = authority_service.proof(
+            verified,
+            "CAMPAIGN_APPROVAL",
+        )
+        approval_id = str(getattr(approval, "approval_id", ""))
+        proposal_id = str(getattr(approval, "proposal_id", ""))
+        binding_hash = str(getattr(approval, "binding_hash", ""))
+        approver = str(getattr(approval, "approver", ""))
+        authentication = str(getattr(approval, "authentication", ""))
+        expires_at = getattr(approval, "expires_at", None)
+        authority_hash = proof["canonical_hash"]
+        signature = proof["signature"]
+        issued_at = proof["issued_at"]
+        authority_json = proof["canonical_json"]
+        if not isinstance(expires_at, datetime):
+            raise ControlRejected(
+                "INVALID_INPUT",
+                "campaign approval authority expiry is invalid.",
+            )
         immutable = (
             proposal_id,
             binding_hash,
             approver,
             authentication,
             _utc_text(expires_at),
+            authority_hash,
+            signature,
+            issued_at,
+            authority_json,
         )
         if (
             not approval_id
@@ -496,6 +776,10 @@ class DurableControlState:
             or not binding_hash.startswith("sha256:")
             or not approver
             or not authentication
+            or not authority_hash.startswith("sha256:")
+            or not signature
+            or not issued_at
+            or not authority_json
         ):
             raise ControlRejected(
                 "INVALID_INPUT",
@@ -516,6 +800,10 @@ class DurableControlState:
                             "approver",
                             "authentication",
                             "expires_at",
+                            "authority_hash",
+                            "signature",
+                            "issued_at",
+                            "authority_json",
                         )
                     )
                     != immutable
@@ -528,16 +816,428 @@ class DurableControlState:
             connection.execute(
                 "INSERT INTO campaign_approvals "
                 "(approval_id, proposal_id, binding_hash, approver, authentication, "
-                "expires_at, status) VALUES (?, ?, ?, ?, ?, ?, 'AVAILABLE')",
+                "expires_at, authority_hash, signature, issued_at, authority_json, "
+                "status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'AVAILABLE')",
                 (approval_id,) + immutable,
             )
 
     def register_prepared_change(self, prepared: PreparedChange) -> None:
+        """Register a predetermined Case-04 plan usable only with the sealed fake."""
+
+        self._store_prepared_change(
+            prepared,
+            source="FIXTURE",
+            proposal_json=None,
+            snapshot_json=None,
+        )
+
+    def register_terminal_fixture_plan(
+        self,
+        plan: TerminalNoWritePlan,
+    ) -> None:
+        from mox_adv.recommend_contracts import _canonical_hash
+
+        if plan.action != "KEEP" or plan.status != "INSUFFICIENT_DATA":
+            raise ControlRejected(
+                "INVALID_INPUT",
+                "fixture terminal plan is not an approved no-write case.",
+            )
+        proposal = {
+            "proposal_id": plan.proposal_id,
+            "snapshot_id": plan.snapshot_id,
+            "actions": [{"action": plan.action}],
+            "expected_diff": {"operation": "NO_CHANGE"},
+        }
+        trusted_plan = TerminalNoWritePlan(
+            proposal_id=plan.proposal_id,
+            proposal_hash=_canonical_hash(proposal),
+            snapshot_id=plan.snapshot_id,
+            policy_version=plan.policy_version,
+            status=plan.status,
+            action=plan.action,
+            reason_code=plan.reason_code,
+        )
+        self._store_terminal_no_write_plan(
+            trusted_plan,
+            proposal_json=_canonical(proposal),
+            snapshot_json=_canonical(
+                {
+                    "snapshot_id": trusted_plan.snapshot_id,
+                    "policy_version": trusted_plan.policy_version,
+                }
+            ),
+        )
+
+    def register_optimization_proposal(
+        self,
+        *,
+        proposal_store: Any,
+        proposal_id: str,
+        snapshot: Any,
+        policy: Mapping[str, Any],
+        writer: str,
+        at: datetime,
+    ) -> PreparedChange | TerminalNoWritePlan:
+        """Load one immutable proposal and derive its executable plan server-side."""
+
+        from mox_adv.proposal_store import (
+            ImmutableProposalStore,
+            ProposalConflictError,
+        )
+        from mox_adv.recommend_contracts import (
+            OptimizationProposalV1,
+            SchemaValidationError,
+            _canonical_hash,
+        )
+        from mox_adv.recommend_projection import (
+            campaign_fingerprint,
+            projection_from_integrated_snapshot,
+        )
+
+        if (
+            type(proposal_store) is not ImmutableProposalStore
+            or at.tzinfo is None
+            or not writer
+        ):
+            raise ControlRejected(
+                "INVALID_INPUT",
+                "immutable proposal registration is invalid.",
+            )
+        try:
+            projection = projection_from_integrated_snapshot(snapshot, policy, at)
+            proposal = proposal_store.load_active(proposal_id, projection, at)
+            expected_fingerprint = campaign_fingerprint(snapshot)
+        except (ProposalConflictError, SchemaValidationError, ValueError) as error:
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "trusted proposal or snapshot validation failed.",
+            ) from error
+        if (
+            type(proposal) is not OptimizationProposalV1
+            or proposal.snapshot_id != snapshot.snapshot_id
+            or proposal.expected_fingerprint != expected_fingerprint
+            or len(proposal.actions) != 1
+        ):
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "proposal is not bound to the trusted snapshot.",
+            )
+        try:
+            action_name = str(proposal.actions[0]["action"])
+        except KeyError as error:
+            raise ControlRejected(
+                "UNSUPPORTED_ACTION",
+                "proposal does not contain one executable action.",
+            ) from error
+        if action_name in {"KEEP", "REQUEST_HUMAN_HELP"}:
+            reason_code = (
+                None
+                if action_name == "KEEP"
+                else str(proposal.actions[0]["parameters"]["reason_code"])
+            )
+            terminal = TerminalNoWritePlan(
+                proposal_id=proposal.proposal_id,
+                proposal_hash=_canonical_hash(proposal.as_dict()),
+                snapshot_id=snapshot.snapshot_id,
+                policy_version=snapshot.policy_version,
+                status=proposal.status,
+                action=action_name,
+                reason_code=reason_code,
+            )
+            self._store_terminal_no_write_plan(
+                terminal,
+                proposal_json=_canonical(proposal.as_dict()),
+                snapshot_json=_canonical(snapshot.as_dict()),
+            )
+            return terminal
+        try:
+            action = OptimizationAction(action_name)
+        except ValueError as error:
+            raise ControlRejected(
+                "UNSUPPORTED_ACTION",
+                "proposal does not contain one executable action.",
+            ) from error
+        expected_diff = dict(proposal.expected_diff)
+        if expected_diff.get("operation") != action.value:
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "proposal expected diff does not match its action.",
+            )
+        prepared_ad_variants = None
+        if action == OptimizationAction.SET_AD_VARIANT:
+            try:
+                campaign_plan = self._load_trusted_campaign_plan(
+                    snapshot.scope.campaign,
+                    snapshot.scope.account,
+                    snapshot.policy_version,
+                )
+                prepared_ad_variants = PreparedAdVariantCatalog.from_campaign_plan(
+                    campaign_plan
+                )
+            except ControlRejected as error:
+                raise ControlRejected(
+                    "PREPARED_AD_COPY_UNAVAILABLE",
+                    "trusted campaign plan validation failed.",
+                ) from error
+        current_value, target_value = self._derive_target(
+            snapshot.campaign,
+            action,
+            expected_diff,
+            prepared_ad_variants,
+        )
+        if action == OptimizationAction.SET_AD_VARIANT:
+            assert isinstance(target_value, Mapping)
+            assert prepared_ad_variants is not None
+            expected_diff = {
+                "operation": action.value,
+                "variant_id": target_value["variant_id"],
+                "title": target_value["title"],
+                "text": target_value["text"],
+                "source_plan_hash": prepared_ad_variants.source_plan_hash,
+            }
+        prepared = PreparedChange(
+            proposal_id=proposal.proposal_id,
+            proposal_hash=_canonical_hash(proposal.as_dict()),
+            scope=TrustedScope(
+                organization=snapshot.scope.organization,
+                connection=snapshot.scope.connection,
+                account=snapshot.scope.account,
+                campaign=snapshot.scope.campaign,
+                writer=writer,
+            ),
+            action=action,
+            current_value=current_value,
+            target_value=target_value,
+            expected_diff=expected_diff,
+            snapshot_id=snapshot.snapshot_id,
+            snapshot_generated_at=snapshot.generated_at,
+            direct_watermark=snapshot.provenance.direct_report.watermark,
+            metrika_watermark=snapshot.provenance.metrika_report.watermark,
+            policy_version=snapshot.policy_version,
+            expected_fingerprint=expected_fingerprint,
+            risk=(
+                str(proposal.risks[0])
+                if proposal.risks
+                else "REVERSIBLE_CONTROLLED_CHANGE"
+            ),
+        )
+        self._store_prepared_change(
+            prepared,
+            source="IMMUTABLE_PROPOSAL",
+            proposal_json=_canonical(proposal.as_dict()),
+            snapshot_json=_canonical(snapshot.as_dict()),
+        )
+        return prepared
+
+    def _load_trusted_campaign_plan(
+        self,
+        campaign_id: str,
+        account: str,
+        policy_version: str,
+    ) -> Mapping[str, Any]:
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT s.plan_hash, s.canonical_plan "
+                    "FROM campaign_created_objects o "
+                    "JOIN campaign_sagas s "
+                    "ON s.execution_key = o.execution_key "
+                    "WHERE o.service = 'Campaigns' AND o.object_id = ? "
+                    "AND o.compensated_at IS NULL "
+                    "AND s.status IN ('IN_FLIGHT', 'APPLIED')",
+                    (campaign_id,),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "trusted campaign storage is unavailable.",
+            ) from error
+        if len(rows) != 1:
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "trusted campaign plan was not found.",
+            )
+        try:
+            plan = json.loads(rows[0]["canonical_plan"])
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "trusted campaign plan is invalid.",
+            ) from error
+        if (
+            not isinstance(plan, Mapping)
+            or rows[0]["plan_hash"] != canonical_hash(plan)
+            or plan.get("schema_version") != "campaign-creation-plan-v1"
+            or plan.get("account") != account
+            or plan.get("policy_id") != policy_version
+        ):
+            raise ControlRejected(
+                "PREPARED_AD_COPY_UNAVAILABLE",
+                "trusted campaign plan hash is invalid.",
+            )
+        return dict(plan)
+
+    @staticmethod
+    def _derive_target(
+        campaign: Any,
+        action: OptimizationAction,
+        expected_diff: Mapping[str, Any],
+        prepared_ad_variants: Optional[PreparedAdVariantCatalog] = None,
+    ) -> tuple[Any, Any]:
+        spec = ACTION_SPECS[action]
+        if spec.family == ActionFamily.WEEKLY_BUDGET:
+            current = campaign.current_weekly_budget_micros
+        elif spec.family == ActionFamily.SEARCH_BID:
+            current = campaign.current_search_bid_micros
+        elif spec.family == ActionFamily.AD_VARIANT:
+            current_variant = campaign.current_ad_variant
+            if type(prepared_ad_variants) is not PreparedAdVariantCatalog:
+                raise ControlRejected(
+                    "PREPARED_AD_COPY_UNAVAILABLE",
+                    "ad variant execution requires a trusted campaign plan.",
+                )
+            current = prepared_ad_variants.exact_copy(current_variant)
+        else:
+            current = campaign.state
+        if spec.relative_percent is not None:
+            if expected_diff.get("relative_step_percent") != abs(
+                spec.relative_percent
+            ):
+                raise ControlRejected(
+                    "IMMUTABLE_PROPOSAL_CONFLICT",
+                    "proposal numeric step is outside the deterministic plan.",
+                )
+            target = calculate_relative_target(current, spec.relative_percent)
+        elif spec.family == ActionFamily.AD_VARIANT:
+            target_variant = expected_diff.get("variant_id")
+            if target_variant == current["variant_id"]:
+                raise ControlRejected(
+                    "IMMUTABLE_PROPOSAL_CONFLICT",
+                    "proposal ad variant does not change current state.",
+                )
+            target = prepared_ad_variants.exact_copy(str(target_variant))
+        else:
+            if current != spec.source_state:
+                raise ControlRejected(
+                    "UNSUPPORTED_STATE",
+                    "proposal action is not applicable to snapshot state.",
+                )
+            target = spec.target_state
+            if expected_diff.get("target_state") != target:
+                raise ControlRejected(
+                    "IMMUTABLE_PROPOSAL_CONFLICT",
+                    "proposal target state is not deterministic.",
+                )
+        return current, target
+
+    def _store_terminal_no_write_plan(
+        self,
+        plan: TerminalNoWritePlan,
+        *,
+        proposal_json: str,
+        snapshot_json: str,
+    ) -> None:
+        canonical_json = _canonical(plan.as_dict())
+        digest = canonical_hash(plan.as_dict())
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT canonical_json, canonical_hash, proposal_json, snapshot_json "
+                "FROM terminal_no_write_plans WHERE proposal_id = ?",
+                (plan.proposal_id,),
+            ).fetchone()
+            values = (canonical_json, digest, proposal_json, snapshot_json)
+            if existing is not None:
+                if tuple(existing) != values:
+                    raise ControlRejected(
+                        "IMMUTABLE_PROPOSAL_CONFLICT",
+                        "terminal proposal evidence changed.",
+                    )
+                return
+            connection.execute(
+                "INSERT INTO terminal_no_write_plans "
+                "(proposal_id, canonical_json, canonical_hash, proposal_json, "
+                "snapshot_json) VALUES (?, ?, ?, ?, ?)",
+                (plan.proposal_id,) + values,
+            )
+
+    def load_terminal_no_write_plan(
+        self,
+        proposal_id: str,
+    ) -> TerminalNoWritePlan:
+        from mox_adv.recommend_contracts import _canonical_hash
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT canonical_json, canonical_hash, proposal_json, snapshot_json "
+                "FROM terminal_no_write_plans WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            raise ControlRejected(
+                "APPROVAL_NOT_FOUND",
+                "terminal proposal is not prepared.",
+            )
+        try:
+            value = json.loads(row["canonical_json"])
+            proposal = json.loads(row["proposal_json"])
+            snapshot = json.loads(row["snapshot_json"])
+            plan = TerminalNoWritePlan(**value)
+            action = proposal["actions"][0]
+            matches = (
+                canonical_hash(value) == row["canonical_hash"]
+                and plan.proposal_hash == _canonical_hash(proposal)
+                and proposal["proposal_id"] == plan.proposal_id
+                and proposal["snapshot_id"] == plan.snapshot_id
+                and snapshot["snapshot_id"] == plan.snapshot_id
+                and snapshot["policy_version"] == plan.policy_version
+                and action["action"] == plan.action
+                and proposal["expected_diff"]["operation"] == "NO_CHANGE"
+                and (
+                    plan.action == "KEEP"
+                    or (
+                        plan.action == "REQUEST_HUMAN_HELP"
+                        and action["parameters"]["reason_code"]
+                        == plan.reason_code
+                    )
+                )
+            )
+        except (IndexError, KeyError, TypeError, ValueError) as error:
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "terminal proposal evidence is invalid.",
+            ) from error
+        if not matches:
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "terminal proposal no longer matches trusted evidence.",
+            )
+        return plan
+
+    def load_execution_plan(
+        self,
+        proposal_id: str,
+    ) -> PreparedChange | TerminalNoWritePlan:
+        try:
+            return self.load_prepared_change(proposal_id)
+        except ControlRejected as error:
+            if error.reason_code != "APPROVAL_NOT_FOUND":
+                raise
+        return self.load_terminal_no_write_plan(proposal_id)
+
+    def _store_prepared_change(
+        self,
+        prepared: PreparedChange,
+        *,
+        source: str,
+        proposal_json: Optional[str],
+        snapshot_json: Optional[str],
+    ) -> None:
         canonical_json = _canonical(prepared.as_dict())
         digest = canonical_hash(prepared.as_dict())
         with self._connect() as connection:
             existing = connection.execute(
-                "SELECT canonical_json, canonical_hash "
+                "SELECT canonical_json, canonical_hash, source, "
+                "proposal_json, snapshot_json "
                 "FROM prepared_changes WHERE proposal_id = ?",
                 (prepared.proposal_id,),
             ).fetchone()
@@ -545,6 +1245,9 @@ class DurableControlState:
                 if (
                     existing["canonical_json"] != canonical_json
                     or existing["canonical_hash"] != digest
+                    or existing["source"] != source
+                    or existing["proposal_json"] != proposal_json
+                    or existing["snapshot_json"] != snapshot_json
                 ):
                     raise ControlRejected(
                         "IMMUTABLE_PROPOSAL_CONFLICT",
@@ -553,14 +1256,23 @@ class DurableControlState:
                 return
             connection.execute(
                 "INSERT INTO prepared_changes "
-                "(proposal_id, canonical_json, canonical_hash) VALUES (?, ?, ?)",
-                (prepared.proposal_id, canonical_json, digest),
+                "(proposal_id, canonical_json, canonical_hash, source, "
+                "proposal_json, snapshot_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    prepared.proposal_id,
+                    canonical_json,
+                    digest,
+                    source,
+                    proposal_json,
+                    snapshot_json,
+                ),
             )
 
     def load_prepared_change(self, proposal_id: str) -> PreparedChange:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT canonical_json, canonical_hash "
+                "SELECT canonical_json, canonical_hash, source, "
+                "proposal_json, snapshot_json "
                 "FROM prepared_changes WHERE proposal_id = ?",
                 (proposal_id,),
             ).fetchone()
@@ -572,7 +1284,263 @@ class DurableControlState:
                 "IMMUTABLE_PROPOSAL_CONFLICT",
                 "prepared proposal canonical hash is invalid.",
             )
-        return PreparedChange.from_dict(value)
+        prepared = PreparedChange.from_dict(value)
+        if row["source"] == "IMMUTABLE_PROPOSAL":
+            self._verify_immutable_prepared(
+                prepared,
+                row["proposal_json"],
+                row["snapshot_json"],
+            )
+        elif row["source"] != "FIXTURE":
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "prepared proposal source is invalid.",
+            )
+        return prepared
+
+    @staticmethod
+    def _verify_immutable_prepared(
+        prepared: PreparedChange,
+        proposal_json: Optional[str],
+        snapshot_json: Optional[str],
+    ) -> None:
+        from mox_adv.recommend_contracts import _canonical_hash
+        from mox_adv.recommend_projection import campaign_fingerprint_mapping
+
+        try:
+            proposal = json.loads(str(proposal_json))
+            snapshot = json.loads(str(snapshot_json))
+            scope = snapshot["scope"]
+            provenance = snapshot["provenance"]
+            campaign = snapshot["campaign"]
+            actions = proposal["actions"]
+            spec = ACTION_SPECS[prepared.action]
+            if spec.family == ActionFamily.WEEKLY_BUDGET:
+                snapshot_current = campaign["current_weekly_budget_micros"]
+            elif spec.family == ActionFamily.SEARCH_BID:
+                snapshot_current = campaign["current_search_bid_micros"]
+            elif spec.family == ActionFamily.AD_VARIANT:
+                snapshot_current = prepared.current_value["variant_id"]
+            else:
+                snapshot_current = campaign["state"]
+            proposal_diff = dict(proposal.get("expected_diff", {}))
+            prepared_diff = dict(prepared.expected_diff)
+            diff_matches = (
+                proposal_diff == prepared_diff
+                if spec.family != ActionFamily.AD_VARIANT
+                else (
+                    proposal_diff
+                    == {
+                        "operation": prepared.action.value,
+                        "variant_id": prepared.target_value["variant_id"],
+                    }
+                    and prepared_diff
+                    == {
+                        "operation": prepared.action.value,
+                        "variant_id": prepared.target_value["variant_id"],
+                        "title": prepared.target_value["title"],
+                        "text": prepared.target_value["text"],
+                        "source_plan_hash": prepared_diff.get(
+                            "source_plan_hash"
+                        ),
+                    }
+                    and str(prepared_diff["source_plan_hash"]).startswith(
+                        "sha256:"
+                    )
+                )
+            )
+            matches = (
+                _canonical_hash(proposal) == prepared.proposal_hash
+                and proposal.get("proposal_id") == prepared.proposal_id
+                and proposal.get("snapshot_id") == prepared.snapshot_id
+                and len(actions) == 1
+                and actions[0].get("action") == prepared.action.value
+                and diff_matches
+                and snapshot.get("snapshot_id") == prepared.snapshot_id
+                and snapshot.get("generated_at")
+                == prepared.snapshot_generated_at
+                and snapshot.get("policy_version") == prepared.policy_version
+                and (
+                    campaign["current_ad_variant"] == snapshot_current
+                    if spec.family == ActionFamily.AD_VARIANT
+                    else snapshot_current == prepared.current_value
+                )
+                and provenance["direct_report"]["watermark"]
+                == prepared.direct_watermark
+                and provenance["metrika_report"]["watermark"]
+                == prepared.metrika_watermark
+                and campaign_fingerprint_mapping(snapshot)
+                == prepared.expected_fingerprint
+                and proposal.get("expected_fingerprint")
+                == prepared.expected_fingerprint
+                and {
+                    "organization": prepared.scope.organization,
+                    "connection": prepared.scope.connection,
+                    "account": prepared.scope.account,
+                    "campaign": prepared.scope.campaign,
+                }
+                == {
+                    "organization": scope["organization"],
+                    "connection": scope["connection"],
+                    "account": scope["account"],
+                    "campaign": scope["campaign"],
+                }
+            )
+        except (
+            AttributeError,
+            TypeError,
+            KeyError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as error:
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "trusted prepared evidence cannot be decoded.",
+            ) from error
+        if not matches:
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "prepared proposal no longer matches trusted evidence.",
+            )
+
+    def prepared_source(self, proposal_id: str) -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT source FROM prepared_changes WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            raise ControlRejected("APPROVAL_NOT_FOUND", "proposal is not prepared.")
+        return str(row["source"])
+
+    def trusted_snapshot_facts(
+        self,
+        proposal_id: str,
+        now: datetime,
+    ) -> Mapping[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT source, snapshot_json FROM prepared_changes "
+                "WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        if row is None or row["source"] != "IMMUTABLE_PROPOSAL":
+            raise ControlRejected(
+                "TRUSTED_SNAPSHOT_REQUIRED",
+                "execution facts require a trusted immutable snapshot.",
+            )
+        try:
+            snapshot = json.loads(row["snapshot_json"])
+            provenance = snapshot["provenance"]
+            metrics = snapshot["metrics"]
+            campaign = snapshot["campaign"]
+        except (TypeError, KeyError, json.JSONDecodeError) as error:
+            raise ControlRejected(
+                "IMMUTABLE_PROPOSAL_CONFLICT",
+                "trusted snapshot facts cannot be decoded.",
+            ) from error
+        if now.tzinfo is None:
+            raise ControlRejected(
+                "INVALID_INPUT",
+                "execution evaluation time must be timezone-aware.",
+            )
+        evaluated = now.astimezone(timezone.utc)
+
+        def parse(value: str) -> datetime:
+            return _parse_utc(value)
+
+        generated_at = parse(snapshot["generated_at"])
+        direct_times = (
+            parse(provenance["direct_report"]["retrieved_at"]),
+            parse(provenance["direct_state"]["retrieved_at"]),
+        )
+        metrika_time = parse(provenance["metrika_report"]["retrieved_at"])
+        watermarks = (
+            parse(provenance["direct_report"]["watermark"]),
+            parse(provenance["direct_state"]["watermark"]),
+            parse(provenance["metrika_report"]["watermark"]),
+        )
+        if evaluated < generated_at or any(
+            value > evaluated
+            for value in (*direct_times, metrika_time, *watermarks)
+        ):
+            raise ControlRejected(
+                "TRUSTED_SNAPSHOT_TIME_INVALID",
+                "trusted snapshot evidence is later than evaluation time.",
+            )
+
+        def age_minutes(value: datetime) -> int:
+            return max(0, int((evaluated - value).total_seconds() // 60))
+
+        return {
+            "comparability_status": snapshot["comparability_status"],
+            "confidence_status": snapshot["confidence_status"],
+            "financial_recommendations_allowed": bool(
+                snapshot["financial_recommendations_allowed"]
+            ),
+            "direct_age_minutes": max(age_minutes(value) for value in direct_times),
+            "metrika_age_minutes": age_minutes(metrika_time),
+            "watermark_skew_minutes": int(
+                (max(watermarks) - min(watermarks)).total_seconds() // 60
+            ),
+            "clicks": int(metrics["clicks"]),
+            "conversions": int(metrics["goal_visits"]),
+            "impressions": int(metrics["impressions"]),
+            "spend_rub": int(metrics["cost_micros"]) // 1_000_000,
+            "cpa_rub": str(metrics["cpa_rub"]),
+            "budget_utilization_percent": str(
+                metrics["budget_utilization_percent"]
+            ),
+            "ctr_percent": str(metrics["ctr_percent"]),
+            "campaign_state": str(campaign["state"]),
+            "campaign_strategy": str(campaign["strategy"]),
+        }
+
+    def execution_usage(
+        self,
+        scope: TrustedScope,
+        now: datetime,
+        *,
+        exclude_execution_key: Optional[str] = None,
+    ) -> ExecutionUsage:
+        cutoff = now.astimezone(timezone.utc) - timedelta(hours=24)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT e.execution_key, e.status, e.updated_at, p.canonical_json "
+                "FROM executions e JOIN prepared_changes p "
+                "ON p.proposal_id = e.proposal_id "
+                "WHERE e.status IN ('IN_FLIGHT', 'APPLIED', 'NO_CHANGE', "
+                "'UNKNOWN_RESULT')"
+            ).fetchall()
+        action_count = 0
+        cumulative = 0
+        monetary = 0
+        latest: Optional[datetime] = None
+        for row in rows:
+            if row["execution_key"] == exclude_execution_key:
+                continue
+            prepared = PreparedChange.from_dict(json.loads(row["canonical_json"]))
+            if prepared.scope != scope:
+                continue
+            occurred = _parse_utc(row["updated_at"])
+            if occurred < cutoff:
+                continue
+            action_count += 1
+            relative = prepared.expected_diff.get("relative_step_percent", 0)
+            if isinstance(relative, int) and not isinstance(relative, bool):
+                cumulative += abs(relative)
+            if (
+                isinstance(prepared.current_value, int)
+                and not isinstance(prepared.current_value, bool)
+                and isinstance(prepared.target_value, int)
+                and not isinstance(prepared.target_value, bool)
+            ):
+                monetary += abs(
+                    prepared.target_value - prepared.current_value
+                ) // 1_000_000
+            if latest is None or occurred > latest:
+                latest = occurred
+        return ExecutionUsage(action_count, cumulative, monetary, latest)
 
     def grant_approval(
         self,
@@ -837,7 +1805,8 @@ class DurableControlState:
         approval: ApprovalRecord,
         now: datetime,
         sender: Callable[[], None],
-        at_dispatch_boundary: Optional[Callable[[], None]] = None,
+        at_dispatch_boundary: Optional[Callable[[], datetime]] = None,
+        immediate_pre_transport: Optional[Callable[[], datetime]] = None,
     ) -> Tuple[ExecutionStatus, ExecutionRecord]:
         """Commit authority and IN_FLIGHT before the immediate dispatch boundary."""
 
@@ -950,22 +1919,6 @@ class DurableControlState:
                     "durable kill switch blocks the unsent command.",
                 )
             self._require_no_interrupt(prepared.scope)
-            consumed = connection.execute(
-                "UPDATE approvals SET used_at = ?, execution_key = ? "
-                "WHERE approval_id = ? AND reserved_execution_key = ? "
-                "AND used_at IS NULL",
-                (
-                    now_text,
-                    prepared.execution_key(),
-                    approval.approval_id,
-                    prepared.execution_key(),
-                ),
-            )
-            if consumed.rowcount != 1:
-                raise ControlRejected(
-                    "APPROVAL_NOT_APPLICABLE",
-                    "approval reservation cannot be consumed.",
-                )
             row = connection.execute(
                 "SELECT * FROM executions WHERE execution_key = ?",
                 (prepared.execution_key(),),
@@ -997,9 +1950,26 @@ class DurableControlState:
                         "KILL_SWITCH_ACTIVE",
                         "durable kill switch blocks the unsent command.",
                     )
-            if at_dispatch_boundary is not None:
-                at_dispatch_boundary()
+            dispatch_at = (
+                now
+                if at_dispatch_boundary is None
+                else at_dispatch_boundary()
+            )
+            immediate_at = (
+                dispatch_at
+                if immediate_pre_transport is None
+                else immediate_pre_transport()
+            )
+            self._consume_reserved_approval_for_dispatch(
+                prepared,
+                approval.approval_id,
+                immediate_at,
+            )
         except ControlRejected as error:
+            self.release_approval_reservation(
+                approval.approval_id,
+                prepared.execution_key(),
+            )
             self.finish_execution(
                 prepared.execution_key(),
                 ExecutionStatus.BLOCKED,
@@ -1009,6 +1979,69 @@ class DurableControlState:
             raise
         sender()
         return ExecutionStatus.IN_FLIGHT, record
+
+    def _consume_reserved_approval_for_dispatch(
+        self,
+        prepared: PreparedChange,
+        approval_id: str,
+        now: datetime,
+    ) -> None:
+        self._require_no_interrupt(prepared.scope)
+        now_text = _utc_text(now)
+        connection = self._new_connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._kill_switch_active_in_connection(connection, prepared.scope):
+                raise ControlRejected(
+                    "KILL_SWITCH_ACTIVE",
+                    "durable kill switch blocks the unsent command.",
+                )
+            row = connection.execute(
+                "SELECT reserved_execution_key, used_at, revoked_at, expires_at "
+                "FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["reserved_execution_key"] != prepared.execution_key()
+                or row["used_at"] is not None
+                or row["revoked_at"] is not None
+                or _parse_utc(row["expires_at"]) <= now.astimezone(timezone.utc)
+            ):
+                raise ControlRejected(
+                    "APPROVAL_NOT_APPLICABLE",
+                    "approval reservation cannot be consumed.",
+                )
+            consumed = connection.execute(
+                "UPDATE approvals SET used_at = ?, execution_key = ? "
+                "WHERE approval_id = ? AND reserved_execution_key = ? "
+                "AND used_at IS NULL AND revoked_at IS NULL",
+                (
+                    now_text,
+                    prepared.execution_key(),
+                    approval_id,
+                    prepared.execution_key(),
+                ),
+            )
+            if consumed.rowcount != 1:
+                raise ControlRejected(
+                    "APPROVAL_NOT_APPLICABLE",
+                    "approval reservation cannot be consumed.",
+                )
+            connection.commit()
+        except ControlRejected:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ControlRejected(
+                "CONTROL_STATE_UNAVAILABLE",
+                "durable authority state is unavailable.",
+            ) from error
+        finally:
+            connection.close()
 
     def mark_approval_used(
         self,
@@ -1129,9 +2162,17 @@ class DurableControlState:
         self,
         scope: str,
         reason: str,
-        principal: AuthenticatedPrincipal,
+        principal: ElevatedAuthenticatedPrincipal,
         now: datetime,
     ) -> None:
+        if (
+            type(principal) is not ElevatedAuthenticatedPrincipal
+            or not principal.is_verified()
+        ):
+            raise ControlRejected(
+                "ELEVATED_REAUTHENTICATION_REQUIRED",
+                "kill-switch release requires verified elevated confirmation.",
+            )
         self._validate_incident_control(scope, reason, principal)
         with self._connect() as connection:
             connection.execute(
@@ -1169,6 +2210,15 @@ class DurableControlState:
                 "KILL_SWITCH_UNAVAILABLE",
                 "durable kill-switch state is unavailable.",
             ) from error
+
+    def require_dispatch_allowed(self, scope: TrustedScope) -> None:
+        """Fail closed on every durable interrupt immediately before transport."""
+
+        if self.any_kill_switch_active(scope):
+            raise ControlRejected(
+                "KILL_SWITCH_ACTIVE",
+                "durable kill switch blocks the unsent command.",
+            )
 
     def _require_no_interrupt(self, scope: TrustedScope) -> None:
         try:

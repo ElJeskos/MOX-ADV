@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from mox_adv.application_control import ApplicationWriteBoundary
 from mox_adv.campaign_lifecycle import (
     CampaignApproval,
     CampaignCreationRequest,
@@ -19,17 +20,50 @@ from mox_adv.campaign_lifecycle import (
     LifecycleRejected,
     validate_campaign_draft,
 )
+from mox_adv.control_state import AuthenticatedPrincipal, DurableControlState
 from mox_adv.direct_management import (
+    DirectMethod,
+    DirectMethodRequest,
     DirectManagementConnectorV1,
+    DirectService,
     DirectStateTransitionRejected,
     FakeDirectManagementAdapter,
     ProductionPilotAuthority,
 )
+from mox_adv.lifecycle_authority import LifecycleAuthorityService
+from mox_adv.mandate_signing import HMACMandateSigner
 from mox_adv.recommend_contracts import CampaignDraftV1
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / "config" / "gate0-policy.json"
 NOW = datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc)
+
+
+def isolated_write_boundary(
+    path: Path,
+    policy: dict[str, object],
+) -> ApplicationWriteBoundary:
+    return ApplicationWriteBoundary.for_isolated_test(
+        path,
+        policy,
+        lambda: NOW,
+    )
+
+
+class FixedAuthenticator:
+    def authenticate(self) -> AuthenticatedPrincipal:
+        return AuthenticatedPrincipal(
+            identity="sviridov",
+            authentication="authenticated_macos_user",
+        )
+
+
+def authority_service(policy) -> LifecycleAuthorityService:
+    return LifecycleAuthorityService(
+        policy,
+        FixedAuthenticator(),
+        HMACMandateSigner(b"campaign-lifecycle-authority-tests"),
+    )
 
 
 def load_policy() -> dict[str, object]:
@@ -188,8 +222,14 @@ class CampaignLifecycleTests(unittest.TestCase):
         self.addCleanup(self.temporary_directory.cleanup)
         self.database = Path(self.temporary_directory.name) / "campaign.sqlite3"
         self.policy = load_policy()
+        self.authority_service = authority_service(self.policy)
         self.adapter = FakeDirectManagementAdapter()
-        self.store = CampaignSagaStore(self.database)
+        self.store = CampaignSagaStore(self.database, self.authority_service)
+        self.control_state = DurableControlState(self.database)
+        self.write_boundary = isolated_write_boundary(
+            self.database,
+            self.policy,
+        )
         self.store.register_creation_reservation(make_reservation(), NOW)
         self.draft = validate_campaign_draft(
             draft_payload(),
@@ -207,17 +247,19 @@ class CampaignLifecycleTests(unittest.TestCase):
                 approver="sviridov",
                 authentication="authenticated_macos_user",
                 expires_at=NOW + timedelta(minutes=15),
-            )
+            ),
+            NOW,
         )
 
     def service(self) -> CampaignLifecycleService:
         return CampaignLifecycleService(
             policy=self.policy,
-            store=CampaignSagaStore(self.database),
+            store=CampaignSagaStore(self.database, self.authority_service),
             connector=DirectManagementConnectorV1(
                 self.policy,
                 self.adapter,
-                CampaignSagaStore(self.database),
+                CampaignSagaStore(self.database, self.authority_service),
+                write_boundary=self.write_boundary,
             ),
             safety_bindings=safety_bindings(),
         )
@@ -316,6 +358,10 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 expired_store,
+                write_boundary=isolated_write_boundary(
+                    expired_database,
+                    self.policy,
+                ),
             ),
             safety_bindings=safety_bindings(),
         )
@@ -323,12 +369,17 @@ class CampaignLifecycleTests(unittest.TestCase):
             expired_service.execute(self.request, NOW)
         self.assertEqual([], self.adapter.calls)
 
-    def test_unknown_write_result_blocks_restart_without_blind_retry(self) -> None:
+    def test_unknown_write_result_reconciles_without_blind_retry(self) -> None:
         adapter = FakeDirectManagementAdapter(timeout_after=("Campaigns", "add"))
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                write_boundary=self.write_boundary,
+            ),
             safety_bindings(),
         )
 
@@ -336,8 +387,8 @@ class CampaignLifecycleTests(unittest.TestCase):
         calls_after_unknown = tuple(adapter.calls)
         second = service.execute(self.request, NOW)
 
-        self.assertEqual(CampaignSagaState.UNKNOWN_RESULT, first.status)
-        self.assertEqual(CampaignSagaState.UNKNOWN_RESULT, second.status)
+        self.assertEqual(CampaignSagaState.APPLIED, first.status)
+        self.assertEqual(CampaignSagaState.ALREADY_PROCESSED, second.status)
         self.assertEqual(calls_after_unknown, tuple(adapter.calls))
         self.assertEqual(1, adapter.operation_count("Campaigns", "add"))
         self.assertEqual(
@@ -358,6 +409,27 @@ class CampaignLifecycleTests(unittest.TestCase):
             approver["authentication"],
         )
         self.store.begin_step(self.request.execution_key, "CAMPAIGN_ADD", NOW)
+        claimed = self.store.claim_direct_operation(
+            DirectMethodRequest(
+                run_id=self.request.run_id,
+                operation_key=self.request.execution_key + ":CAMPAIGN_ADD",
+                service=DirectService.CAMPAIGNS,
+                method=DirectMethod.ADD,
+                payload={
+                    "type": self.request.draft.campaign_type,
+                    "state": "SUSPENDED",
+                    "strategy": dict(self.request.draft.strategy),
+                    "geography": list(self.request.draft.geography),
+                    "schedule": dict(self.request.draft.schedule),
+                    "WeeklySpendLimit": self.request.draft.budget[
+                        "weekly_micros"
+                    ],
+                },
+            ),
+            None,
+            NOW,
+        )
+        self.assertTrue(claimed)
 
         result = self.service().execute(self.request, NOW)
 
@@ -370,7 +442,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                write_boundary=self.write_boundary,
+            ),
             safety_bindings(),
         )
 
@@ -399,7 +476,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                write_boundary=self.write_boundary,
+            ),
             safety_bindings(),
         )
 
@@ -415,7 +497,15 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             store,
-            DirectManagementConnectorV1(self.policy, self.adapter, store),
+            DirectManagementConnectorV1(
+                self.policy,
+                self.adapter,
+                store,
+                write_boundary=isolated_write_boundary(
+                    other_database,
+                    self.policy,
+                ),
+            ),
             safety_bindings(),
         )
 
@@ -425,7 +515,10 @@ class CampaignLifecycleTests(unittest.TestCase):
         self.assertEqual([], self.adapter.calls)
 
         unbound_database = Path(self.temporary_directory.name) / "unbound.sqlite3"
-        unbound_store = CampaignSagaStore(unbound_database)
+        unbound_store = CampaignSagaStore(
+            unbound_database,
+            self.authority_service,
+        )
         unbound_store.register_creation_reservation(make_reservation(), NOW)
         unbound_store.register_campaign_approval(
             CampaignApproval(
@@ -435,7 +528,8 @@ class CampaignLifecycleTests(unittest.TestCase):
                 approver="sviridov",
                 authentication="authenticated_macos_user",
                 expires_at=NOW + timedelta(minutes=15),
-            )
+            ),
+            NOW,
         )
         unbound_service = CampaignLifecycleService(
             self.policy,
@@ -444,6 +538,10 @@ class CampaignLifecycleTests(unittest.TestCase):
                 self.policy,
                 self.adapter,
                 unbound_store,
+                write_boundary=isolated_write_boundary(
+                    unbound_database,
+                    self.policy,
+                ),
             ),
             safety_bindings(),
         )
@@ -478,7 +576,12 @@ class CampaignLifecycleTests(unittest.TestCase):
         service = CampaignLifecycleService(
             self.policy,
             self.store,
-            DirectManagementConnectorV1(self.policy, adapter, self.store),
+            DirectManagementConnectorV1(
+                self.policy,
+                adapter,
+                self.store,
+                write_boundary=self.write_boundary,
+            ),
             safety_bindings(),
         )
 
@@ -501,10 +604,16 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
             Path(self.temporary_directory.name) / "matrix.sqlite3"
         )
         self.adapter = FakeDirectManagementAdapter()
+        self.control_state = DurableControlState(self.store.path)
+        self.write_boundary = isolated_write_boundary(
+            self.store.path,
+            self.policy,
+        )
         self.connector = DirectManagementConnectorV1(
             self.policy,
             self.adapter,
             self.store,
+            write_boundary=self.write_boundary,
         )
         self.run_id = "matrix-run-1"
 
@@ -750,6 +859,7 @@ class DirectIntegrationMatrixTests(unittest.TestCase):
                 binding_hash="sha256:" + "1" * 64,
                 armed=True,
             ),
+            write_boundary=self.write_boundary,
         )
 
         with self.assertRaises(DirectStateTransitionRejected):

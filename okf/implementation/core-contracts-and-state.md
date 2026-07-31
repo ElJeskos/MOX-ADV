@@ -22,6 +22,9 @@ sources:
 `IntegratedPerformanceSnapshot` binds allowlisted organization, connection, account, campaign, counter, and goal identifiers to a period, attribution model, source timestamps, watermarks, raw metrics, calculated metrics, current managed values, object states, change history, business objective, data-quality gaps, comparability, and conclusion confidence.
 Its identifier covers every normative input, configuration version, and policy version.
 A late conversion creates a new snapshot version instead of mutating an old one.[^requirements-v2]
+Every model-visible and persisted contract is versioned and closed to unknown fields.
+Machine-readable JSON Schemas in `schemas/` must match `requirements-v2-prototype.md`; that sole normative source wins until an approved revision supersedes it.
+Identifiers, timestamps, money, limits, and evidence references are validated outside the LLM.
 
 `OptimizationProposalV1` is a closed-schema model output.
 It records one of `EFFECTIVE`, `INEFFECTIVE`, `INSUFFICIENT_DATA`, or `NEEDS_HUMAN`, observed facts, up to three ranked hypotheses, evidence references to fields present in the snapshot, bounded atomic actions, risks, preconditions, rollback conditions, expected direction, and a short Russian explanation.
@@ -53,3 +56,5 @@ Possible artifacts include `proposal.json`, `approval.json`, `change_diff.json`,
 They record schema and policy versions, evidence, decisions, before-and-after values, provider usage, cost, and timing without secrets or hidden model reasoning.
 
 [^requirements-v2]: [MOX-ADV prototype requirements](../../requirements-v2-prototype.md), `FR-001`, `FR-005`, `FR-007` through `FR-009`, and `NFR-004`.
+Every model-visible tool returns exactly one typed result, including denials, timeouts, and internal errors.
+Side-effecting tool requests must become persisted Proposals before the executor can consider them.

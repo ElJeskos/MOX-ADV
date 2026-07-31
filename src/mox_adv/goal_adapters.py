@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 
 from mox_adv.goal_contracts import (
     GoalLifecycleRejected,
@@ -27,10 +27,12 @@ class FakeMetrikaGoalAdapter:
         allowed_counter_ids: Iterable[str],
         write_delay_seconds: float = 0,
         timeout_after_write: bool = False,
+        before_add: Callable[[str], None] | None = None,
     ) -> None:
         self.allowed_counter_ids = frozenset(allowed_counter_ids)
         self.write_delay_seconds = write_delay_seconds
         self.timeout_after_write = timeout_after_write
+        self.before_add = before_add
         self._goals: dict[str, dict[str, dict[str, Any]]] = {
             counter_id: {} for counter_id in self.allowed_counter_ids
         }
@@ -65,6 +67,8 @@ class FakeMetrikaGoalAdapter:
         execution_key: str,
     ) -> Mapping[str, Any]:
         self._require_counter(counter_id)
+        if self.before_add is not None:
+            self.before_add(execution_key)
         if self.write_delay_seconds:
             time.sleep(self.write_delay_seconds)
         with self._lock:
@@ -109,6 +113,20 @@ class FakeMetrikaGoalAdapter:
                 raise GoalLifecycleRejected("GOAL_NOT_FOUND")
             self.delete_calls += 1
             del self._goals[counter_id][goal_id]
+
+    def goal_exists(self, counter_id: str, goal_id: str) -> bool:
+        self._require_counter(counter_id)
+        with self._lock:
+            return goal_id in self._goals[counter_id]
+
+    def delete_goal_if_present(self, counter_id: str, goal_id: str) -> bool:
+        self._require_counter(counter_id)
+        with self._lock:
+            if goal_id not in self._goals[counter_id]:
+                return False
+            self.delete_calls += 1
+            del self._goals[counter_id][goal_id]
+            return True
 
     def set_visit_observations(
         self,

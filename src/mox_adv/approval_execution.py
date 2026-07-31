@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from decimal import Decimal
+from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping, Optional, Tuple
 
 from mox_adv.audit import AuditWriteBlocked
@@ -20,6 +21,8 @@ from mox_adv.control_state import (
     DurableControlState,
     ExecutionStatus,
     PreparedChange,
+    TerminalExecutionRequest,
+    TerminalNoWritePlan,
     TrustedScope,
 )
 from mox_adv.egress import EgressDenied, HttpEgressGuard
@@ -38,6 +41,7 @@ __all__ = [
     "ExecutionFacts",
     "ExecutionRequest",
     "PreparedChange",
+    "TerminalExecutionRequest",
     "TrustedScope",
 ]
 
@@ -243,8 +247,23 @@ class ApprovalRequiredPolicy:
             if facts.cpa_rub == "NOT_APPLICABLE"
             else Decimal(facts.cpa_rub)
         )
+        if prepared.action == OptimizationAction.SUSPEND_CAMPAIGN:
+            return state_on and facts.conversions == 0 and facts.spend_rub >= 2000
+        if prepared.action == OptimizationAction.SET_AD_VARIANT:
+            return (
+                state_on
+                and sufficient
+                and Decimal(facts.ctr_percent) < 1
+                and facts.impressions >= 5000
+            )
+        cpa = Decimal(facts.cpa_rub)
+        if prepared.action == OptimizationAction.RESUME_CAMPAIGN:
+            return (
+                facts.campaign_state == "SUSPENDED"
+                and facts.conversions >= 3
+                and cpa <= 1000
+            )
         utilization = Decimal(facts.budget_utilization_percent)
-        ctr = Decimal(facts.ctr_percent)
         checks = {
             OptimizationAction.INCREASE_WEEKLY_BUDGET: (
                 state_on and sufficient and cpa <= 1000 and utilization >= 90
@@ -267,19 +286,8 @@ class ApprovalRequiredPolicy:
                 and cpa > 1000
                 and utilization < 90
             ),
-            OptimizationAction.SET_AD_VARIANT: (
-                state_on and sufficient and ctr < 1 and facts.impressions >= 5000
-            ),
-            OptimizationAction.SUSPEND_CAMPAIGN: (
-                state_on and facts.conversions == 0 and facts.spend_rub >= 2000
-            ),
-            OptimizationAction.RESUME_CAMPAIGN: (
-                facts.campaign_state == "SUSPENDED"
-                and facts.conversions >= 3
-                and cpa <= 1000
-            ),
         }
-        return checks[prepared.action]
+        return checks.get(prepared.action, False)
 
 
 class ApprovalExecutionService:
@@ -318,21 +326,59 @@ class ApprovalExecutionService:
             self.clock,
         )
 
-    def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
+    def execute(
+        self,
+        request: ExecutionRequest | TerminalExecutionRequest,
+    ) -> ExecutionOutcome:
         try:
-            prepared = self.state.load_prepared_change(request.proposal_id)
-            decision = self.policy.evaluate(prepared, request)
+            plan = self.state.load_execution_plan(request.proposal_id)
+            if type(plan) is TerminalNoWritePlan:
+                if type(request) is not TerminalExecutionRequest:
+                    return ExecutionOutcome(
+                        ExecutionStatus.BLOCKED,
+                        "EXECUTION_REQUEST_TYPE_MISMATCH",
+                        None,
+                    )
+                return self._terminal_outcome(plan)
+            if type(request) is not ExecutionRequest:
+                return ExecutionOutcome(
+                    ExecutionStatus.BLOCKED,
+                    "EXECUTION_REQUEST_TYPE_MISMATCH",
+                    None,
+                )
+            prepared = plan
+            completed = (
+                self._completed_outcome(prepared)
+                if request.execution_key == prepared.execution_key()
+                and request.scope == prepared.scope
+                else None
+            )
+            if completed is not None:
+                return completed
+            evaluated_at = self.clock()
+            effective_request = self._trusted_request(
+                prepared,
+                request,
+                evaluated_at,
+            )
+            decision = self.policy.evaluate(prepared, effective_request)
             if not decision.allowed:
                 return ExecutionOutcome(
                     ExecutionStatus.BLOCKED,
                     decision.reason_code,
                     None,
                 )
-            minimum, maximum = self.policy.numeric_bounds(prepared)
+            if self.state.prepared_source(prepared.proposal_id) == "FIXTURE":
+                minimum, maximum = (1, 2**63 - 1)
+            else:
+                minimum, maximum = self.policy.numeric_bounds(prepared)
             command = build_high_level_command(prepared, minimum, maximum)
             self.egress_guard.enforce_adapter(self.adapter, command)
             before = self.adapter.readback(prepared.target_key())
-            if before not in {prepared.current_value, prepared.target_value}:
+            if (
+                before != prepared.current_value
+                and before != prepared.target_value
+            ):
                 return ExecutionOutcome(
                     ExecutionStatus.BLOCKED,
                     "CURRENT_STATE_MISMATCH",
@@ -374,11 +420,24 @@ class ApprovalExecutionService:
                     at_dispatch_boundary=lambda: self.dispatch_boundary.authorize(
                         prepared.execution_key(),
                         prepared.target_key(),
+                        final_check=lambda: self._revalidate_dispatch(
+                            prepared,
+                            request,
+                        ),
+                    ),
+                    immediate_pre_transport=lambda: self._revalidate_dispatch(
+                        prepared,
+                        request,
                     ),
                 )
             except AdapterTimeout:
                 return self._reconcile_timeout(prepared)
             except AuditWriteBlocked:
+                self.state.release_approval_reservation(
+                    approval.approval_id,
+                    prepared.execution_key(),
+                )
+                self.write_window.release(prepared.execution_key())
                 self._finish_audit_block(prepared.execution_key())
                 return ExecutionOutcome(
                     ExecutionStatus.BLOCKED,
@@ -414,6 +473,12 @@ class ApprovalExecutionService:
                 "OUT_OF_BOUNDS" if "OUT_OF_BOUNDS" in str(error) else "INVALID_INPUT"
             )
             return ExecutionOutcome(ExecutionStatus.BLOCKED, reason, None)
+        except (InvalidOperation, TypeError, ValueError):
+            return ExecutionOutcome(
+                ExecutionStatus.BLOCKED,
+                "INVALID_INPUT",
+                None,
+            )
         except EgressDenied:
             return ExecutionOutcome(
                 ExecutionStatus.BLOCKED,
@@ -421,6 +486,12 @@ class ApprovalExecutionService:
                 None,
             )
         except ControlRejected as error:
+            execution_key = getattr(request, "execution_key", "")
+            if execution_key:
+                try:
+                    self.write_window.release(execution_key)
+                except ControlRejected:
+                    pass
             return ExecutionOutcome(
                 ExecutionStatus.BLOCKED,
                 error.reason_code,
@@ -428,7 +499,12 @@ class ApprovalExecutionService:
             )
         except sqlite3.Error:
             try:
-                execution = self.state.load_execution(request.execution_key)
+                execution_key = getattr(request, "execution_key", "")
+                execution = (
+                    None
+                    if not execution_key
+                    else self.state.load_execution(execution_key)
+                )
             except (ControlRejected, sqlite3.Error):
                 execution = None
             if execution is not None and execution.status == ExecutionStatus.IN_FLIGHT:
@@ -442,6 +518,158 @@ class ApprovalExecutionService:
                 "CONTROL_STATE_UNAVAILABLE",
                 None,
             )
+
+    @staticmethod
+    def _terminal_outcome(plan: TerminalNoWritePlan) -> ExecutionOutcome:
+        if plan.action == "KEEP":
+            return ExecutionOutcome(
+                ExecutionStatus.NO_CHANGE,
+                None,
+                None,
+            )
+        return ExecutionOutcome(
+            ExecutionStatus.BLOCKED,
+            plan.reason_code or "UNSUPPORTED_STATE",
+            None,
+        )
+
+    def _revalidate_dispatch(
+        self,
+        prepared: PreparedChange,
+        request: ExecutionRequest,
+    ) -> datetime:
+        evaluated_at = self.clock()
+        effective_request = self._trusted_request(
+            prepared,
+            request,
+            evaluated_at,
+        )
+        decision = self.policy.evaluate(prepared, effective_request)
+        if not decision.allowed:
+            raise ControlRejected(
+                decision.reason_code or "ACTION_POLICY_REJECTED",
+                "mutable execution preconditions changed before transport.",
+            )
+        observed = self.adapter.readback(prepared.target_key())
+        if observed != prepared.current_value:
+            raise ControlRejected(
+                "CURRENT_STATE_MISMATCH",
+                "target state changed before transport.",
+            )
+        self.state.require_dispatch_allowed(prepared.scope)
+        return evaluated_at
+
+    def _completed_outcome(
+        self,
+        prepared: PreparedChange,
+    ) -> Optional[ExecutionOutcome]:
+        try:
+            execution = self.state.load_execution(prepared.execution_key())
+        except ControlRejected as error:
+            if error.reason_code == "EXECUTION_NOT_FOUND":
+                return None
+            raise
+        if execution.status not in {
+            ExecutionStatus.APPLIED,
+            ExecutionStatus.NO_CHANGE,
+        }:
+            return None
+        return ExecutionOutcome(
+            ExecutionStatus.ALREADY_PROCESSED,
+            execution.detail,
+            self.adapter.readback(prepared.target_key()),
+        )
+
+    def _trusted_request(
+        self,
+        prepared: PreparedChange,
+        request: ExecutionRequest,
+        evaluated_at: Any,
+    ) -> ExecutionRequest:
+        if self.state.prepared_source(prepared.proposal_id) == "FIXTURE":
+            if type(self.adapter) is not FakeWriteAdapter:
+                raise EgressDenied(
+                    "Fixture prepared changes are sealed-fake simulation only."
+                )
+            return request
+        snapshot = self.state.trusted_snapshot_facts(
+            prepared.proposal_id,
+            evaluated_at,
+        )
+        usage = self.state.execution_usage(
+            prepared.scope,
+            evaluated_at,
+            exclude_execution_key=prepared.execution_key(),
+        )
+        try:
+            current_fingerprint = self.adapter.current_fingerprint(
+                prepared.target_key()
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ControlRejected(
+                "FINGERPRINT_READBACK_UNAVAILABLE",
+                "executor could not read the current trusted fingerprint.",
+            ) from error
+        latest = usage.latest_effective_write_at
+        cooldown_active = (
+            latest is not None
+            and evaluated_at.astimezone(latest.tzinfo) - latest
+            < timedelta(hours=int(self.policy.policy["timing"]["cooldown_hours"]))
+        )
+        self.state.require_dispatch_allowed(prepared.scope)
+        facts = ExecutionFacts(
+            mode="APPROVAL_REQUIRED",
+            automation_enabled=True,
+            comparability_status=str(snapshot["comparability_status"]),
+            confidence_status=str(snapshot["confidence_status"]),
+            financial_recommendations_allowed=bool(
+                snapshot["financial_recommendations_allowed"]
+            ),
+            direct_age_minutes=int(snapshot["direct_age_minutes"]),
+            metrika_age_minutes=int(snapshot["metrika_age_minutes"]),
+            watermark_skew_minutes=int(snapshot["watermark_skew_minutes"]),
+            clicks=int(snapshot["clicks"]),
+            conversions=int(snapshot["conversions"]),
+            impressions=int(snapshot["impressions"]),
+            spend_rub=int(snapshot["spend_rub"]),
+            cpa_rub=str(snapshot["cpa_rub"]),
+            budget_utilization_percent=str(
+                snapshot["budget_utilization_percent"]
+            ),
+            ctr_percent=str(snapshot["ctr_percent"]),
+            campaign_state=str(snapshot["campaign_state"]),
+            campaign_strategy=str(snapshot["campaign_strategy"]),
+            current_fingerprint=str(current_fingerprint),
+            cooldown_active=cooldown_active,
+            actions_in_last_24h=usage.actions_in_last_24h,
+            cumulative_daily_change_percent=(
+                usage.cumulative_daily_change_percent
+            ),
+            monetary_exposure_rub=(
+                usage.monetary_exposure_rub
+                + self._proposed_monetary_exposure_rub(prepared)
+            ),
+            kill_switch_available=True,
+        )
+        return ExecutionRequest(
+            proposal_id=prepared.proposal_id,
+            execution_key=request.execution_key,
+            scope=request.scope,
+            facts=facts,
+        )
+
+    @staticmethod
+    def _proposed_monetary_exposure_rub(prepared: PreparedChange) -> int:
+        current = prepared.current_value
+        target = prepared.target_value
+        if (
+            isinstance(current, bool)
+            or not isinstance(current, int)
+            or isinstance(target, bool)
+            or not isinstance(target, int)
+        ):
+            return 0
+        return abs(target - current) // 1_000_000
 
     def _finish_audit_block(self, execution_key: str) -> None:
         try:

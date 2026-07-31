@@ -81,7 +81,7 @@ def _load_json_object(
 def load_linked_fixture(path: Path) -> dict[str, Any]:
     return _load_json_object(
         path,
-        "ANALYTICS_FIXTURE_REJECTED",
+        "INVALID_INPUT",
         "connectors",
     )
 
@@ -322,6 +322,9 @@ def _result(
         "status": status,
         "execution_status": "NOT_STARTED",
         "external_write_sent": False,
+        "decision_status": None if snapshot is not None else "NEEDS_HUMAN",
+        "decision_action": None if snapshot is not None else "REQUEST_HUMAN_HELP",
+        "reason_code": error_code,
         "snapshot_id": None if snapshot is None else snapshot.snapshot_id,
         "snapshot": None if snapshot is None else snapshot.as_dict(),
         "capability_evidence_path": "capability-evidence.json",

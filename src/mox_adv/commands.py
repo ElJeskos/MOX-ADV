@@ -160,6 +160,11 @@ class SearchBidCommand(HighLevelCommandBase):
 class AdVariantCommand(HighLevelCommandBase):
     """A typed Ads.update variant command."""
 
+    variant_id: str
+    title: str
+    text: str
+    source_plan_hash: str
+
 
 @dataclass(frozen=True)
 class CampaignStateCommand(HighLevelCommandBase):
@@ -255,9 +260,41 @@ def build_high_level_command(
         )
 
     if spec.family == ActionFamily.AD_VARIANT:
-        if current not in {"A", "B"} or target not in {"A", "B"} or current == target:
+        if not isinstance(current, Mapping) or not isinstance(target, Mapping):
             raise CommandRejected("INVALID_INPUT: ad variant transition is invalid.")
-        if diff != {"operation": action, "variant_id": target}:
+        required_fields = {"variant_id", "title", "text"}
+        if set(current) != required_fields or set(target) != required_fields:
+            raise CommandRejected("INVALID_INPUT: ad variant transition is invalid.")
+        current_variant = current["variant_id"]
+        target_variant = target["variant_id"]
+        if (
+            current_variant not in {"A", "B"}
+            or target_variant not in {"A", "B"}
+            or current_variant == target_variant
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in (
+                    current["title"],
+                    current["text"],
+                    target["title"],
+                    target["text"],
+                )
+            )
+        ):
+            raise CommandRejected("INVALID_INPUT: ad variant transition is invalid.")
+        source_plan_hash = diff.get("source_plan_hash")
+        exact_diff = {
+            "operation": action,
+            "variant_id": target_variant,
+            "title": target["title"],
+            "text": target["text"],
+            "source_plan_hash": source_plan_hash,
+        }
+        if (
+            diff != exact_diff
+            or not isinstance(source_plan_hash, str)
+            or not source_plan_hash.startswith("sha256:")
+        ):
             raise CommandRejected("INVALID_INPUT: ad variant diff is not exact.")
         return AdVariantCommand(
             **_authority_fields(
@@ -269,7 +306,11 @@ def build_high_level_command(
                 minimum_value,
                 maximum_value,
             ),
-            rollback=RollbackCommand(action=action, target_value=current),
+            rollback=RollbackCommand(action=action, target_value=dict(current)),
+            variant_id=target_variant,
+            title=str(target["title"]),
+            text=str(target["text"]),
+            source_plan_hash=source_plan_hash,
         )
 
     if spec.family == ActionFamily.CAMPAIGN_STATE:

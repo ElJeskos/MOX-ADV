@@ -27,6 +27,7 @@ class BoundedAutonomyPolicy:
         self,
         prepared: PreparedChange,
         request: BoundedAutonomyRequest,
+        minimum_sample: Mapping[str, int],
     ) -> _PolicyOutcome:
         checks = (
             (request.mode == "BOUNDED_AUTONOMY", "MODE_NOT_WRITE_CAPABLE"),
@@ -84,7 +85,7 @@ class BoundedAutonomyPolicy:
                 "API_METHOD_NOT_ALLOWLISTED",
             ),
             (
-                self._action_is_safe(prepared, request),
+                self._action_is_safe(prepared, request, minimum_sample),
                 "ACTION_POLICY_REJECTED",
             ),
         )
@@ -118,22 +119,25 @@ class BoundedAutonomyPolicy:
     def _action_is_safe(
         prepared: PreparedChange,
         request: BoundedAutonomyRequest,
+        minimum_sample: Mapping[str, int],
     ) -> bool:
+        minimum_clicks = int(minimum_sample["clicks"])
+        minimum_conversions = int(minimum_sample["conversions"])
+        if prepared.action == OptimizationAction.SUSPEND_CAMPAIGN:
+            return (
+                request.campaign_state == "ON"
+                and request.conversions == 0
+                and request.spend_rub >= 2000
+            )
         cpa = Decimal(request.cpa_rub)
         utilization = Decimal(request.budget_utilization_percent)
         if prepared.action == OptimizationAction.DECREASE_SEARCH_BID:
             return (
                 request.campaign_state == "ON"
                 and request.campaign_strategy == "HIGHEST_POSITION"
-                and request.clicks >= 50
-                and request.conversions >= 3
+                and request.clicks >= minimum_clicks
+                and request.conversions >= minimum_conversions
                 and cpa > 1000
                 and utilization < 90
-            )
-        if prepared.action == OptimizationAction.SUSPEND_CAMPAIGN:
-            return (
-                request.campaign_state == "ON"
-                and request.conversions == 0
-                and request.spend_rub >= 2000
             )
         return False

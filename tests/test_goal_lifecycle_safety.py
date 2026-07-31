@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from mox_adv.application_control import ApplicationWriteBoundary
 from mox_adv.control_state import AuthenticatedPrincipal
 from mox_adv.goal_lifecycle import (
     AuthorityKind,
@@ -23,6 +24,8 @@ from mox_adv.goal_lifecycle import (
     site_publish_binding,
     site_publish_diff,
 )
+from mox_adv.lifecycle_authority import LifecycleAuthorityService
+from mox_adv.mandate_signing import HMACMandateSigner
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc)
@@ -57,8 +60,8 @@ class FakeSemanticAuthenticator:
 
 
 class FailingFinalizeStore(GoalLifecycleStore):
-    def __init__(self, path: Path) -> None:
-        super().__init__(path)
+    def __init__(self, path: Path, authority_service) -> None:
+        super().__init__(path, authority_service)
         self.fail_goal_finalize_once = True
 
     def complete_goal_creation(self, *args, **kwargs):
@@ -69,8 +72,8 @@ class FailingFinalizeStore(GoalLifecycleStore):
 
 
 class FailingSiteFinalizeStore(GoalLifecycleStore):
-    def __init__(self, path: Path) -> None:
-        super().__init__(path)
+    def __init__(self, path: Path, authority_service) -> None:
+        super().__init__(path, authority_service)
         self.fail_site_finalize_once = True
 
     def complete_site_publication(self, *args, **kwargs):
@@ -80,33 +83,17 @@ class FailingSiteFinalizeStore(GoalLifecycleStore):
         return super().complete_site_publication(*args, **kwargs)
 
 
-class InspectingGoalAdapter(FakeMetrikaGoalAdapter):
-    def __init__(self, store: GoalLifecycleStore) -> None:
-        super().__init__(("sim-test-counter", "sim-pilot-counter"))
-        self.store = store
-        self.saw_reserved_boundary = False
-
-    def add_goal(self, counter_id, payload, signature, execution_key):
-        self.saw_reserved_boundary = (
-            self.store.load_execution(execution_key).status
-            == GoalExecutionStatus.IN_FLIGHT
-            and self.store.reservation_status("reservation-inspection") == "RESERVED"
-            and self.store.authority_status("approval-inspection") == "RESERVED"
-        )
-        return super().add_goal(
-            counter_id,
-            payload,
-            signature,
-            execution_key,
-        )
-
-
 class GoalLifecycleSafetyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.policy = load_policy()
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.database = Path(self.temporary_directory.name) / "goals.sqlite3"
+        self.authority_service = LifecycleAuthorityService(
+            self.policy,
+            FakeSemanticAuthenticator(),
+            HMACMandateSigner(b"goal-lifecycle-safety-authority"),
+        )
 
     def service(
         self,
@@ -126,6 +113,11 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
                 }
             ),
             FakeSemanticAuthenticator(),
+            ApplicationWriteBoundary.for_isolated_test(
+                store.path,
+                self.policy,
+                lambda: NOW,
+            ),
         )
 
     def register_creation(
@@ -172,7 +164,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
             binding_hash=binding_hash,
         )
         store.register_reservation(reservation)
-        store.register_authority(authority)
+        store.register_authority(authority, NOW)
 
     def create(
         self,
@@ -223,11 +215,11 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
                 ),
             ),
         )
-        store.register_authority(authority)
+        store.register_authority(authority, NOW)
         return authority
 
     def test_concurrent_reuse_of_one_approval_produces_one_adapter_write(self) -> None:
-        store = GoalLifecycleStore(self.database)
+        store = GoalLifecycleStore(self.database, self.authority_service)
         adapter = FakeMetrikaGoalAdapter(
             ("sim-test-counter", "sim-pilot-counter"),
             write_delay_seconds=0.05,
@@ -278,8 +270,21 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
     def test_in_flight_reservation_and_authority_are_durable_before_write(
         self,
     ) -> None:
-        store = GoalLifecycleStore(self.database)
-        adapter = InspectingGoalAdapter(store)
+        store = GoalLifecycleStore(self.database, self.authority_service)
+        observed = {"reserved": False}
+
+        def inspect_boundary(execution_key: str) -> None:
+            observed["reserved"] = (
+                store.load_execution(execution_key).status
+                == GoalExecutionStatus.IN_FLIGHT
+                and store.reservation_status("reservation-inspection") == "RESERVED"
+                and store.authority_status("approval-inspection") == "RESERVED"
+            )
+
+        adapter = FakeMetrikaGoalAdapter(
+            ("sim-test-counter", "sim-pilot-counter"),
+            before_add=inspect_boundary,
+        )
         service = self.service(store, adapter)
         self.register_creation(
             store,
@@ -300,13 +305,15 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
             goal_payload=payload(),
         )
 
-        self.assertTrue(adapter.saw_reserved_boundary)
+        self.assertTrue(observed["reserved"])
         self.assertEqual("USED", store.reservation_status("reservation-inspection"))
         self.assertEqual("USED", store.authority_status("approval-inspection"))
 
     def test_mandate_cannot_authorize_a_different_candidate_payload(self) -> None:
-        store = GoalLifecycleStore(self.database)
-        adapter = FakeMetrikaGoalAdapter(("sim-test-counter", "sim-pilot-counter"))
+        store = GoalLifecycleStore(self.database, self.authority_service)
+        adapter = FakeMetrikaGoalAdapter(
+            ("sim-test-counter", "sim-pilot-counter")
+        )
         service = self.service(store, adapter)
         self.register_creation(
             store,
@@ -339,7 +346,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
         )
 
     def test_concurrent_duplicate_signatures_are_claimed_before_write(self) -> None:
-        store = GoalLifecycleStore(self.database)
+        store = GoalLifecycleStore(self.database, self.authority_service)
         adapter = FakeMetrikaGoalAdapter(
             ("sim-test-counter", "sim-pilot-counter"),
             write_delay_seconds=0.05,
@@ -386,7 +393,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
     def test_persistence_failure_reconciles_created_goal_without_second_write(
         self,
     ) -> None:
-        store = FailingFinalizeStore(self.database)
+        store = FailingFinalizeStore(self.database, self.authority_service)
         adapter = FakeMetrikaGoalAdapter(("sim-test-counter", "sim-pilot-counter"))
         service = self.service(store, adapter)
         self.register_creation(
@@ -432,7 +439,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
         )
 
     def test_timeout_after_goal_write_reconciles_without_blind_retry(self) -> None:
-        store = GoalLifecycleStore(self.database)
+        store = GoalLifecycleStore(self.database, self.authority_service)
         adapter = FakeMetrikaGoalAdapter(
             ("sim-test-counter", "sim-pilot-counter"),
             timeout_after_write=True,
@@ -465,7 +472,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
         )
 
     def test_site_persistence_failure_reconciles_without_second_publish(self) -> None:
-        store = FailingSiteFinalizeStore(self.database)
+        store = FailingSiteFinalizeStore(self.database, self.authority_service)
         goal_adapter = FakeMetrikaGoalAdapter(("sim-test-counter", "sim-pilot-counter"))
         site_adapter = FakeSitePublishAdapter(
             {
@@ -524,7 +531,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
         self.assertEqual("USED", store.authority_status(authority.authority_id))
 
     def test_site_timeout_after_write_reconciles_without_blind_retry(self) -> None:
-        store = GoalLifecycleStore(self.database)
+        store = GoalLifecycleStore(self.database, self.authority_service)
         goal_adapter = FakeMetrikaGoalAdapter(("sim-test-counter", "sim-pilot-counter"))
         site_adapter = FakeSitePublishAdapter(
             {
@@ -569,7 +576,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
         )
 
     def test_site_approval_cannot_cross_candidate_or_page_version_binding(self) -> None:
-        store = GoalLifecycleStore(self.database)
+        store = GoalLifecycleStore(self.database, self.authority_service)
         goal_adapter = FakeMetrikaGoalAdapter(("sim-test-counter", "sim-pilot-counter"))
         site_adapter = FakeSitePublishAdapter(
             {
@@ -625,7 +632,7 @@ class GoalLifecycleSafetyTests(unittest.TestCase):
                 ),
             ),
         )
-        store.register_authority(authority)
+        store.register_authority(authority, NOW)
 
         with self.assertRaisesRegex(RuntimeError, "AUTHORITY_INVALID"):
             service.publish_candidate_event(

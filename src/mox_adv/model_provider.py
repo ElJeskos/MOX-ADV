@@ -16,6 +16,11 @@ from mox_adv.recommend_projection import validate_projection
 class DeterministicFakeModelProvider:
     """A zero-network provider for the four approved Gate 0 fixtures."""
 
+    provider_id = "deterministic-fake"
+    model_id = "gate0-fixtures-v1"
+    maximum_input_tokens = 0
+    maximum_output_tokens = 0
+
     def __init__(self) -> None:
         self.invocation_count = 0
 
@@ -72,8 +77,8 @@ class DeterministicFakeModelProvider:
             payload = self._keep(projection)
         return ModelResponse(
             payload=payload,
-            provider="deterministic-fake",
-            model_id="gate0-fixtures-v1",
+            provider=self.provider_id,
+            model_id=self.model_id,
             input_tokens=0,
             output_tokens=0,
             cost_rub="0",

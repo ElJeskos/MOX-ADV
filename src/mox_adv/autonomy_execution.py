@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import datetime
 from decimal import InvalidOperation
 from typing import Any, Callable, Mapping, Optional
@@ -21,6 +22,8 @@ from mox_adv.control_state import (
     DurableControlState,
     ExecutionStatus,
     PreparedChange,
+    TerminalExecutionRequest,
+    TerminalNoWritePlan,
 )
 from mox_adv.egress import EgressDenied, HttpEgressGuard
 from mox_adv.fake_write_adapter import AdapterTimeout, FakeWriteAdapter
@@ -48,6 +51,16 @@ class BoundedAutonomyService:
         before_dispatch: Optional[Callable[[], None]] = None,
         pre_write_audit: Optional[PreWriteAudit] = None,
     ) -> None:
+        if (
+            type(control_state) is not DurableControlState
+            or type(mandate_authority) is not DurableMandateAuthority
+            or control_state.path.resolve()
+            != mandate_authority.path.resolve()
+        ):
+            raise ControlRejected(
+                "DURABLE_CONTROL_STATE_MISMATCH",
+                "proposal, Mandate, and kill switch must share one durable state.",
+            )
         self.policy = BoundedAutonomyPolicy(policy)
         self.control_state = control_state
         self.mandate_authority = mandate_authority
@@ -77,12 +90,40 @@ class BoundedAutonomyService:
 
     def execute(
         self,
-        request: BoundedAutonomyRequest,
+        request: BoundedAutonomyRequest | TerminalExecutionRequest,
     ) -> BoundedAutonomyOutcome:
         try:
+            plan = self.control_state.load_execution_plan(request.proposal_id)
+            if type(plan) is TerminalNoWritePlan:
+                if type(request) is not TerminalExecutionRequest:
+                    return BoundedAutonomyOutcome(
+                        ExecutionStatus.BLOCKED,
+                        "EXECUTION_REQUEST_TYPE_MISMATCH",
+                        None,
+                    )
+                if plan.action == "KEEP":
+                    return BoundedAutonomyOutcome(
+                        ExecutionStatus.NO_CHANGE,
+                        None,
+                        None,
+                    )
+                return BoundedAutonomyOutcome(
+                    ExecutionStatus.BLOCKED,
+                    plan.reason_code or "UNSUPPORTED_STATE",
+                    None,
+                )
+            if type(request) is not BoundedAutonomyRequest:
+                return BoundedAutonomyOutcome(
+                    ExecutionStatus.BLOCKED,
+                    "EXECUTION_REQUEST_TYPE_MISMATCH",
+                    None,
+                )
             prepared = self._prepare(request)
             before = self.adapter.readback(prepared.target_key())
-            if before not in {prepared.current_value, prepared.target_value}:
+            if (
+                before != prepared.current_value
+                and before != prepared.target_value
+            ):
                 return BoundedAutonomyOutcome(
                     ExecutionStatus.BLOCKED,
                     "CURRENT_STATE_MISMATCH",
@@ -111,7 +152,7 @@ class BoundedAutonomyService:
                     None,
                     before,
                 )
-            return self._dispatch(prepared, request.mandate_id)
+            return self._dispatch(prepared, request)
         except AdapterTimeout:
             return self._reconcile_request(request, "TARGET_STATE_NOT_APPLIED")
         except CommandRejected as error:
@@ -132,24 +173,39 @@ class BoundedAutonomyService:
                 None,
             )
         except AuditWriteBlocked:
-            self._finish_active_as_blocked(
-                request.execution_key,
-                "AUDIT_EVIDENCE_UNAVAILABLE",
-            )
+            execution_key = getattr(request, "execution_key", "")
+            if execution_key:
+                self._finish_active_as_blocked(
+                    execution_key,
+                    "AUDIT_EVIDENCE_UNAVAILABLE",
+                )
             return BoundedAutonomyOutcome(
                 ExecutionStatus.BLOCKED,
                 "AUDIT_EVIDENCE_UNAVAILABLE",
                 None,
             )
         except ControlRejected as error:
-            self._finish_active_as_blocked(request.execution_key, error.reason_code)
+            execution_key = getattr(request, "execution_key", "")
+            if execution_key:
+                self._finish_active_as_blocked(execution_key, error.reason_code)
+                try:
+                    self.write_window.release(execution_key)
+                except ControlRejected:
+                    pass
             return BoundedAutonomyOutcome(
                 ExecutionStatus.BLOCKED,
                 error.reason_code,
                 None,
             )
         except sqlite3.Error:
-            return self._state_failure_outcome(request.execution_key)
+            execution_key = getattr(request, "execution_key", "")
+            if execution_key:
+                return self._state_failure_outcome(execution_key)
+            return BoundedAutonomyOutcome(
+                ExecutionStatus.BLOCKED,
+                "CONTROL_STATE_UNAVAILABLE",
+                None,
+            )
 
     def recheck(
         self,
@@ -285,7 +341,21 @@ class BoundedAutonomyService:
 
     def _prepare(self, request: BoundedAutonomyRequest) -> PreparedChange:
         prepared = self.control_state.load_prepared_change(request.proposal_id)
-        decision = self.policy.evaluate(prepared, request)
+        evaluated_at = self.clock()
+        mandate = self.mandate_authority.load_active(
+            request.mandate_id,
+            evaluated_at,
+        )
+        effective_request = self._trusted_request(
+            prepared,
+            request,
+            evaluated_at,
+        )
+        decision = self.policy.evaluate(
+            prepared,
+            effective_request,
+            mandate.canonical["minimum_sample"],
+        )
         if not decision.allowed:
             raise ControlRejected(
                 decision.reason_code or "ACTION_POLICY_REJECTED",
@@ -298,22 +368,75 @@ class BoundedAutonomyService:
         self.egress_guard.enforce_adapter(self.adapter, command)
         return prepared
 
+    def _trusted_request(
+        self,
+        prepared: PreparedChange,
+        request: BoundedAutonomyRequest,
+        evaluated_at: datetime,
+    ) -> BoundedAutonomyRequest:
+        if self.control_state.prepared_source(prepared.proposal_id) == "FIXTURE":
+            return request
+        snapshot = self.control_state.trusted_snapshot_facts(
+            prepared.proposal_id,
+            evaluated_at,
+        )
+        try:
+            current_fingerprint = self.adapter.current_fingerprint(
+                prepared.target_key()
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ControlRejected(
+                "FINGERPRINT_READBACK_UNAVAILABLE",
+                "executor could not read the current trusted fingerprint.",
+            ) from error
+        return replace(
+            request,
+            mode="BOUNDED_AUTONOMY",
+            automation_enabled=True,
+            comparability_status=str(snapshot["comparability_status"]),
+            confidence_status=str(snapshot["confidence_status"]),
+            financial_recommendations_allowed=bool(
+                snapshot["financial_recommendations_allowed"]
+            ),
+            direct_age_minutes=int(snapshot["direct_age_minutes"]),
+            metrika_age_minutes=int(snapshot["metrika_age_minutes"]),
+            watermark_skew_minutes=int(snapshot["watermark_skew_minutes"]),
+            clicks=int(snapshot["clicks"]),
+            conversions=int(snapshot["conversions"]),
+            spend_rub=int(snapshot["spend_rub"]),
+            cpa_rub=str(snapshot["cpa_rub"]),
+            budget_utilization_percent=str(
+                snapshot["budget_utilization_percent"]
+            ),
+            campaign_state=str(snapshot["campaign_state"]),
+            campaign_strategy=str(snapshot["campaign_strategy"]),
+            current_fingerprint=str(current_fingerprint),
+        )
+
     def _dispatch(
         self,
         prepared: PreparedChange,
-        mandate_id: str,
+        request: BoundedAutonomyRequest,
     ) -> BoundedAutonomyOutcome:
         minimum, maximum = self.policy.numeric_bounds(prepared)
         command = build_high_level_command(prepared, minimum, maximum)
         send_status, execution = self.mandate_authority.send_once(
             prepared,
-            mandate_id,
+            request.mandate_id,
             self.clock(),
             lambda: self.adapter.apply(prepared.target_key(), command),
             before_dispatch=self.before_dispatch,
             at_dispatch_boundary=lambda: self.dispatch_boundary.authorize(
                 prepared.execution_key(),
                 prepared.target_key(),
+                final_check=lambda: self._revalidate_dispatch(
+                    prepared,
+                    request,
+                ),
+            ),
+            immediate_pre_transport=lambda: self._revalidate_dispatch(
+                prepared,
+                request,
             ),
         )
         if send_status != ExecutionStatus.IN_FLIGHT:
@@ -330,6 +453,43 @@ class BoundedAutonomyService:
             unknown_reason="READBACK_INDETERMINATE",
         )
         return self._persist_classification(prepared, observed, classification)
+
+    def _revalidate_dispatch(
+        self,
+        prepared: PreparedChange,
+        request: BoundedAutonomyRequest,
+    ) -> datetime:
+        evaluated_at = self.clock()
+        mandate = self.mandate_authority.load_active(
+            request.mandate_id,
+            evaluated_at,
+        )
+        effective_request = self._trusted_request(
+            prepared,
+            request,
+            evaluated_at,
+        )
+        decision = self.policy.evaluate(
+            prepared,
+            effective_request,
+            mandate.canonical["minimum_sample"],
+        )
+        if not decision.allowed:
+            raise ControlRejected(
+                decision.reason_code or "ACTION_POLICY_REJECTED",
+                "mutable autonomy preconditions changed before transport.",
+            )
+        if self.adapter.readback(prepared.target_key()) != prepared.current_value:
+            raise ControlRejected(
+                "CURRENT_STATE_MISMATCH",
+                "target state changed before transport.",
+            )
+        self.mandate_authority.require_dispatch_allowed(
+            request.mandate_id,
+            prepared.scope,
+            evaluated_at,
+        )
+        return evaluated_at
 
     def _reconcile_request(
         self,

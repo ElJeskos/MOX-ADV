@@ -20,6 +20,11 @@ class ReadOnlyRunnerTests(unittest.TestCase):
                 (path / "lifecycle-evidence.json").read_text(encoding="utf-8")
             )
             proposal = json.loads((path / "proposal.json").read_text(encoding="utf-8"))
+            direct_matrix = json.loads(
+                (path / "direct-matrix-evidence.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             first_stability = json.loads(
                 (path / "stability-fingerprint.json").read_text(encoding="utf-8")
             )
@@ -49,6 +54,20 @@ class ReadOnlyRunnerTests(unittest.TestCase):
         )
         self.assertEqual("APPLIED", lifecycle["campaign_status"])
         self.assertEqual("VERIFIED", lifecycle["goal_technical_status"])
+        self.assertEqual(29, direct_matrix["method_count"])
+        self.assertEqual(
+            direct_matrix["method_count"],
+            len(direct_matrix["methods"]),
+        )
+        self.assertTrue(
+            all(
+                item["request_response_evidence"]
+                and item["cleanup_record"]["status"] == "REMOVED"
+                and item["evidence_type"] == "SIMULATED"
+                and item["capability_status"] == "NOT_PROVEN"
+                for item in direct_matrix["methods"]
+            )
+        )
         self.assertEqual(1, lifecycle["goal_cleanup"]["fake_site_rollbacks"])
         self.assertEqual("#lead-form", lifecycle["goal_event"]["selector"])
         self.assertEqual("#lead-submit", lifecycle["goal_event"]["trigger_selector"])

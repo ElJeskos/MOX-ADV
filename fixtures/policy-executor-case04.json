@@ -1,0 +1,135 @@
+{
+  "schema_version": "policy-executor-case04-fixtures-v1",
+  "fixtures": [
+    {
+      "name": "BUDGET_INCREASE_ON",
+      "proposal_name": "PROPOSAL_BUDGET_INCREASE_ON",
+      "state": "ON",
+      "weekly_budget_rub": 5500,
+      "search_bid_rub": 100,
+      "variant_id": "A",
+      "impressions": 10000,
+      "clicks": 200,
+      "visits": 150,
+      "conversions": 10,
+      "spend_rub": 5000,
+      "action": "INCREASE_WEEKLY_BUDGET",
+      "expected_value": 6050
+    },
+    {
+      "name": "BUDGET_DECREASE_ON",
+      "proposal_name": "PROPOSAL_BUDGET_DECREASE_ON",
+      "state": "ON",
+      "weekly_budget_rub": 8000,
+      "search_bid_rub": 100,
+      "variant_id": "A",
+      "impressions": 10000,
+      "clicks": 200,
+      "visits": 150,
+      "conversions": 5,
+      "spend_rub": 7500,
+      "action": "DECREASE_WEEKLY_BUDGET",
+      "expected_value": 7200
+    },
+    {
+      "name": "BID_INCREASE_ON",
+      "proposal_name": "PROPOSAL_BID_INCREASE_ON",
+      "state": "ON",
+      "weekly_budget_rub": 10000,
+      "search_bid_rub": 100,
+      "variant_id": "A",
+      "impressions": 5000,
+      "clicks": 80,
+      "visits": 70,
+      "conversions": 8,
+      "spend_rub": 4000,
+      "action": "INCREASE_SEARCH_BID",
+      "expected_value": 110
+    },
+    {
+      "name": "BID_DECREASE_ON",
+      "proposal_name": "PROPOSAL_BID_DECREASE_ON",
+      "state": "ON",
+      "weekly_budget_rub": 20000,
+      "search_bid_rub": 100,
+      "variant_id": "A",
+      "impressions": 10000,
+      "clicks": 200,
+      "visits": 150,
+      "conversions": 5,
+      "spend_rub": 7500,
+      "action": "DECREASE_SEARCH_BID",
+      "expected_value": 90
+    },
+    {
+      "name": "LOW_CTR_ON",
+      "proposal_name": "PROPOSAL_LOW_CTR_ON",
+      "state": "ON",
+      "weekly_budget_rub": 10000,
+      "search_bid_rub": 100,
+      "variant_id": "A",
+      "impressions": 10000,
+      "clicks": 50,
+      "visits": 100,
+      "conversions": 3,
+      "spend_rub": 3000,
+      "action": "SET_AD_VARIANT",
+      "expected_value": "B",
+      "prepared_variants": {
+        "A": {
+          "title": "Prepared title A",
+          "text": "Prepared text A"
+        },
+        "B": {
+          "title": "Prepared title B",
+          "text": "Prepared text B"
+        }
+      }
+    },
+    {
+      "name": "NO_CONVERSION_ON",
+      "proposal_name": "PROPOSAL_NO_CONVERSION_ON",
+      "state": "ON",
+      "weekly_budget_rub": 10000,
+      "search_bid_rub": 100,
+      "variant_id": "A",
+      "impressions": 10000,
+      "clicks": 100,
+      "visits": 80,
+      "conversions": 0,
+      "spend_rub": 2000,
+      "action": "SUSPEND_CAMPAIGN",
+      "expected_value": "SUSPENDED"
+    },
+    {
+      "name": "EFFECTIVE_SUSPENDED",
+      "proposal_name": "PROPOSAL_EFFECTIVE_SUSPENDED",
+      "state": "SUSPENDED",
+      "weekly_budget_rub": 5500,
+      "search_bid_rub": 100,
+      "variant_id": "A",
+      "impressions": 10000,
+      "clicks": 200,
+      "visits": 150,
+      "conversions": 10,
+      "spend_rub": 5000,
+      "action": "RESUME_CAMPAIGN",
+      "expected_value": "ON"
+    },
+    {
+      "name": "INSUFFICIENT_ON",
+      "proposal_name": "PROPOSAL_INSUFFICIENT_ON",
+      "state": "ON",
+      "weekly_budget_rub": 10000,
+      "search_bid_rub": 100,
+      "variant_id": "A",
+      "impressions": 1000,
+      "clicks": 20,
+      "visits": 15,
+      "conversions": 1,
+      "spend_rub": 500,
+      "action": "KEEP",
+      "expected_value": "NO_WRITE"
+    }
+  ]
+}

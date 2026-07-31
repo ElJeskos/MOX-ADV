@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
+from mox_adv.application_control import ApplicationWriteBoundary
+from mox_adv.audit import AuditWriteBlocked
 from mox_adv.control_state import (
     ControlRejected,
     MacOSLocalPrincipalAuthenticator,
+    TrustedScope,
 )
 from mox_adv.goal_adapters import (
     FakeAdapterTimeout,
@@ -47,13 +50,20 @@ class GoalLifecycleService:
         goal_adapter: FakeMetrikaGoalAdapter,
         site_adapter: FakeSitePublishAdapter,
         semantic_authenticator: Any = None,
+        write_boundary: ApplicationWriteBoundary | None = None,
     ) -> None:
-        if not goal_adapter.is_fake or not site_adapter.is_fake:
+        if (
+            type(goal_adapter) is not FakeMetrikaGoalAdapter
+            or type(site_adapter) is not FakeSitePublishAdapter
+        ):
             raise GoalLifecycleRejected("FAKE_ADAPTER_REQUIRED")
+        if type(write_boundary) is not ApplicationWriteBoundary:
+            raise GoalLifecycleRejected("DURABLE_DISPATCH_GUARD_REQUIRED")
         self.policy = policy
         self.store = store
         self.goal_adapter = goal_adapter
         self.site_adapter = site_adapter
+        self.write_boundary = write_boundary
         self.semantic_authenticator = (
             MacOSLocalPrincipalAuthenticator(
                 expected_identity=str(
@@ -147,6 +157,11 @@ class GoalLifecycleService:
             )
             raise
         try:
+            self._authorize_write(
+                execution_key,
+                "MetrikaGoals:add:" + counter_id,
+                counter_id,
+            )
             goal = self.goal_adapter.add_goal(
                 counter_id,
                 normalized,
@@ -166,6 +181,13 @@ class GoalLifecycleService:
                 normalized=normalized,
                 now=now,
             )
+        except GoalLifecycleRejected:
+            self.store.abort_before_write(
+                execution_key,
+                authority_id,
+                reservation_id,
+            )
+            raise
         candidate = self._candidate_from_goal(
             candidate_id,
             run_id,
@@ -230,7 +252,16 @@ class GoalLifecycleService:
         if self.site_adapter.current_version(site_zone) != expected_version:
             self.store.abort_before_write(execution_key, authority_id)
             raise GoalLifecycleRejected("SITE_VERSION_MISMATCH")
+        author = self.store.reserved_authority_principal(
+            authority_id,
+            execution_key,
+        )
         try:
+            self._authorize_write(
+                execution_key,
+                "SitePublish:publish:" + candidate.candidate_id,
+                candidate.counter_id,
+            )
             publication = self.site_adapter.publish_event(
                 candidate_id=candidate.candidate_id,
                 run_id=candidate.run_id,
@@ -238,7 +269,7 @@ class GoalLifecycleService:
                 expected_version=expected_version,
                 event=candidate.event,
                 selector=candidate.site_location,
-                author=str(self.policy["principals"]["approver"]["identity"]),
+                author=author,
                 exact_diff=exact_diff,
             )
         except FakeAdapterTimeout:
@@ -394,13 +425,76 @@ class GoalLifecycleService:
             raise GoalLifecycleRejected("CLEANUP_RUN_MISMATCH")
         if candidate.status != GoalCandidateStatus.REJECTED:
             raise GoalLifecycleRejected("ONLY_REJECTED_CANDIDATE_CAN_BE_CLEANED")
-        publication = self.store.load_publication(candidate_id)
-        self.site_adapter.rollback_publication(publication, run_id)
-        self.goal_adapter.delete_goal(candidate.counter_id, candidate.goal_id)
+        publication_done, goal_done, completed = self.store.begin_cleanup(
+            candidate_id
+        )
+        if completed:
+            return
+        if not publication_done:
+            publication = self.store.load_publication_optional(candidate_id)
+            if publication is not None:
+                current = self.site_adapter.publication_for_candidate(candidate_id)
+                if current is not None:
+                    self._authorize_write(
+                        "goal-cleanup:"
+                        + candidate.candidate_id
+                        + ":publication",
+                        "SitePublish:rollback:" + candidate.candidate_id,
+                        candidate.counter_id,
+                    )
+                    self.site_adapter.rollback_publication(publication, run_id)
+                elif (
+                    self.site_adapter.current_version(publication.site_zone)
+                    != publication.previous_version
+                ):
+                    raise GoalLifecycleRejected(
+                        "SITE_ROLLBACK_PRECONDITION_FAILED"
+                    )
+            self.store.mark_cleanup_publication_rolled_back(candidate_id)
+        if not goal_done:
+            if self.goal_adapter.goal_exists(
+                candidate.counter_id,
+                candidate.goal_id,
+            ):
+                self._authorize_write(
+                    "goal-cleanup:" + candidate.candidate_id + ":goal",
+                    "MetrikaGoals:delete:" + candidate.goal_id,
+                    candidate.counter_id,
+                )
+                self.goal_adapter.delete_goal_if_present(
+                    candidate.counter_id,
+                    candidate.goal_id,
+                )
+            self.store.mark_cleanup_goal_deleted(candidate_id)
         self.store.finish_cleanup(
             candidate_id,
             "goal-create:" + candidate.candidate_id,
+            datetime.now(timezone.utc),
         )
+
+    def _authorize_write(
+        self,
+        execution_key: str,
+        target_key: str,
+        counter_id: str,
+    ) -> None:
+        simulation = self.policy["bindings"]["simulation"]
+        try:
+            self.write_boundary.authorize(
+                execution_key,
+                target_key,
+                TrustedScope(
+                    organization=str(simulation["organization"]),
+                    connection=str(simulation["connection"]),
+                    account=str(simulation["direct_account"]),
+                    campaign="goal-lifecycle:" + counter_id,
+                    writer=str(simulation["single_writer"]),
+                ),
+            )
+        except AuditWriteBlocked as error:
+            raise GoalLifecycleRejected("AUDIT_EVIDENCE_UNAVAILABLE") from error
+        except ControlRejected as error:
+            raise GoalLifecycleRejected(error.reason_code) from error
 
     def _reconcile_goal_creation(
         self,
