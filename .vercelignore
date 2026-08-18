@@ -11,6 +11,5 @@ coverage
 dist
 docs
 node_modules
-okf
 runs
 tests

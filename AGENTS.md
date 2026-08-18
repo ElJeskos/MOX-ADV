@@ -15,8 +15,12 @@ See `docs/agents/triage-labels.md`.
 This is a single-context repository with `CONTEXT.md` and `docs/adr/` at the repository root.
 See `docs/agents/domain.md`.
 
-### Knowledge bundle
+### Prototypes
 
-Use `okf/` as the portable living knowledge bundle for this project.
-Read `docs/agents/okf.md` before consuming or updating the bundle.
-Keep project knowledge in OKF and repository-specific producer and consumer workflow in the adapter.
+Prototype code and repository artifacts must use a dedicated disposable `/worktree` branch and a human-selected discard, refine, or integrate outcome.
+See `docs/agents/prototypes.md`.
+
+### Integration interaction boundaries
+
+- Work with Yandex Direct and Yandex Metrica exclusively through their APIs; their browser-based personal cabinets are out of bounds.
+- Work with the local Dashboard at `http://127.0.0.1:8878/` exclusively through its UI using Playwright; direct Dashboard API calls and direct state manipulation are out of bounds.
