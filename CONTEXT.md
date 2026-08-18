@@ -23,6 +23,14 @@ _Avoid_: Prompt, alert rule
 A recurring test-only Monitoring Cycle that uses saved Test Scenario facts and Decision Triggers and can apply changes only to a sealed fake target.
 _Avoid_: Production automation, live campaign manager
 
+**Autonomous Campaign Operator (Автономный оператор кампаний)**:
+A production operating role that continuously manages eligible campaigns in one Yandex Direct account within revocable operator-authorized limits and escalates exceptions.
+_Avoid_: Test Autopilot, unrestricted agent
+
+**Campaign Effectiveness Profile**:
+The operator-approved set of effectiveness metrics and targets for one campaign, optionally initialized from an account-level default.
+_Avoid_: One global metric set for every campaign
+
 **Decision Record**:
 The durable operator-facing account of which facts and Decision Triggers were considered, what action was proposed, why it was chosen, and whether policy allowed it.
 _Avoid_: Debug log, model reasoning
