@@ -1,4 +1,16 @@
 .DS_Store
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Pi runtime state (project extensions remain versioned)
+.pi/tasks/
+.pi/subagents/
+
 .env
 .env.*
 !.env.example
