@@ -28,8 +28,8 @@ A production operating role that continuously manages eligible campaigns in one 
 _Avoid_: Test Autopilot, unrestricted agent
 
 **Campaign Effectiveness Profile**:
-The operator-approved set of effectiveness metrics and targets for one campaign, optionally initialized from an account-level default.
-_Avoid_: One global metric set for every campaign
+An immutable operator-approved revision of the effectiveness goals, metric roles, targets, constraints, source-quality rules, and conflict policy for one campaign. An account-level default may initialize a revision but never changes an approved campaign implicitly.
+_Avoid_: One global metric set for every campaign, mutable KPI settings
 
 **Decision Record**:
 The durable operator-facing account of which facts and Decision Triggers were considered, what action was proposed, why it was chosen, and whether policy allowed it.
