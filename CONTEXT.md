@@ -31,6 +31,14 @@ _Avoid_: Test Autopilot, unrestricted agent
 An immutable operator-approved revision of the effectiveness goals, metric roles, targets, constraints, source-quality rules, and conflict policy for one campaign. An account-level default may initialize a revision but never changes an approved campaign implicitly.
 _Avoid_: One global metric set for every campaign, mutable KPI settings
 
+**Operational Hypothesis**:
+A versioned, testable claim that a bounded campaign treatment will cause a defined outcome for an eligible population under named conditions. Its result remains scoped evidence and never expands execution authority by itself.
+_Avoid_: Recommendation, code change, policy rule, universal playbook
+
+**Hypothesis Preregistration**:
+The immutable pre-experiment commitment to the mechanism, treatment contrast, primary decision metric, guardrails, comparator, maturity rule, and statistical decision rule.
+_Avoid_: Editable experiment note, post-hoc analysis plan
+
 **Decision Record**:
 The durable operator-facing account of which facts and Decision Triggers were considered, what action was proposed, why it was chosen, and whether policy allowed it.
 _Avoid_: Debug log, model reasoning
