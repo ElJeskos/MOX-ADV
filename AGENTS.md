@@ -15,11 +15,6 @@ See `docs/agents/triage-labels.md`.
 This is a single-context repository with `CONTEXT.md` and `docs/adr/` at the repository root.
 See `docs/agents/domain.md`.
 
-### Prototypes
-
-Prototype code and repository artifacts must use a dedicated disposable `/worktree` branch and a human-selected discard, refine, or integrate outcome.
-See `docs/agents/prototypes.md`.
-
 ### Integration interaction boundaries
 
 - Work with Yandex Direct and Yandex Metrica exclusively through their APIs; their browser-based personal cabinets are out of bounds.
