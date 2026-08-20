@@ -3107,6 +3107,64 @@ input[type="checkbox"] {
   font-size: 8px;
 }
 
+.p0-research-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.p0-research-strip > div {
+  min-height: 88px;
+  padding: 15px;
+  border-left: 1px solid var(--line);
+}
+
+.p0-research-strip > div:first-child {
+  border-left: 0;
+}
+
+.p0-research-strip span,
+.p0-research-strip strong,
+.p0-research-strip small {
+  display: block;
+}
+
+.p0-research-strip span {
+  color: var(--muted);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.p0-research-strip strong {
+  margin-top: 8px;
+  font-size: 15px;
+}
+
+.p0-research-strip small {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.p0-assumption-note {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 14px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid #e5ccaa;
+  border-radius: 8px;
+  background: var(--amber-soft);
+  font-size: 9px;
+}
+
+.p0-assumption-note span {
+  color: var(--muted);
+}
+
 .p0-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3131,6 +3189,33 @@ input[type="checkbox"] {
 
 .p0-form-grid textarea {
   min-height: 92px;
+}
+
+.p0-field-evidence {
+  display: block;
+  min-height: 32px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: #f7f8f5;
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.p0-field-evidence strong {
+  color: var(--ink);
+}
+
+.p0-field-evidence.is-high,
+.p0-field-evidence.is-owner_confirmed {
+  border-color: #bcd6c8;
+  background: var(--green-soft);
+}
+
+.p0-field-evidence.is-medium {
+  border-color: #e5ccaa;
+  background: var(--amber-soft);
 }
 
 .p0-question-list,

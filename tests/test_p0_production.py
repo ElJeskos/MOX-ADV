@@ -54,6 +54,49 @@ class FakeSiteReader:
         }
 
 
+class RichSiteReader:
+    def read(self, url):
+        return {
+            "url": url,
+            "fetched_at": "2026-08-20T10:00:00+00:00",
+            "title": "ИННОПРОМ",
+            "description": "Главная промышленная выставка России",
+            "headings": ["Объединяем промышленность на одной площадке"],
+            "forms_detected": 1,
+            "text_excerpt": "Промышленная платформа для производителей и байеров.",
+            "pages": [
+                {
+                    "url": url,
+                    "title": "ИННОПРОМ",
+                    "headings": ["Объединяем промышленность на одной площадке"],
+                    "forms_detected": 0,
+                    "text_excerpt": (
+                        "Промышленная платформа для производителей и байеров "
+                        "со всего мира. Найдите новых покупателей, поставщиков, "
+                        "деловых партнеров и инвесторов."
+                    ),
+                },
+                {
+                    "url": url + "terms-of-participation-2026",
+                    "title": "Условия участия",
+                    "headings": ["Стать участником"],
+                    "forms_detected": 1,
+                    "text_excerpt": (
+                        "Заполните короткую форму, и менеджер ИННОПРОМ свяжется "
+                        "с вами, чтобы уточнить детали участия."
+                    ),
+                },
+                {
+                    "url": url + "registration-visitor-2026",
+                    "title": "Регистрация для посетителей",
+                    "headings": ["Получение билета посетителя"],
+                    "forms_detected": 1,
+                    "text_excerpt": "Посетители регистрируются отдельно для получения билета.",
+                },
+            ],
+        }
+
+
 class FakeCreator:
     def __init__(self, ready=True):
         self.ready = ready
@@ -89,6 +132,32 @@ class StubCredential:
 
     def get(self):
         return "secret"
+
+
+class StubSiteResponse:
+    def __init__(self, url, html):
+        self.url = url
+        self.body = html.encode("utf-8")
+        self.headers = {"Content-Type": "text/html; charset=utf-8"}
+
+    def read(self, _maximum):
+        return self.body
+
+    def geturl(self):
+        return self.url
+
+    def close(self):
+        return None
+
+
+class StubSiteOpener:
+    def __init__(self, pages):
+        self.pages = dict(pages)
+        self.requests = []
+
+    def open(self, request, timeout):
+        self.requests.append((request.full_url, timeout))
+        return StubSiteResponse(request.full_url, self.pages[request.full_url])
 
 
 class StubHttp:
@@ -134,6 +203,40 @@ class P0ProductionModuleTests(unittest.TestCase):
         self.assertEqual("real-account", overview["context"]["direct"]["account"])
         self.assertNotIn("simulation", json.dumps(overview, ensure_ascii=False).lower())
 
+    def test_analysis_researches_public_facts_before_asking_the_owner(self):
+        module = P0ProductionModule(
+            store=self.store,
+            context_reader=FakeContextReader(),
+            site_reader=RichSiteReader(),
+            creator=self.creator,
+        )
+        result = module.analyze_site(url="https://expo.example/", expected_revision=0)
+        model = result["state"]["business_model"]
+
+        self.assertTrue(model["audience"])
+        self.assertTrue(model["qualified_result"])
+        self.assertTrue(model["exclusions"])
+        self.assertEqual([], model["missing_questions"])
+        self.assertGreaterEqual(model["research"]["pages_analyzed"], 3)
+        self.assertIn("DIRECT_REAL_ACCOUNT", model["research"]["sources"])
+        self.assertIn(
+            "terms-of-participation",
+            model["field_evidence"]["qualified_result"]["source_url"],
+        )
+        self.assertNotIn("посетител", model["qualified_result"].casefold())
+        for field in (
+            "product",
+            "audience",
+            "value",
+            "qualified_result",
+            "exclusions",
+        ):
+            self.assertIn(field, model["field_evidence"])
+            self.assertIn(
+                model["field_evidence"][field]["confidence"],
+                {"HIGH", "MEDIUM"},
+            )
+
     @patch(
         "mox_adv.p0_production.socket.getaddrinfo",
         return_value=[(2, 1, 6, "", ("93.184.216.34", 443))],
@@ -144,8 +247,15 @@ class P0ProductionModuleTests(unittest.TestCase):
             0,
             url="https://example.com/landing",
         )
-        self.assertEqual("REAL_SITE_ANALYSIS", result["state"]["business_model"]["source"])
-        self.assertEqual(3, len(result["state"]["business_model"]["missing_questions"]))
+        self.assertEqual(
+            "REAL_SITE_AND_CONNECTED_DATA_RESEARCH",
+            result["state"]["business_model"]["source"],
+        )
+        self.assertEqual(
+            ["Кто фактически принимает решение о покупке?"],
+            result["state"]["business_model"]["missing_questions"],
+        )
+        self.assertTrue(result["state"]["business_model"]["assumptions"])
 
         result = self.apply(
             "save_business_model",
@@ -159,6 +269,16 @@ class P0ProductionModuleTests(unittest.TestCase):
             },
         )
         self.assertEqual([], result["state"]["business_model"]["missing_questions"])
+        self.assertEqual([], result["state"]["business_model"]["assumptions"])
+        self.assertTrue(
+            result["state"]["business_model"]["research"]["initial_assumptions"]
+        )
+        self.assertTrue(
+            all(
+                item["confidence"] == "OWNER_CONFIRMED"
+                for item in result["state"]["business_model"]["field_evidence"].values()
+            )
+        )
 
         result = self.apply(
             "save_strategy",
@@ -251,6 +371,46 @@ class P0ProductionModuleTests(unittest.TestCase):
         with self.assertRaises(P0ProductionError) as error:
             self.apply("reset", 0)
         self.assertEqual("P0_REVISION_CONFLICT", error.exception.reason_code)
+
+    def test_site_reader_researches_relevant_first_party_pages(self):
+        opener = StubSiteOpener(
+            {
+                "https://example.com/": (
+                    '<html><head><title>Product</title></head><body>'
+                    '<a href="/about">About</a>'
+                    '<a href="/terms-of-participation">Participate</a>'
+                    '<a href="https://external.example/services">External</a>'
+                    '<a href="/privacy-policy">Privacy</a>'
+                    "</body></html>"
+                ),
+                "https://example.com/about": (
+                    "<html><h1>For manufacturers and buyers</h1></html>"
+                ),
+                "https://example.com/terms-of-participation": (
+                    "<html><h1>Fill out the form to participate</h1><form></form></html>"
+                ),
+            }
+        )
+        reader = HttpsSiteReader(
+            resolver=lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+            opener=opener,
+        )
+        result = reader.read("https://example.com/")
+
+        self.assertEqual(3, result["research"]["pages_analyzed"])
+        self.assertEqual(1, result["forms_detected"])
+        self.assertEqual(
+            {
+                "https://example.com/",
+                "https://example.com/about",
+                "https://example.com/terms-of-participation",
+            },
+            {page["url"] for page in result["pages"]},
+        )
+        self.assertNotIn(
+            "https://external.example/services",
+            [request[0] for request in opener.requests],
+        )
 
     def test_site_reader_rejects_private_targets_before_http(self):
         reader = HttpsSiteReader(

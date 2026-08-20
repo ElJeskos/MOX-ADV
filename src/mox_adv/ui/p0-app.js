@@ -32,7 +32,7 @@ function p0StateStep() {
   if (value.campaign) return 5;
   if (value.draft?.publish_projection) return 4;
   if (value.strategy) return 3;
-  if (value.business_model?.missing_questions?.length === 0) return 2;
+  if (value.business_model?.source === "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION") return 2;
   if (value.site_analysis) return 1;
   return 0;
 }
@@ -88,44 +88,82 @@ function renderP0Context() {
   const analysis = payload.state.site_analysis;
   p0Elements.artifact.innerHTML = `
     ${p0ArtifactHead("Шаг 1 · production preflight", "Реальный контекст до создания", "Начинаем с сайта и подключений, а не с демонстрационной анкеты.")}
-    <div class="p0-real-context-strip"><div><span>Директ</span><strong>${direct.ready ? p0Escape(direct.account || "Подключён") : "Не готов"}</strong><small>${direct.ready ? `${direct.campaigns_total || 0} реальных кампаний прочитано` : p0Escape((direct.blockers || ["Проверьте подключение"])[0])}</small></div><div><span>Метрика</span><strong>${metrika.ready ? "Реальная цель подключена" : "Не готова"}</strong><small>${metrika.ready ? "Данные цели подтверждены production API" : p0Escape((metrika.blockers || ["Проверьте подключение"])[0])}</small></div><div><span>Сайт</span><strong>${analysis ? p0Escape(analysis.title || analysis.url) : "Нужен реальный URL"}</strong><small>${analysis ? `Прочитан ${p0Escape(analysis.fetched_at)}` : "HTTPS · публичная страница бизнеса"}</small></div></div>
+    <div class="p0-real-context-strip"><div><span>Директ</span><strong>${direct.ready ? p0Escape(direct.account || "Подключён") : "Не готов"}</strong><small>${direct.ready ? `${direct.campaigns_total || 0} реальных кампаний прочитано` : p0Escape((direct.blockers || ["Проверьте подключение"])[0])}</small></div><div><span>Метрика</span><strong>${metrika.ready ? "Реальная цель подключена" : "Не готова"}</strong><small>${metrika.ready ? "Данные цели подтверждены production API" : p0Escape((metrika.blockers || ["Проверьте подключение"])[0])}</small></div><div><span>Сайт</span><strong>${analysis ? p0Escape(analysis.title || analysis.url) : "Нужен реальный URL"}</strong><small>${analysis ? `${analysis.research?.pages_analyzed || analysis.pages?.length || 1} first-party страниц исследовано` : "HTTPS · публичный сайт бизнеса"}</small></div></div>
     <form class="p0-form-grid" id="p0-site-form"><label class="is-wide"><span>Сайт или посадочная страница реального бизнеса</span><input type="url" name="url" required placeholder="https://example.ru/" value="${p0Escape(analysis?.url || "")}"></label></form>
-    <ul class="p0-publish-list"><li><span>1</span><div><strong>Агент прочитает только публичный HTML</strong><br>Локальные адреса, credentials, нестандартные порты и redirects в private network блокируются.</div></li><li><span>2</span><div><strong>Директ и Метрика уже читаются через официальные API</strong><br>Их реальные факты будут показаны рядом с моделью бизнеса и Campaign Draft.</div></li></ul>
+    <ul class="p0-publish-list"><li><span>1</span><div><strong>Агент сам исследует релевантные first-party страницы</strong><br>Главная, продукт, условия, регистрация, FAQ и контакты ранжируются автоматически. Private network и внешние домены блокируются.</div></li><li><span>2</span><div><strong>Агент сопоставит сайт с реальными данными Директа и Метрики</strong><br>Владельцу останется подтвердить выводы с доказательствами или исправить только существенную неопределённость.</div></li></ul>
     ${p0Actions("Анализировать реальный сайт", "analyze_site", { back: false, disabled: !direct.ready })}`;
+}
+
+function p0FieldEvidence(model, field) {
+  const evidence = model.field_evidence?.[field] || {};
+  const confidence = evidence.confidence || "LOW";
+  const labels = {
+    HIGH: "Высокая уверенность",
+    MEDIUM: "Гипотеза агента — проверьте",
+    LOW: "Недостаточно данных",
+    OWNER_CONFIRMED: "Подтверждено владельцем",
+  };
+  const quote = evidence.quote ? ` · «${p0Escape(String(evidence.quote).slice(0, 180))}»` : "";
+  return `<small class="p0-field-evidence is-${confidence.toLowerCase()}"><strong>${p0Escape(labels[confidence] || confidence)}</strong>${quote}</small>`;
 }
 
 function renderP0Model() {
   const model = state.p0Production.state.business_model || {};
   const questions = model.missing_questions || [];
+  const assumptions = model.assumptions || [];
+  const research = model.research || {};
   p0Elements.artifact.innerHTML = `
-    ${p0ArtifactHead("Шаг 2 · модель бизнеса", "Понимание агента по реальному сайту", "Исправьте выводы и заполните только факты, которых на сайте действительно не хватило.")}
-    ${questions.length ? `<ul class="p0-question-list">${questions.map((question, index) => `<li><span>${index + 1}</span><div>${p0Escape(question)}</div></li>`).join("")}</ul>` : ""}
+    ${p0ArtifactHead("Шаг 2 · агентное исследование", "Агент уже собрал модель бизнеса", "Проверьте подготовленный вывод. Исправление требуется только там, где гипотеза неверна или данных действительно недостаточно.", "AGENT RESEARCH")}
+    <div class="p0-research-strip"><div><span>Исследовано</span><strong>${p0Escape(research.pages_analyzed || 1)} страниц</strong><small>Только first-party public HTTPS</small></div><div><span>Источники</span><strong>${p0Escape((research.sources || []).length)}</strong><small>${p0Escape((research.sources || []).join(" · "))}</small></div><div><span>Сделано агентом</span><strong>${p0Escape((research.completed_fields || []).length)} / 5 полей</strong><small>Человеку — подтверждение и существенные разногласия</small></div></div>
+    ${questions.length ? `<ul class="p0-question-list">${questions.map((question, index) => `<li><span>${index + 1}</span><div><strong>Агент не нашёл надёжного ответа</strong><br>${p0Escape(question)}</div></li>`).join("")}</ul>` : ""}
+    ${assumptions.length ? `<div class="p0-assumption-note"><strong>Где нужна ваша проверка</strong><span>${p0Escape(assumptions.join(" · "))}</span></div>` : ""}
     <form class="p0-form-grid" id="p0-model-form">
-      <label class="is-wide"><span>Продукт или предложение</span><textarea name="product" required>${p0Escape(model.product || "")}</textarea></label>
-      <label><span>Кто принимает решение</span><textarea name="audience" required>${p0Escape(model.audience || "")}</textarea></label>
-      <label><span>Ценность для покупателя</span><textarea name="value" required>${p0Escape(model.value || "")}</textarea></label>
-      <label><span>Квалифицированный результат</span><textarea name="qualified_result" required>${p0Escape(model.qualified_result || "")}</textarea></label>
-      <label><span>Что не является результатом</span><textarea name="exclusions" required>${p0Escape(model.exclusions || "")}</textarea></label>
+      <label class="is-wide"><span>Продукт или предложение</span><textarea name="product" required>${p0Escape(model.product || "")}</textarea>${p0FieldEvidence(model, "product")}</label>
+      <label><span>Кто принимает решение</span><textarea name="audience" required>${p0Escape(model.audience || "")}</textarea>${p0FieldEvidence(model, "audience")}</label>
+      <label><span>Ценность для покупателя</span><textarea name="value" required>${p0Escape(model.value || "")}</textarea>${p0FieldEvidence(model, "value")}</label>
+      <label><span>Квалифицированный результат</span><textarea name="qualified_result" required>${p0Escape(model.qualified_result || "")}</textarea>${p0FieldEvidence(model, "qualified_result")}</label>
+      <label><span>Что не является результатом</span><textarea name="exclusions" required>${p0Escape(model.exclusions || "")}</textarea>${p0FieldEvidence(model, "exclusions")}</label>
     </form>
-    ${p0Actions("Подтвердить модель бизнеса", "save_business_model")}`;
+    ${p0Actions("Подтвердить вывод агента", "save_business_model")}`;
 }
 
 function renderP0Strategy() {
   const value = state.p0Production.state.strategy || {};
   const site = state.p0Production.state.site_analysis || {};
+  const model = state.p0Production.state.business_model || {};
+  const siteText = `${site.title || ""} ${site.description || ""} ${site.text_excerpt || ""}`.toLowerCase();
+  const inferredGeography = siteText.includes("санкт-петербург")
+    ? "Санкт-Петербург"
+    : siteText.includes("москва")
+      ? "Москва"
+      : "Россия";
+  const historicalCpa = Number(state.p0Production.context?.performance?.display_metrics?.cpa_rub || 0);
+  const proposedCpa = historicalCpa > 0 ? Math.round(historicalCpa) : "";
+  const proposedBudget = proposedCpa ? proposedCpa * 5 : "";
+  const goal = value.goal || (model.qualified_result ? `Получать: ${model.qualified_result}` : "");
+  const message = value.message || model.value || model.product || "";
+  const selectedGeography = value.geography || inferredGeography;
+  const decisionPacket = [
+    ["Период размещения", "Агент не нашёл достаточно надёжной связи между датами события и допустимым рекламным окном. Выберите начало и конец; до этого внешняя запись невозможна."],
+    ["Экономика кампании", proposedCpa
+      ? `Исторический CPA ${proposedCpa} ₽ предложен как ориентир; бюджет рассчитан на пять результатов в неделю. Подтвердите допустимую экспозицию.`
+      : "В реальном срезе нет надёжного CPA для переноса. Укажите максимальную цену результата и недельную экспозицию; агент не будет изобретать денежные границы."],
+  ];
   p0Elements.artifact.innerHTML = `
-    ${p0ArtifactHead("Шаг 3 · Campaign Strategy", "Цель и бизнес-границы кампании", "Здесь нет API-enum и технических ставок: владелец задаёт только реальный продуктовый контракт.")}
+    ${p0ArtifactHead("Шаг 3 · Human Decision Gate", "Агент подготовил Campaign Strategy", "Сайт, цель, география и сообщение уже предложены. Человек принимает только критические решения о периоде, бюджете и допустимой стоимости результата.")}
+    <div class="p0-assumption-note"><strong>Критические решения владельца</strong><span>Срок размещения · недельный бюджет · целевая стоимость результата. Исторический CPA используется только как редактируемая отправная точка.</span></div>
+    <ul class="p0-question-list">${decisionPacket.map(([title, copy], index) => `<li><span>${index + 1}</span><div><strong>${p0Escape(title)}</strong><br>${p0Escape(copy)}</div></li>`).join("")}</ul>
     <form class="p0-form-grid" id="p0-strategy-form">
-      <label class="is-wide"><span>Основная бизнес-цель</span><input name="goal" required value="${p0Escape(value.goal || "")}"></label>
-      <label><span>География первого P0</span><select name="geography" required><option value="">Выберите</option>${["Россия", "Москва", "Санкт-Петербург"].map((item) => `<option ${value.geography === item ? "selected" : ""}>${item}</option>`).join("")}</select></label>
-      <label><span>Посадочная страница</span><input type="url" name="landing_page" required value="${p0Escape(value.landing_page || site.url || "")}"></label>
-      <label><span>Дата начала</span><input type="date" name="period_start" required value="${p0Escape(value.period_start || "")}"></label>
-      <label><span>Дата окончания</span><input type="date" name="period_end" required value="${p0Escape(value.period_end || "")}"></label>
-      <label><span>Недельный бюджет, ₽</span><input type="number" min="1" name="weekly_budget_rub" required value="${p0Escape(value.weekly_budget_rub || "")}"></label>
-      <label><span>Целевая стоимость результата, ₽</span><input type="number" min="1" name="target_cpa_rub" required value="${p0Escape(value.target_cpa_rub || "")}"></label>
-      <label class="is-wide"><span>Основное сообщение</span><textarea name="message" required>${p0Escape(value.message || "")}</textarea></label>
+      <label class="is-wide"><span>Основная бизнес-цель · предложено агентом</span><input name="goal" required value="${p0Escape(goal)}"></label>
+      <label><span>География · предложено агентом</span><select name="geography" required><option value="">Выберите</option>${["Россия", "Москва", "Санкт-Петербург"].map((item) => `<option ${selectedGeography === item ? "selected" : ""}>${item}</option>`).join("")}</select></label>
+      <label><span>Посадочная страница · проверена агентом</span><input type="url" name="landing_page" required value="${p0Escape(value.landing_page || site.url || "")}"></label>
+      <label><span>Дата начала · решение владельца</span><input type="date" name="period_start" required value="${p0Escape(value.period_start || "")}"></label>
+      <label><span>Дата окончания · решение владельца</span><input type="date" name="period_end" required value="${p0Escape(value.period_end || "")}"></label>
+      <label><span>Недельный бюджет, ₽ · решение владельца</span><input type="number" min="1" name="weekly_budget_rub" required value="${p0Escape(value.weekly_budget_rub || proposedBudget)}"></label>
+      <label><span>Целевая стоимость результата, ₽ · решение владельца</span><input type="number" min="1" name="target_cpa_rub" required value="${p0Escape(value.target_cpa_rub || proposedCpa)}"></label>
+      <label class="is-wide"><span>Основное сообщение · предложено агентом</span><textarea name="message" required>${p0Escape(message)}</textarea></label>
     </form>
-    ${p0Actions("Сохранить Campaign Strategy", "save_strategy")}`;
+    ${p0Actions("Принять критические решения и сохранить", "save_strategy")}`;
 }
 
 function renderP0Draft() {
@@ -136,14 +174,22 @@ function renderP0Draft() {
   const groupName = current.group_name || `${strategy.geography || ""} · Поиск`.slice(0, 255);
   const adTitle = current.ad_title || String(model.product || "").slice(0, 56);
   const adText = current.ad_text || String(strategy.message || "").slice(0, 81);
+  const participationIntent = /участ|participant/i.test(String(model.qualified_result || ""));
+  const keyword = current.keyword || `${model.product || ""}${participationIntent ? " стать участником" : ""}`.trim().toLowerCase();
+  const negativeKeywords = current.negative_keywords || [
+    ...(String(model.exclusions || "").match(/посетител|билет/i) ? ["посетитель", "билет"] : []),
+    ...(String(model.exclusions || "").match(/вакан|соиск|работ/i) ? ["вакансии", "работа"] : []),
+    ...(String(model.exclusions || "").match(/бесплат/i) ? ["бесплатно"] : []),
+  ];
+  if (!negativeKeywords.length) negativeKeywords.push("бесплатно", "вакансии");
   p0Elements.artifact.innerHTML = `
     ${p0ArtifactHead("Шаг 4 · Campaign Draft", "Точная publish projection", "Каждое редактируемое поле ниже входит в поддерживаемую реальную запись. Ничего не будет молча отброшено.")}
     <div class="p0-strategy-strip"><div><span>Бизнес-цель</span><strong>${p0Escape(strategy.goal)}</strong><small>${p0Escape(model.qualified_result)}</small></div><div><span>Бюджет</span><strong>${p0Escape(strategy.weekly_budget_rub)} ₽ / неделю</strong><small>Search only · сети отключены</small></div><div><span>Безопасный финиш</span><strong>State = SUSPENDED</strong><small>Запуска и списаний в P0 нет</small></div></div>
     <form class="p0-form-grid" id="p0-draft-form">
       <label><span>Название кампании</span><input name="campaign_name" maxlength="255" required value="${p0Escape(campaignName)}"></label>
       <label><span>Название группы</span><input name="group_name" maxlength="255" required value="${p0Escape(groupName)}"></label>
-      <label class="is-wide"><span>Одна ключевая фраза</span><input name="keyword" required value="${p0Escape(current.keyword || "")}"></label>
-      <label class="is-wide"><span>Минус-фразы через запятую</span><input name="negative_keywords" required value="${p0Escape((current.negative_keywords || []).join(", "))}"></label>
+      <label class="is-wide"><span>Одна ключевая фраза · подготовлена агентом</span><input name="keyword" required value="${p0Escape(keyword)}"></label>
+      <label class="is-wide"><span>Минус-фразы · выведены из исключений</span><input name="negative_keywords" required value="${p0Escape(negativeKeywords.join(", "))}"></label>
       <label class="is-wide"><span>Заголовок объявления</span><input name="ad_title" maxlength="56" required value="${p0Escape(adTitle)}"></label>
       <label class="is-wide"><span>Текст объявления</span><textarea name="ad_text" maxlength="81" required>${p0Escape(adText)}</textarea></label>
     </form>
@@ -216,7 +262,12 @@ async function applyP0Action(action) {
   const message = document.querySelector("#p0-message");
   if (message) {
     message.classList.remove("is-error");
-    setText(message, "Сохраняем production-ревизию…");
+    setText(
+      message,
+      action === "analyze_site"
+        ? "Агент исследует сайт и сопоставляет факты с Директом и Метрикой…"
+        : "Сохраняем production-ревизию…",
+    );
   }
   let value = null;
   let extra = {};

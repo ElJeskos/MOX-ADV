@@ -11,7 +11,6 @@ from __future__ import annotations
 import copy
 import html
 import ipaddress
-from contextlib import closing
 import json
 import re
 import socket
@@ -20,18 +19,19 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from mox_adv.egress import (
     CredentialProfile,
     EgressAuthority,
-    EgressDenied,
     HttpEgressGuard,
 )
 from mox_adv.yandex_read import (
@@ -40,9 +40,56 @@ from mox_adv.yandex_read import (
     YandexProductionReader,
 )
 
-_MAX_SITE_BYTES = 2_000_000
+_MAX_SITE_BYTES = 5_000_000
 _MAX_TEXT = 20_000
 _MAX_REDIRECTS = 3
+_MAX_SITE_PAGES = 6
+_SITE_RESEARCH_TERMS = (
+    "about",
+    "product",
+    "service",
+    "solution",
+    "particip",
+    "partner",
+    "price",
+    "tariff",
+    "registration",
+    "become",
+    "visitor",
+    "client",
+    "case",
+    "faq",
+    "contact",
+    "о-компании",
+    "о-нас",
+    "продукт",
+    "услуг",
+    "решени",
+    "участи",
+    "партнер",
+    "тариф",
+    "цен",
+    "регистра",
+    "посетител",
+    "клиент",
+    "контакт",
+)
+_SITE_RESEARCH_SKIP_TERMS = (
+    "privacy",
+    "policy",
+    "cookie",
+    "personal-data",
+    "login",
+    "logout",
+    "sign-in",
+    "javascript:",
+    "mailto:",
+    "tel:",
+    ".pdf",
+    ".doc",
+    ".xls",
+    ".zip",
+)
 _PROXY_SYNTHETIC_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 _REGION_IDS = {
     "россия": 225,
@@ -75,6 +122,14 @@ class P0CampaignCreator(Protocol):
     def readiness(self) -> Mapping[str, Any]: ...
 
     def create(self, projection: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
+class P0BusinessResearcher(Protocol):
+    def research(
+        self,
+        site: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -289,6 +344,7 @@ class _SiteHTMLParser(HTMLParser):
         self.headings: list[str] = []
         self.text: list[str] = []
         self.forms = 0
+        self.links: list[str] = []
         self._capture_title = False
         self._capture_heading = False
         self._ignored_depth = 0
@@ -303,6 +359,11 @@ class _SiteHTMLParser(HTMLParser):
             self._capture_heading = True
         if lowered == "form":
             self.forms += 1
+        if lowered == "a":
+            values = {str(key).lower(): value for key, value in attrs}
+            href = _clean_text(str(values.get("href") or ""), 2048)
+            if href and len(self.links) < 500:
+                self.links.append(href)
         if lowered == "meta":
             values = {str(key).lower(): value for key, value in attrs}
             name = (values.get("name") or values.get("property") or "").lower()
@@ -338,7 +399,7 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class HttpsSiteReader:
-    """Fetch public HTTPS HTML while rejecting private-address SSRF targets."""
+    """Research a small first-party HTTPS site surface with SSRF protection."""
 
     def __init__(
         self,
@@ -350,6 +411,45 @@ class HttpsSiteReader:
         self._opener = opener or build_opener(_NoRedirect())
 
     def read(self, url: str) -> Mapping[str, Any]:
+        entry_page, links = self._fetch_page(url)
+        pages = [entry_page]
+        failed_pages: list[str] = []
+        entry_host = _site_host(str(entry_page["url"]))
+        for candidate in self._research_links(str(entry_page["url"]), links):
+            if len(pages) >= _MAX_SITE_PAGES:
+                break
+            try:
+                page, _ = self._fetch_page(candidate)
+            except P0ProductionError:
+                failed_pages.append(candidate)
+                continue
+            if _site_host(str(page["url"])) != entry_host:
+                continue
+            if any(item["url"] == page["url"] for item in pages):
+                continue
+            pages.append(page)
+
+        combined_text = _clean_text(
+            " ".join(str(page.get("text_excerpt", "")) for page in pages),
+            _MAX_TEXT,
+        )
+        result = copy.deepcopy(entry_page)
+        result.update(
+            {
+                "forms_detected": sum(int(page.get("forms_detected", 0)) for page in pages),
+                "text_excerpt": combined_text[:8000],
+                "pages": pages,
+                "research": {
+                    "pages_analyzed": len(pages),
+                    "links_discovered": len(links),
+                    "failed_pages": failed_pages[:5],
+                    "scope": "FIRST_PARTY_PUBLIC_HTTPS",
+                },
+            }
+        )
+        return result
+
+    def _fetch_page(self, url: str) -> tuple[dict[str, Any], list[str]]:
         current = _validated_public_https_url(url, self._resolver)
         for redirect_index in range(_MAX_REDIRECTS + 1):
             request = Request(
@@ -361,7 +461,7 @@ class HttpsSiteReader:
                 method="GET",
             )
             try:
-                response = self._opener.open(request, timeout=10)
+                response = self._opener.open(request, timeout=8)
             except Exception as error:
                 code = getattr(error, "code", None)
                 headers = getattr(error, "headers", None)
@@ -379,14 +479,14 @@ class HttpsSiteReader:
                     continue
                 raise P0ProductionError(
                     "SITE_READ_FAILED",
-                    "Не удалось безопасно прочитать указанный сайт.",
+                    "Не удалось безопасно прочитать страницу сайта.",
                 ) from error
             try:
                 content_type = str(response.headers.get("Content-Type", ""))
                 if "text/html" not in content_type and "application/xhtml+xml" not in content_type:
                     raise P0ProductionError(
                         "SITE_CONTENT_UNSUPPORTED",
-                        "Посадочная страница не вернула HTML.",
+                        "Страница сайта не вернула HTML.",
                     )
                 raw = response.read(_MAX_SITE_BYTES + 1)
                 final_url = str(response.geturl())
@@ -395,11 +495,15 @@ class HttpsSiteReader:
             if len(raw) > _MAX_SITE_BYTES:
                 raise P0ProductionError(
                     "SITE_TOO_LARGE",
-                    "HTML сайта превышает безопасный размер анализа.",
+                    "HTML страницы превышает безопасный размер анализа.",
                 )
             final_url = _validated_public_https_url(final_url, self._resolver)
             encoding = "utf-8"
-            match = re.search(r"charset=([A-Za-z0-9._-]+)", content_type, re.I)
+            match = re.search(
+                r"charset=([A-Za-z0-9._-]+)",
+                content_type,
+                re.IGNORECASE,
+            )
             if match:
                 encoding = match.group(1)
             try:
@@ -412,18 +516,52 @@ class HttpsSiteReader:
             if not parser.title and not parser.headings and not body_text:
                 raise P0ProductionError(
                     "SITE_CONTENT_EMPTY",
-                    "На сайте не найден текст для анализа.",
+                    "На странице не найден текст для анализа.",
                 )
-            return {
-                "url": final_url,
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
-                "title": parser.title,
-                "description": parser.description,
-                "headings": parser.headings[:10],
-                "forms_detected": parser.forms,
-                "text_excerpt": body_text[:4000],
-            }
+            return (
+                {
+                    "url": final_url,
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "title": parser.title,
+                    "description": parser.description,
+                    "headings": parser.headings[:10],
+                    "forms_detected": parser.forms,
+                    "text_excerpt": body_text[:6000],
+                },
+                parser.links,
+            )
         raise AssertionError("redirect loop must return or raise")
+
+    @staticmethod
+    def _research_links(base_url: str, links: list[str]) -> list[str]:
+        base_host = _site_host(base_url)
+        ranked: dict[str, int] = {}
+        for href in links:
+            lowered = href.casefold()
+            if any(term in lowered for term in _SITE_RESEARCH_SKIP_TERMS):
+                continue
+            candidate = urljoin(base_url, href)
+            parsed = urlparse(candidate)
+            if parsed.scheme != "https" or _site_host(candidate) != base_host:
+                continue
+            normalized = parsed._replace(query="", fragment="").geturl()
+            if normalized.rstrip("/") == base_url.rstrip("/"):
+                continue
+            haystack = (parsed.path + " " + parsed.query).casefold()
+            score = sum(3 for term in _SITE_RESEARCH_TERMS if term in haystack)
+            if score == 0:
+                continue
+            if "terms" in haystack and "particip" in haystack:
+                score += 10
+            if "услов" in haystack and "участ" in haystack:
+                score += 10
+            if "become" in haystack or "стать-участ" in haystack:
+                score += 8
+            if "list" in haystack or "participants" in haystack or "partner-country" in haystack:
+                score -= 4
+            score -= min(parsed.path.count("/"), 4)
+            ranked[normalized] = max(score, ranked.get(normalized, -100))
+        return [item[0] for item in sorted(ranked.items(), key=lambda item: (-item[1], item[0]))]
 
 
 class YandexP0ContextReader:
@@ -882,13 +1020,361 @@ class YandexDirectP0CampaignCreator:
                 raise ValueError
             result = payload["result"]
             if not isinstance(result, Mapping):
-                raise ValueError
+                raise TypeError
             return result
         except (KeyError, TypeError, UnicodeError, ValueError, json.JSONDecodeError) as error:
             raise P0ProductionError(
                 "P0_DIRECT_RESPONSE_INVALID",
                 "Ответ Яндекс Директа не соответствует P0-контракту.",
             ) from error
+
+
+class EvidenceBusinessResearcher:
+    """Infer a reviewable business model from crawled first-party evidence."""
+
+    _AUDIENCE_TERMS = (
+        "для производител",
+        "для компан",
+        "для бизнес",
+        "производител",
+        "байер",
+        "покупател",
+        "руководител",
+        "предпринимател",
+        "профессионал",
+        "участник",
+        "decision-maker",
+        "manufacturer",
+        "buyer",
+        "companies",
+        "business",
+        "professional",
+        "participant",
+        "customer",
+    )
+    _AUDIENCE_STRONG_TERMS = (
+        "руководител",
+        "лидер",
+        "заказчик",
+        "инвестор",
+        "покупател",
+        "байер",
+        "decision-maker",
+        "manufacturer",
+        "buyer",
+        "investor",
+    )
+    _VALUE_TERMS = (
+        "найдите",
+        "получите",
+        "помога",
+        "возможност",
+        "эконом",
+        "увелич",
+        "привлеч",
+        "объедин",
+        "доступ",
+        "выход на",
+        "новых покупател",
+        "деловых партнер",
+        "find new",
+        "opportunit",
+        "access to",
+        "increase",
+        "save",
+        "connect",
+    )
+    _RESULT_TERMS = (
+        "заполните короткую форму",
+        "заполните форму",
+        "оставьте заявку",
+        "отправьте заявку",
+        "менеджер свяж",
+        "стать участник",
+        "забронировать",
+        "получить консультац",
+        "зарегистрир",
+        "become a participant",
+        "fill out the form",
+        "submit an application",
+        "contact you",
+        "book",
+        "register",
+    )
+    _RESULT_STRONG_TERMS = (
+        "заполните короткую форму",
+        "оставьте заявку",
+        "отправьте заявку",
+        "менеджер свяж",
+        "стать участник",
+        "become a participant",
+        "fill out the form",
+        "submit an application",
+        "contact you",
+    )
+
+    def research(
+        self,
+        site: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        pages = self._pages(site)
+        evidence = self._evidence(pages)
+
+        product_quote = self._product_quote(pages)
+        audience_quote = self._best_audience_quote(evidence)
+        value_quote = self._best_quote(evidence, self._VALUE_TERMS)
+        result_quote = self._best_result_quote(evidence)
+
+        product = _clean_text(product_quote["text"] if product_quote else "", 500)
+        audience = self._audience_value(audience_quote)
+        value = self._value_value(
+            value_quote["text"] if value_quote else str(site.get("description", ""))
+        )
+        qualified_result = self._qualified_result(result_quote, pages)
+        exclusions, exclusion_quote = self._exclusions(evidence, qualified_result)
+
+        facts = {
+            "product": (product, product_quote, "HIGH" if product_quote else "LOW"),
+            "audience": (audience, audience_quote, "MEDIUM" if audience_quote else "LOW"),
+            "value": (value, value_quote, "MEDIUM" if value else "LOW"),
+            "qualified_result": (
+                qualified_result,
+                result_quote,
+                "HIGH" if result_quote and any(int(page.get("forms_detected", 0)) for page in pages) else "MEDIUM" if qualified_result else "LOW",
+            ),
+            "exclusions": (
+                exclusions,
+                exclusion_quote,
+                "MEDIUM" if exclusions else "LOW",
+            ),
+        }
+        questions = {
+            "product": "Какое предложение нужно рекламировать в первом P0?",
+            "audience": "Кто фактически принимает решение о покупке?",
+            "value": "Какая подтверждённая ценность важнее всего покупателю?",
+            "qualified_result": "Какой фактический результат считается квалифицированным?",
+            "exclusions": "Какие обращения и аудитории нужно исключить?",
+        }
+        missing_questions = [questions[name] for name, (answer, _, _) in facts.items() if not answer]
+        assumptions = [
+            f"{name}: вывод агента требует подтверждения владельца"
+            for name, (answer, _, confidence) in facts.items()
+            if answer and confidence == "MEDIUM"
+        ]
+        sources = ["PUBLIC_FIRST_PARTY_SITE"]
+        direct = context.get("direct")
+        metrika = context.get("metrika")
+        if isinstance(direct, Mapping) and direct.get("ready") is True:
+            sources.append("DIRECT_REAL_ACCOUNT")
+        if isinstance(metrika, Mapping) and metrika.get("ready") is True:
+            sources.append("METRIKA_REAL_COUNTER")
+
+        return {
+            "product": product,
+            "audience": audience,
+            "value": value,
+            "qualified_result": qualified_result,
+            "exclusions": exclusions,
+            "source": "REAL_SITE_AND_CONNECTED_DATA_RESEARCH",
+            "assumptions": assumptions,
+            "missing_questions": missing_questions,
+            "research": {
+                "agent": "EVIDENCE_FIRST_RESEARCH_V1",
+                "pages_analyzed": len(pages),
+                "sources": sources,
+                "completed_fields": [name for name, (answer, _, _) in facts.items() if answer],
+            },
+            "field_evidence": {
+                name: self._field_evidence(reference, confidence)
+                for name, (_, reference, confidence) in facts.items()
+            },
+        }
+
+    @staticmethod
+    def _pages(site: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        raw = site.get("pages")
+        if isinstance(raw, list):
+            pages = [item for item in raw if isinstance(item, Mapping)]
+            if pages:
+                return pages
+        return [site]
+
+    @staticmethod
+    def _evidence(pages: list[Mapping[str, Any]]) -> list[dict[str, str]]:
+        evidence: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for page in pages:
+            url = str(page.get("url", ""))
+            values = [
+                str(page.get("description", "")),
+                *[str(item) for item in page.get("headings", []) if isinstance(item, str)],
+            ]
+            body = str(page.get("text_excerpt", ""))
+            values.extend(re.split(r"(?<=[.!?])\s+|\s*[|•]\s*", body))
+            for value in values:
+                quote = _clean_text(value, 1000)
+                key = quote.casefold()
+                if len(quote) < 12 or key in seen:
+                    continue
+                seen.add(key)
+                evidence.append({"text": quote, "url": url})
+        return evidence
+
+    @staticmethod
+    def _product_quote(pages: list[Mapping[str, Any]]) -> dict[str, str] | None:
+        first = pages[0]
+        title = _clean_text(str(first.get("title", "")), 500)
+        if title:
+            for separator in (" | ", " — ", " – ", " - "):
+                if separator in title:
+                    title = title.split(separator, 1)[0].strip()
+                    break
+            if title:
+                return {"text": title, "url": str(first.get("url", ""))}
+        headings = first.get("headings")
+        if isinstance(headings, list) and headings:
+            return {
+                "text": _clean_text(str(headings[0]), 500),
+                "url": str(first.get("url", "")),
+            }
+        return None
+
+    @classmethod
+    def _best_audience_quote(
+        cls,
+        evidence: list[dict[str, str]],
+    ) -> dict[str, str] | None:
+        ranked: list[tuple[int, int, dict[str, str]]] = []
+        for item in evidence:
+            lowered = item["text"].casefold()
+            score = sum(1 for term in cls._AUDIENCE_TERMS if term in lowered)
+            score += 4 * sum(
+                1 for term in cls._AUDIENCE_STRONG_TERMS if term in lowered
+            )
+            if lowered.startswith(("список ", "регистрация ", "list of ")):
+                score -= 4
+            if len(item["text"]) < 35 or len(item["text"]) > 700:
+                score -= 2
+            if score > 0:
+                ranked.append((score, -len(item["text"]), item))
+        return max(ranked, default=(0, 0, None), key=lambda item: (item[0], item[1]))[2]
+
+    @classmethod
+    def _best_result_quote(
+        cls,
+        evidence: list[dict[str, str]],
+    ) -> dict[str, str] | None:
+        ranked: list[tuple[int, int, dict[str, str]]] = []
+        for item in evidence:
+            lowered = item["text"].casefold()
+            score = sum(1 for term in cls._RESULT_TERMS if term in lowered)
+            score += 5 * sum(
+                1 for term in cls._RESULT_STRONG_TERMS if term in lowered
+            )
+            if any(term in lowered for term in ("посетител", "visitor", "индивидуальн", "делегат", "билет")):
+                score -= 5
+            if len(item["text"]) < 30 or len(item["text"]) > 800:
+                score -= 2
+            if score > 0:
+                ranked.append((score, -len(item["text"]), item))
+        return max(ranked, default=(0, 0, None), key=lambda item: (item[0], item[1]))[2]
+
+    @staticmethod
+    def _best_quote(
+        evidence: list[dict[str, str]],
+        terms: tuple[str, ...],
+    ) -> dict[str, str] | None:
+        ranked: list[tuple[int, int, dict[str, str]]] = []
+        for item in evidence:
+            lowered = item["text"].casefold()
+            score = sum(1 for term in terms if term in lowered)
+            if score:
+                ranked.append((score, -len(item["text"]), item))
+        return max(ranked, default=(0, 0, None), key=lambda item: (item[0], item[1]))[2]
+
+    @staticmethod
+    def _audience_value(quote: dict[str, str] | None) -> str:
+        if not quote:
+            return ""
+        text = quote["text"]
+        match = re.search(
+            r"(?:среди участников[^–—:]*[–—:]|объединя(?:ет|ющий|ющее)|including)\s*(.+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            text = match.group(1)
+        return _clean_text(text, 1000)
+
+    @staticmethod
+    def _value_value(value: str) -> str:
+        text = _clean_text(value, 1000)
+        words = text.split()
+        if len(words) >= 4 and words[0:2] == words[2:4]:
+            text = " ".join(words[2:])
+        elif len(words) >= 2 and words[0].casefold() == words[1].casefold():
+            text = " ".join(words[1:])
+        return _clean_text(text, 1000)
+
+    @classmethod
+    def _qualified_result(
+        cls,
+        quote: dict[str, str] | None,
+        pages: list[Mapping[str, Any]],
+    ) -> str:
+        if quote:
+            lowered = quote["text"].casefold()
+            if "менеджер" in lowered and "форм" in lowered:
+                return "Отправленная форма с контактами, после которой менеджер связывается для уточнения деталей"
+            if "участ" in lowered or "participant" in lowered:
+                return "Отправленная заявка на участие через форму сайта"
+            if "регистра" in lowered or "register" in lowered:
+                return "Завершённая регистрация на сайте"
+            if "консультац" in lowered or "contact you" in lowered:
+                return "Отправленная заявка, после которой представитель связывается с клиентом"
+            return "Выполненное целевое действие на сайте: " + _clean_text(quote["text"], 700)
+        if any(int(page.get("forms_detected", 0)) for page in pages):
+            return "Отправленная форма с контактными данными на сайте"
+        return ""
+
+    @staticmethod
+    def _exclusions(
+        evidence: list[dict[str, str]],
+        qualified_result: str,
+    ) -> tuple[str, dict[str, str] | None]:
+        markers = {
+            "посетител": "посетители без намерения оставить коммерческую заявку",
+            "visitor": "посетители без намерения оставить коммерческую заявку",
+            "вакан": "соискатели и запросы о работе",
+            "career": "соискатели и запросы о работе",
+            "пресс": "СМИ без коммерческого запроса",
+            "media": "СМИ без коммерческого запроса",
+            "бесплат": "запросы только на бесплатные материалы или посещение",
+            "free ticket": "запросы только на бесплатные материалы или посещение",
+        }
+        values: list[str] = []
+        reference: dict[str, str] | None = None
+        for item in evidence:
+            lowered = item["text"].casefold()
+            for marker, label in markers.items():
+                if marker in lowered and label not in values:
+                    values.append(label)
+                    reference = reference or item
+        if not values and qualified_result:
+            values.append("информационные обращения без намерения выполнить целевое действие")
+        return _clean_text("; ".join(values), 1000), reference
+
+    @staticmethod
+    def _field_evidence(
+        reference: dict[str, str] | None,
+        confidence: str,
+    ) -> dict[str, Any]:
+        return {
+            "confidence": confidence,
+            "source_url": reference["url"] if reference else "",
+            "quote": reference["text"] if reference else "",
+        }
 
 
 class P0ProductionModule:
@@ -901,17 +1387,19 @@ class P0ProductionModule:
         context_reader: P0ContextReader,
         site_reader: P0SiteReader,
         creator: P0CampaignCreator,
+        business_researcher: P0BusinessResearcher | None = None,
     ) -> None:
         self.store = store
         self.context_reader = context_reader
         self.site_reader = site_reader
         self.creator = creator
+        self.business_researcher = business_researcher or EvidenceBusinessResearcher()
 
     def overview(self) -> dict[str, Any]:
         revision = self.store.load()
         try:
             context = dict(self.context_reader.read())
-        except Exception as error:
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
             context = {
                 "environment": "PRODUCTION",
                 "test_scenario": False,
@@ -978,22 +1466,15 @@ class P0ProductionModule:
 
     def analyze_site(self, *, url: str, expected_revision: int) -> dict[str, Any]:
         site = dict(self.site_reader.read(_bounded_text(url, "Сайт", 2048)))
-        product = site.get("headings", [""])[0] if site.get("headings") else site.get("title", "")
-        value = site.get("description") or site.get("text_excerpt", "")[:500]
-        model = {
-            "product": _clean_text(str(product), 500),
-            "audience": "",
-            "value": _clean_text(str(value), 1000),
-            "qualified_result": "",
-            "exclusions": "",
-            "source": "REAL_SITE_ANALYSIS",
-            "assumptions": [],
-            "missing_questions": [
-                "Кто принимает решение о покупке?",
-                "Какой фактический результат считается квалифицированным?",
-                "Какие обращения и аудитории нужно исключить?",
-            ],
-        }
+        try:
+            context = dict(self.context_reader.read())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            context = {
+                "environment": "PRODUCTION",
+                "direct": {"ready": False},
+                "metrika": {"ready": False},
+            }
+        model = dict(self.business_researcher.research(site, context))
         first = self.store.save_section(
             "site_analysis",
             site,
@@ -1023,11 +1504,24 @@ class P0ProductionModule:
             },
             "Модель бизнеса",
         )
+        current = self.store.load()
+        existing = current.value.get("business_model")
+        research = dict(existing.get("research", {})) if isinstance(existing, Mapping) else {}
+        if isinstance(existing, Mapping) and existing.get("assumptions"):
+            research["initial_assumptions"] = list(existing["assumptions"])
+        evidence = copy.deepcopy(dict(existing.get("field_evidence", {}))) if isinstance(existing, Mapping) else {}
+        for name in normalized:
+            item = dict(evidence.get(name, {})) if isinstance(evidence.get(name), Mapping) else {}
+            item["owner_confirmed"] = True
+            item["confidence"] = "OWNER_CONFIRMED"
+            evidence[name] = item
         normalized.update(
             {
-                "source": "REAL_SITE_PLUS_OWNER_REVISION",
+                "source": "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION",
                 "assumptions": [],
                 "missing_questions": [],
+                "research": research,
+                "field_evidence": evidence,
             }
         )
         revision = self.store.save_section(
@@ -1338,6 +1832,11 @@ def _validated_public_https_url(url: str, resolver: Callable[..., Any]) -> str:
             )
     normalized = parsed._replace(path=parsed.path or "/").geturl()
     return normalized
+
+
+def _site_host(url: str) -> str:
+    host = (urlparse(url).hostname or "").casefold().rstrip(".")
+    return host.removeprefix("www.")
 
 
 def _clean_text(value: str, maximum: int) -> str:
