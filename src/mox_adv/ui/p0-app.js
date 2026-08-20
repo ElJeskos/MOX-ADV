@@ -242,7 +242,11 @@ async function loadP0() {
     state.p0Production = await requestJson("/api/p0");
     const legacyModel = state.p0Production.state?.business_model;
     const site = state.p0Production.state?.site_analysis;
-    if (legacyModel?.source === "REAL_SITE_ANALYSIS" && site?.url) {
+    const researchNeedsUpgrade =
+      legacyModel?.source === "REAL_SITE_ANALYSIS" ||
+      (legacyModel?.source === "REAL_SITE_AND_CONNECTED_DATA_RESEARCH" &&
+        legacyModel?.research?.agent !== "EVIDENCE_FIRST_RESEARCH_V2");
+    if (researchNeedsUpgrade && site?.url) {
       setText(p0Elements.loading, "Агент самостоятельно обновляет прежнюю одностраничную модель…");
       const upgraded = await requestJson("/api/p0", {
         method: "POST",

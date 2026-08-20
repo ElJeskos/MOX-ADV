@@ -1190,7 +1190,7 @@ class EvidenceBusinessResearcher:
             "assumptions": assumptions,
             "missing_questions": missing_questions,
             "research": {
-                "agent": "EVIDENCE_FIRST_RESEARCH_V1",
+                "agent": "EVIDENCE_FIRST_RESEARCH_V2",
                 "pages_analyzed": len(pages),
                 "sources": sources,
                 "completed_fields": [name for name, (answer, _, _) in facts.items() if answer],

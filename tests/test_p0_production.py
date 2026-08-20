@@ -218,6 +218,7 @@ class P0ProductionModuleTests(unittest.TestCase):
         self.assertTrue(model["exclusions"])
         self.assertEqual([], model["missing_questions"])
         self.assertGreaterEqual(model["research"]["pages_analyzed"], 3)
+        self.assertEqual("EVIDENCE_FIRST_RESEARCH_V2", model["research"]["agent"])
         self.assertIn("DIRECT_REAL_ACCOUNT", model["research"]["sources"])
         self.assertIn(
             "terms-of-participation",
