@@ -158,7 +158,7 @@ export default function P0Client() {
               <Connection label="Яндекс Метрика" ready={metrika.ready === true} detail={metrika.ready ? "Счётчик и цель читаются через API" : metrika.blockers?.[0]} />
               <Connection label="Последний реальный срез" ready={Boolean(performance)} detail={performance ? `${performance.period_start} — ${performance.period_end} · ${performance.display_metrics.goal_visits} целей` : "Нет подтверждённого среза"} />
             </section>
-            <section className="write-boundary"><span>Готовность внешней записи</span><strong>Заблокирована</strong><small>{payload.write_readiness.blockers[0]}</small></section>
+            <section className="write-boundary"><span>Готовность внешней записи</span><strong>{payload.write_readiness.ready ? "Готова к подтверждению" : "Заблокирована"}</strong><small>{payload.write_readiness.ready ? "Реальный Direct API · результат останется SUSPENDED" : payload.write_readiness.blockers[0]}</small></section>
           </aside>
 
           <section className="artifact">
@@ -166,7 +166,7 @@ export default function P0Client() {
             {step === 1 && <ModelStep payload={payload} apply={apply} back={() => setStep(0)} />}
             {step === 2 && <StrategyStep payload={payload} apply={apply} back={() => setStep(1)} />}
             {step === 3 && <DraftStep payload={payload} apply={apply} back={() => setStep(2)} />}
-            {step === 4 && <ConfirmationStep payload={payload} back={() => setStep(3)} />}
+            {step === 4 && <ConfirmationStep payload={payload} apply={apply} back={() => setStep(3)} />}
             {busy && <p className="notice">{busy}</p>}
             {error && <p className="notice error">{error}</p>}
           </section>
@@ -293,11 +293,25 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   </>;
 }
 
-function ConfirmationStep({ payload, back }: { payload: Payload; back: () => void }) {
+function ConfirmationStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; back: () => void }) {
+  const [confirmed, setConfirmed] = useState(false);
+  const campaign = payload.state.campaign;
+  if (campaign) {
+    return <>
+      <ArtifactHead eyebrow="Шаг 5 · Direct readback" title="Реальная кампания создана и остановлена" copy="MOX-ADV подтвердил состояние в Яндекс Директе после записи." badge="SUSPENDED" />
+      <div className="confirmation"><p className="eyebrow">Production result</p><h3>Показы и списания не начались</h3><p>Campaign ID {campaign.campaign_id} · {campaign.status} · модерация: {campaign.moderation_status}</p></div>
+      <Actions revision={payload.revision} label="Создание завершено" disabled back={back} />
+    </>;
+  }
+  const ready = payload.write_readiness.ready;
+  const draft = payload.state.draft || {};
+  const strategy = payload.state.strategy || {};
   return <>
-    <ArtifactHead eyebrow="Шаг 5 · guarded write" title="Внешняя запись заблокирована" copy="GPT Sites-кандидат не симулирует создание кампании и не показывает недоступную кнопку." badge="FAIL CLOSED" />
-    <div className="confirmation"><p className="eyebrow">Обещание безопасности</p><h3>Показы и списания не начнутся</h3><p>Production write появится только после отдельного Human Decision Gate, привязки single writer и официального Direct API-контура с обязательным readback State=SUSPENDED.</p></div>
-    <ul className="blockers">{payload.write_readiness.blockers.map((item, index) => <li key={item}><span>{index + 1}</span>{item}</li>)}</ul>
-    <Actions revision={payload.revision} label="Запись недоступна" disabled back={back} />
+    <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Создать реальную остановленную кампанию" copy="Это единственное критическое решение: после подтверждения модуль выполнит официальный Direct API-контур и проверит SUSPENDED readback." badge={ready ? "READY" : "FAIL CLOSED"} />
+    <div className="context-strip"><Metric label="Кампания" value={draft.campaign_name} copy={payload.context.direct.account} /><Metric label="Экспозиция" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy={`${strategy.period_start} — ${strategy.period_end}`} /><Metric label="Посадочная" value={strategy.landing_page} copy="Search only · сети выключены" /></div>
+    <div className="confirmation"><p className="eyebrow">Обещание безопасности</p><h3>Показы и списания не начнутся</h3><p>Campaigns.add → suspend → readback → группа → фраза → объявление → модерация → повторный readback. Campaigns.resume отсутствует.</p></div>
+    {!ready && <ul className="blockers">{payload.write_readiness.blockers.map((item, index) => <li key={item}><span>{index + 1}</span>{item}</li>)}</ul>}
+    {ready && <div className="decision-confirm"><input aria-label="Подтверждаю создание реальной кампании" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю создание реальной кампании</strong><small>Кампания появится в аккаунте {payload.context.direct.account} и останется остановленной.</small></span></div>}
+    <footer className="actions"><span>Ревизия {payload.revision} · production write</span><button type="button" className="secondary" onClick={back}>Назад</button><button type="button" disabled={!ready || !confirmed} onClick={() => void apply("confirm_creation", undefined, { confirmation: "CREATE_SUSPENDED_CAMPAIGN" })}>Создать и остановить кампанию</button></footer>
   </>;
 }

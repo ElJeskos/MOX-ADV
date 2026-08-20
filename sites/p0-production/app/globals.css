@@ -137,6 +137,10 @@ body::before {
 .confirmation p:not(.eyebrow) { margin: 0; color: #bdc8c1; font-size: 10px; line-height: 1.6; }
 .blockers { display: grid; gap: 8px; margin: 14px 0 0; padding: 0; list-style: none; }
 .blockers li { display: grid; grid-template-columns: 30px 1fr; gap: 10px; align-items: center; padding: 11px 13px; border: 1px solid #e5ccaa; border-radius: 8px; background: var(--amber-soft); font-size: 9px; }
+.decision-confirm { display: flex; gap: 12px; align-items: flex-start; margin-top: 14px; padding: 16px; border: 1px solid var(--green); border-radius: 9px; background: var(--green-soft); color: var(--ink); }
+.decision-confirm input { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--green); }
+.decision-confirm span, .decision-confirm strong, .decision-confirm small { display: block; }
+.decision-confirm small { margin-top: 4px; color: var(--muted); font-size: 9px; }
 
 .actions { display: flex; gap: 9px; align-items: center; margin-top: 6px; padding-top: 17px; border-top: 1px solid var(--line); }
 .actions > span { margin-right: auto; color: var(--muted); font-size: 8px; }

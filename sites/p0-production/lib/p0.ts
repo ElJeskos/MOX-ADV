@@ -6,7 +6,17 @@ import {
   isUnprocessedAudience,
   isUnprocessedOffer,
 } from "./business-model";
-import { buildCampaignNames, isLegacySearchName } from "./campaign-draft";
+import {
+  buildCampaignNames,
+  buildPublishProjection,
+  hasDuplicateCampaignName,
+  isLegacySearchName,
+} from "./campaign-draft";
+import {
+  createSuspendedCampaign,
+  DirectWriteError,
+  type DirectProjection,
+} from "./direct-write";
 
 const MAX_SITE_BYTES = 5_000_000;
 const MAX_SITE_PAGES = 6;
@@ -161,6 +171,14 @@ function migrateDocument(state: P0Document) {
       draft.ad_title = buildAdTitle(model.product);
       changed = true;
     }
+    if ((draft.publish_projection as Record<string, unknown> | undefined)?.schema_version !== "p0-direct-projection-v1" || previousProduct) {
+      draft.publish_projection = buildPublishProjection(
+        model as unknown as Record<string, unknown>,
+        strategy,
+        draft,
+      );
+      changed = true;
+    }
   }
   return changed;
 }
@@ -224,6 +242,16 @@ async function ensureState(key: string) {
       "CREATE TABLE IF NOT EXISTS p0_state (user_key TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, value_json TEXT NOT NULL)",
     )
     .run();
+  await db
+    .prepare(
+      "CREATE TABLE IF NOT EXISTS p0_executions (execution_id TEXT PRIMARY KEY, user_key TEXT NOT NULL, account_key TEXT NOT NULL, status TEXT NOT NULL, campaign_id TEXT, projection_json TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE TABLE IF NOT EXISTS p0_account_locks (account_key TEXT PRIMARY KEY, execution_id TEXT NOT NULL, owner_key TEXT NOT NULL, expires_at TEXT NOT NULL)",
+    )
+    .run();
   const existing = await db
     .prepare("SELECT revision, updated_at, value_json FROM p0_state WHERE user_key = ?")
     .bind(key)
@@ -265,6 +293,81 @@ async function saveState(key: string, expectedRevision: number, state: P0Documen
   return { revision: expectedRevision + 1, updated_at: updatedAt, state };
 }
 
+function directWriteConfig() {
+  const runtime = runtimeEnv();
+  return {
+    token: runtime.YANDEX_DIRECT_OAUTH_TOKEN ?? "",
+    account: runtime.YANDEX_DIRECT_CLIENT_LOGIN ?? "",
+  };
+}
+
+async function beginExecution(
+  userKeyValue: string,
+  account: string,
+  projection: DirectProjection,
+) {
+  const executionId = crypto.randomUUID();
+  const timestamp = now();
+  await runtimeEnv()
+    .DB.prepare(
+      "INSERT INTO p0_executions(execution_id, user_key, account_key, status, projection_json, result_json, created_at, updated_at) VALUES (?, ?, ?, 'STARTED', ?, '{}', ?, ?)",
+    )
+    .bind(executionId, userKeyValue, account, JSON.stringify(projection), timestamp, timestamp)
+    .run();
+  return executionId;
+}
+
+async function recordExecution(
+  executionId: string,
+  status: string,
+  result: Record<string, unknown>,
+) {
+  await runtimeEnv()
+    .DB.prepare(
+      "UPDATE p0_executions SET status = ?, campaign_id = COALESCE(?, campaign_id), result_json = ?, updated_at = ? WHERE execution_id = ?",
+    )
+    .bind(
+      status,
+      result.campaign_id ? String(result.campaign_id) : null,
+      JSON.stringify(result),
+      now(),
+      executionId,
+    )
+    .run();
+}
+
+async function acquireAccountLock(account: string, userKeyValue: string, executionId: string) {
+  const db = runtimeEnv().DB;
+  const timestamp = now();
+  await db.prepare("DELETE FROM p0_account_locks WHERE expires_at <= ?").bind(timestamp).run();
+  const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+  const result = await db
+    .prepare(
+      "INSERT OR IGNORE INTO p0_account_locks(account_key, execution_id, owner_key, expires_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(account, executionId, userKeyValue, expiresAt)
+    .run();
+  if (Number(result.meta.changes) !== 1) {
+    throw new Error("Для аккаунта уже выполняется другая production-запись.");
+  }
+}
+
+async function releaseAccountLock(account: string, executionId: string) {
+  await runtimeEnv()
+    .DB.prepare("DELETE FROM p0_account_locks WHERE account_key = ? AND execution_id = ?")
+    .bind(account, executionId)
+    .run();
+}
+
+async function holdAccountLock(account: string, executionId: string) {
+  await runtimeEnv()
+    .DB.prepare(
+      "UPDATE p0_account_locks SET expires_at = '9999-12-31T23:59:59.999Z' WHERE account_key = ? AND execution_id = ?",
+    )
+    .bind(account, executionId)
+    .run();
+}
+
 async function readCampaignCatalog() {
   const runtime = runtimeEnv();
   const token = runtime.YANDEX_DIRECT_OAUTH_TOKEN;
@@ -300,6 +403,9 @@ async function readCampaignCatalog() {
   return {
     account,
     total: campaigns.length,
+    names: campaigns
+      .filter((item) => item.Status !== "ARCHIVED")
+      .map((item) => cleanText(String(item.Name ?? ""), 255)),
     active: campaigns
       .filter((item) => item.Status !== "ARCHIVED")
       .slice(0, 20)
@@ -700,6 +806,16 @@ function inferModel(site: SiteAnalysis, context: Context): BusinessModel {
   };
 }
 
+function writeReadiness(state: P0Document, context: Context) {
+  const config = directWriteConfig();
+  const blockers: string[] = [];
+  if (!config.token || !config.account) blockers.push("Direct production credentials не настроены");
+  if (context.direct.ready !== true) blockers.push("Текущий аккаунт Директа не прошёл production preflight");
+  if (!state.draft?.publish_projection) blockers.push("Campaign Draft ещё не зафиксирован");
+  if (state.campaign) blockers.push("Кампания по этой ревизии уже создана");
+  return { ready: blockers.length === 0, blockers };
+}
+
 export async function overview(key: string) {
   const [stored, context] = await Promise.all([loadState(key), readContext()]);
   return {
@@ -708,13 +824,7 @@ export async function overview(key: string) {
     test_scenario: false,
     ...stored,
     context,
-    write_readiness: {
-      ready: false,
-      blockers: [
-        "Production write не разрешён для GPT Sites-кандидата",
-        "Создание кампании доступно только после отдельного Human Decision Gate",
-      ],
-    },
+    write_readiness: writeReadiness(stored.state, context),
   };
 }
 
@@ -772,17 +882,62 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
     state.draft = {
       ...normalized,
       source: "OWNER_REVIEWED_PUBLISH_PROJECTION",
-      publish_projection: {
-        schema_version: "p0-sites-projection-v1",
-        safety: { must_end_suspended: true, resume_allowed: false, network_serving: false },
-        business: {
-          product: state.business_model.product,
-          audience: state.business_model.audience,
-          qualified_result: state.business_model.qualified_result,
-          goal: state.strategy.goal,
-        },
-      },
+      publish_projection: buildPublishProjection(
+        state.business_model as unknown as Record<string, unknown>,
+        state.strategy,
+        normalized,
+      ),
     };
+  } else if (action === "confirm_creation") {
+    if (payload.confirmation !== "CREATE_SUSPENDED_CAMPAIGN") {
+      throw new Error("Нужно точное подтверждение создания реальной остановленной кампании.");
+    }
+    if (state.campaign) throw new Error("Кампания по этой ревизии уже создана.");
+    const projection = state.draft?.publish_projection as DirectProjection | undefined;
+    if (!projection) throw new Error("Campaign Draft не готов к созданию.");
+    const config = directWriteConfig();
+    if (!config.token || !config.account) throw new Error("Direct production credentials не настроены.");
+    const catalog = await readCampaignCatalog();
+    const campaignName = String(projection.direct.campaign.Name ?? "");
+    if (hasDuplicateCampaignName(catalog.names, campaignName)) {
+      throw new Error("В аккаунте уже существует активная кампания с таким названием.");
+    }
+    const executionId = await beginExecution(key, config.account, projection);
+    try {
+      await acquireAccountLock(config.account, key, executionId);
+    } catch (error) {
+      await recordExecution(executionId, "ACCOUNT_WRITE_LOCKED", {});
+      throw error;
+    }
+    let releaseLock = true;
+    try {
+      const result = await createSuspendedCampaign(
+        config,
+        projection,
+        fetch,
+        (status, progress) => recordExecution(executionId, status, progress),
+      );
+      state.campaign = {
+        source: "YANDEX_DIRECT_API",
+        created_at: now(),
+        execution_id: executionId,
+        ...result,
+      };
+    } catch (error) {
+      const partial = error instanceof DirectWriteError ? error.partial : {};
+      await recordExecution(
+        executionId,
+        error instanceof DirectWriteError ? error.code : "P0_DIRECT_WRITE_FAILED",
+        partial,
+      );
+      if (partial.campaign_id || partial.containment === "RECONCILIATION_REQUIRED") {
+        releaseLock = false;
+        await holdAccountLock(config.account, executionId);
+      }
+      throw error;
+    } finally {
+      if (releaseLock) await releaseAccountLock(config.account, executionId);
+    }
   } else if (action === "reset") {
     Object.assign(state, emptyDocument());
   } else {

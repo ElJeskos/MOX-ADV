@@ -47,7 +47,7 @@ Because the read-only APIs do not establish a trusted optimization baseline or c
 The main mode does not create an approval, invoke an executor, expose a write-capable transport method, or permit write requests.
 If any trusted binding or read credential is missing, the main mode fails closed and does not fall back to fixture data.
 
-The P0 production candidate is developed and validated separately under `sites/p0-production/`. It is intentionally absent from the Integrated Prototype until its production refinement and E2E acceptance are complete; every module at `/prototype/mox-adv` remains a browser-only Test Scenario. Following the project-wide AI-first rule, the candidate researches permitted sources and prepares business artifacts autonomously while production write remains fail closed.
+The P0 production candidate is developed and validated separately under `sites/p0-production/`. It is intentionally absent from the Integrated Prototype until its production refinement and E2E acceptance are complete; every module at `/prototype/mox-adv` remains a browser-only Test Scenario. Following the project-wide AI-first rule, the candidate researches permitted sources and prepares business artifacts autonomously, then creates one real campaign only after an exact Human Decision Gate and must confirm `State=SUSPENDED`; it never calls `Campaigns.resume`.
 
 Copy the non-secret configuration template to the local user configuration directory and replace the campaign and goal identifiers.
 The Direct client login and the single Metrika counter ID come from `.env`.

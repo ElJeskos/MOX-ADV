@@ -6,3 +6,22 @@ export const p0States = sqliteTable("p0_state", {
   updatedAt: text("updated_at").notNull(),
   valueJson: text("value_json").notNull(),
 });
+
+export const p0Executions = sqliteTable("p0_executions", {
+  executionId: text("execution_id").primaryKey(),
+  userKey: text("user_key").notNull(),
+  accountKey: text("account_key").notNull(),
+  status: text("status").notNull(),
+  campaignId: text("campaign_id"),
+  projectionJson: text("projection_json").notNull(),
+  resultJson: text("result_json").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const p0AccountLocks = sqliteTable("p0_account_locks", {
+  accountKey: text("account_key").primaryKey(),
+  executionId: text("execution_id").notNull(),
+  ownerKey: text("owner_key").notNull(),
+  expiresAt: text("expires_at").notNull(),
+});
