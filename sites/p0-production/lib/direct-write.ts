@@ -1,7 +1,7 @@
 export type DirectProjection = {
   schema_version: string;
   business: Record<string, unknown>;
-  safety: { must_end_suspended: true; resume_allowed: false; network_serving: false };
+  safety: { must_end_non_serving: true; resume_allowed: false; network_serving: false };
   direct: {
     campaign: Record<string, unknown>;
     ad_group: Record<string, unknown>;
@@ -150,7 +150,9 @@ async function adReadback(config: DirectConfig, adId: string, fetcher: Fetcher) 
   return rows[0] as Record<string, unknown>;
 }
 
-async function ensureSuspended(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
+async function ensureNonServing(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
+  let campaign = await campaignReadback(config, campaignId, fetcher);
+  if (campaign.State === "OFF" || campaign.State === "SUSPENDED") return campaign;
   const suspended = await callDirect(
     config,
     "Campaigns",
@@ -159,9 +161,9 @@ async function ensureSuspended(config: DirectConfig, campaignId: string, fetcher
     fetcher,
   );
   actionAccepted(suspended, "SuspendResults", "Campaigns.suspend");
-  const campaign = await campaignReadback(config, campaignId, fetcher);
-  if (campaign.State !== "SUSPENDED") {
-    throw new DirectWriteError("P0_SUSPEND_NOT_CONFIRMED", "Директ не подтвердил остановленное состояние кампании.");
+  campaign = await campaignReadback(config, campaignId, fetcher);
+  if (campaign.State !== "OFF" && campaign.State !== "SUSPENDED") {
+    throw new DirectWriteError("P0_NON_SERVING_NOT_CONFIRMED", "Директ не подтвердил выключенные показы кампании.");
   }
   return campaign;
 }
@@ -171,12 +173,13 @@ export async function createSuspendedCampaign(
   projection: DirectProjection,
   fetcher: Fetcher = fetch,
   onProgress: (status: string, result: Record<string, unknown>) => void | Promise<void> = () => undefined,
+  existingCampaignId = "",
 ) {
   if (!config.token || !config.account) {
     throw new DirectWriteError("P0_WRITE_CREDENTIAL_MISSING", "Direct production credentials не настроены.");
   }
   if (
-    projection.safety.must_end_suspended !== true
+    projection.safety.must_end_non_serving !== true
     || projection.safety.resume_allowed !== false
     || projection.safety.network_serving !== false
   ) {
@@ -184,21 +187,28 @@ export async function createSuspendedCampaign(
   }
 
   const result: Record<string, unknown> = { steps: [] as string[] };
-  let campaignId = "";
+  let campaignId = existingCampaignId;
   try {
-    result.add_attempted = true;
-    campaignId = addedId(
-      await callDirect(config, "Campaigns", "add", { Campaigns: [projection.direct.campaign] }, fetcher),
-      "AddResults",
-      "Campaigns.add",
-    );
-    result.campaign_id = campaignId;
-    (result.steps as string[]).push("CAMPAIGN_CREATED");
-    await onProgress("CAMPAIGN_CREATED", result);
+    if (campaignId) {
+      result.campaign_id = campaignId;
+      result.recovered_existing = true;
+      (result.steps as string[]).push("CAMPAIGN_RECOVERED");
+      await onProgress("CAMPAIGN_RECOVERED", result);
+    } else {
+      result.add_attempted = true;
+      campaignId = addedId(
+        await callDirect(config, "Campaigns", "add", { Campaigns: [projection.direct.campaign] }, fetcher),
+        "AddResults",
+        "Campaigns.add",
+      );
+      result.campaign_id = campaignId;
+      (result.steps as string[]).push("CAMPAIGN_CREATED");
+      await onProgress("CAMPAIGN_CREATED", result);
+    }
 
-    await ensureSuspended(config, campaignId, fetcher);
-    (result.steps as string[]).push("SUSPENDED_CONFIRMED");
-    await onProgress("SUSPENDED_CONFIRMED", result);
+    await ensureNonServing(config, campaignId, fetcher);
+    (result.steps as string[]).push("NON_SERVING_CONFIRMED");
+    await onProgress("NON_SERVING_CONFIRMED", result);
 
     const adGroup = { ...projection.direct.ad_group, CampaignId: Number(campaignId) };
     const adGroupId = addedId(
@@ -231,10 +241,7 @@ export async function createSuspendedCampaign(
     );
     actionAccepted(moderated, "ModerateResults", "Ads.moderate");
     const adState = await adReadback(config, adId, fetcher);
-    const finalCampaign = await campaignReadback(config, campaignId, fetcher);
-    if (finalCampaign.State !== "SUSPENDED") {
-      throw new DirectWriteError("P0_SUSPEND_LOST", "Остановленное состояние кампании потеряно после модерации.", result);
-    }
+    const finalCampaign = await ensureNonServing(config, campaignId, fetcher);
     const moderation = String(adState.Status ?? "UNKNOWN");
     const status = moderation === "ACCEPTED"
       ? "READY_TO_LAUNCH"
@@ -245,7 +252,7 @@ export async function createSuspendedCampaign(
     const completed = {
       ...result,
       status,
-      campaign_state: "SUSPENDED",
+      campaign_state: String(finalCampaign.State ?? "UNKNOWN"),
       moderation_status: moderation,
       spend_started: false,
     };
@@ -254,8 +261,8 @@ export async function createSuspendedCampaign(
   } catch (error) {
     if (campaignId) {
       try {
-        await ensureSuspended(config, campaignId, fetcher);
-        result.containment = "SUSPENDED_CONFIRMED";
+        await ensureNonServing(config, campaignId, fetcher);
+        result.containment = "NON_SERVING_CONFIRMED";
       } catch {
         result.containment = "MANUAL_RECONCILIATION_REQUIRED";
       }

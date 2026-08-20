@@ -51,7 +51,7 @@ export function buildPublishProjection(
   if (!negativeKeywords.length) throw new Error("Нужна хотя бы одна минус-фраза.");
 
   return {
-    schema_version: "p0-direct-projection-v1",
+    schema_version: "p0-direct-projection-v2",
     business: {
       product: model.product,
       audience: model.audience,
@@ -60,7 +60,7 @@ export function buildPublishProjection(
       target_cpa_rub: strategy.target_cpa_rub,
     },
     safety: {
-      must_end_suspended: true,
+      must_end_non_serving: true,
       resume_allowed: false,
       network_serving: false,
     },

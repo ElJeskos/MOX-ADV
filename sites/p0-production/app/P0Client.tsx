@@ -159,7 +159,7 @@ export default function P0Client() {
               <Connection label="Яндекс Метрика" ready={metrika.ready === true} detail={metrika.ready ? "Счётчик и цель читаются через API" : metrika.blockers?.[0]} />
               <Connection label="Последний реальный срез" ready={Boolean(performance)} detail={performance ? `${performance.period_start} — ${performance.period_end} · ${performance.display_metrics.goal_visits} целей` : "Нет подтверждённого среза"} />
             </section>
-            <section className="write-boundary"><span>Готовность внешней записи</span><strong>{payload.write_readiness.ready ? "Готова к подтверждению" : "Заблокирована"}</strong><small>{payload.write_readiness.ready ? "Реальный Direct API · результат останется SUSPENDED" : payload.write_readiness.blockers[0]}</small></section>
+            <section className="write-boundary"><span>Готовность внешней записи</span><strong>{payload.write_readiness.ready ? "Готова к подтверждению" : "Заблокирована"}</strong><small>{payload.write_readiness.ready ? "Реальный Direct API · показы останутся выключенными" : payload.write_readiness.blockers[0]}</small></section>
           </aside>
 
           <section className="artifact">
@@ -284,7 +284,7 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   }
   return <>
     <ArtifactHead eyebrow="Шаг 4 · Campaign Draft" title="Точная publish projection" copy="Агент подготовил все поддерживаемые поля. Ничего не будет молча отброшено." />
-    <div className="context-strip"><Metric label="Цель" value={strategy.goal} copy={model.qualified_result} /><Metric label="Бюджет" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy="Канал: поиск Яндекс Директа · сети выключены" /><Metric label="Безопасный финиш" value="State = SUSPENDED" copy="resume отсутствует" /></div>
+    <div className="context-strip"><Metric label="Цель" value={strategy.goal} copy={model.qualified_result} /><Metric label="Бюджет" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy="Канал: поиск Яндекс Директа · сети выключены" /><Metric label="Безопасный финиш" value="Показы выключены" copy="State = OFF / SUSPENDED · resume отсутствует" /></div>
     <form className="form two" onSubmit={submit}>
       <label><span>Название кампании</span><input name="campaign_name" required defaultValue={existing.campaign_name || names.campaignName} /></label>
       <label><span>Название группы объявлений</span><input name="group_name" required defaultValue={existing.group_name || names.groupName} /></label>
@@ -302,7 +302,7 @@ function ConfirmationStep({ payload, apply, back, editStrategy }: { payload: Pay
   const campaign = payload.state.campaign;
   if (campaign) {
     return <>
-      <ArtifactHead eyebrow="Шаг 5 · Direct readback" title="Реальная кампания создана и остановлена" copy="MOX-ADV подтвердил состояние в Яндекс Директе после записи." badge="SUSPENDED" />
+      <ArtifactHead eyebrow="Шаг 5 · Direct readback" title="Реальная кампания создана, показы выключены" copy="MOX-ADV подтвердил состояние в Яндекс Директе после записи." badge={String(campaign.campaign_state || "OFF")} />
       <div className="confirmation"><p className="eyebrow">Production result</p><h3>Показы и списания не начались</h3><p>Campaign ID {campaign.campaign_id} · {campaign.status} · модерация: {campaign.moderation_status}</p></div>
       <Actions revision={payload.revision} label="Создание завершено" disabled back={back} />
     </>;
@@ -312,11 +312,11 @@ function ConfirmationStep({ payload, apply, back, editStrategy }: { payload: Pay
   const strategy = payload.state.strategy || {};
   const budgetBlocked = payload.write_readiness.blockers.some((item) => item.includes("Недельный бюджет"));
   return <>
-    <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Создать реальную остановленную кампанию" copy="Это единственное критическое решение: после подтверждения модуль выполнит официальный Direct API-контур и проверит SUSPENDED readback." badge={ready ? "READY" : "FAIL CLOSED"} />
+    <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Создать реальную кампанию с выключенными показами" copy="Это единственное критическое решение: после подтверждения модуль выполнит официальный Direct API-контур и проверит non-serving readback." badge={ready ? "READY" : "FAIL CLOSED"} />
     <div className="context-strip"><Metric label="Кампания" value={draft.campaign_name} copy={payload.context.direct.account} /><Metric label="Экспозиция" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy={`${strategy.period_start} — ${strategy.period_end}`} /><Metric label="Посадочная" value={strategy.landing_page} copy="Search only · сети выключены" /></div>
-    <div className="confirmation"><p className="eyebrow">Обещание безопасности</p><h3>Показы и списания не начнутся</h3><p>Campaigns.add → suspend → readback → группа → фраза → объявление → модерация → повторный readback. Campaigns.resume отсутствует.</p></div>
+    <div className="confirmation"><p className="eyebrow">Обещание безопасности</p><h3>Показы и списания не начнутся</h3><p>Campaigns.add → readback OFF → группа → фраза → объявление → модерация → повторный non-serving readback. Campaigns.resume отсутствует.</p></div>
     {!ready && <ul className="blockers">{payload.write_readiness.blockers.map((item, index) => <li key={item}><span>{index + 1}</span>{item}</li>)}</ul>}
-    {ready && <div className="decision-confirm"><input aria-label="Подтверждаю создание реальной кампании" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю создание реальной кампании</strong><small>Кампания появится в аккаунте {payload.context.direct.account} и останется остановленной.</small></span></div>}
-    <footer className="actions"><span>Ревизия {payload.revision} · production write</span><button type="button" className="secondary" onClick={budgetBlocked ? editStrategy : back}>{budgetBlocked ? "Исправить Strategy" : "Назад"}</button><button type="button" disabled={!ready || !confirmed} onClick={() => void apply("confirm_creation", undefined, { confirmation: "CREATE_SUSPENDED_CAMPAIGN" })}>Создать и остановить кампанию</button></footer>
+    {ready && <div className="decision-confirm"><input aria-label="Подтверждаю создание реальной кампании" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю создание реальной кампании</strong><small>Кампания появится в аккаунте {payload.context.direct.account}, но показы останутся выключенными.</small></span></div>}
+    <footer className="actions"><span>Ревизия {payload.revision} · production write</span><button type="button" className="secondary" onClick={budgetBlocked ? editStrategy : back}>{budgetBlocked ? "Исправить Strategy" : "Назад"}</button><button type="button" disabled={!ready || !confirmed} onClick={() => void apply("confirm_creation", undefined, { confirmation: "CREATE_NON_SERVING_CAMPAIGN" })}>Создать с выключенными показами</button></footer>
   </>;
 }

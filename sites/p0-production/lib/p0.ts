@@ -60,6 +60,13 @@ type StateRow = {
   value_json: string;
 };
 
+type ExecutionRow = {
+  execution_id: string;
+  campaign_id: string;
+  projection_json: string;
+  result_json: string;
+};
+
 type PageEvidence = {
   url: string;
   title: string;
@@ -181,7 +188,7 @@ function migrateDocument(state: P0Document) {
       changed = true;
       draftChanged = true;
     }
-    if ((draft.publish_projection as Record<string, unknown> | undefined)?.schema_version !== "p0-direct-projection-v1" || previousProduct || draftChanged) {
+    if ((draft.publish_projection as Record<string, unknown> | undefined)?.schema_version !== "p0-direct-projection-v2" || previousProduct || draftChanged) {
       draft.publish_projection = buildPublishProjection(
         model as unknown as Record<string, unknown>,
         strategy,
@@ -325,6 +332,39 @@ async function beginExecution(
     .bind(executionId, userKeyValue, account, JSON.stringify(projection), timestamp, timestamp)
     .run();
   return executionId;
+}
+
+async function findRecoverableExecution(
+  userKeyValue: string,
+  account: string,
+  projection: DirectProjection,
+) {
+  const row = await runtimeEnv()
+    .DB.prepare(
+      "SELECT execution_id, campaign_id, projection_json, result_json FROM p0_executions WHERE user_key = ? AND account_key = ? AND campaign_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(userKeyValue, account)
+    .first<ExecutionRow>();
+  if (!row) return null;
+  const storedProjection = JSON.parse(row.projection_json) as DirectProjection;
+  const storedResult = JSON.parse(row.result_json) as Record<string, unknown>;
+  const steps = Array.isArray(storedResult.steps) ? storedResult.steps : [];
+  if (
+    storedProjection.direct.campaign.Name !== projection.direct.campaign.Name
+    || steps.length !== 1
+    || steps[0] !== "CAMPAIGN_CREATED"
+  ) return null;
+  return { executionId: row.execution_id, campaignId: String(row.campaign_id) };
+}
+
+async function claimRecoveryLock(account: string, userKeyValue: string, executionId: string) {
+  const lock = await runtimeEnv()
+    .DB.prepare("SELECT execution_id FROM p0_account_locks WHERE account_key = ?")
+    .bind(account)
+    .first<{ execution_id: string }>();
+  if (lock?.execution_id === executionId) return;
+  if (lock) throw new Error("Для аккаунта уже выполняется другая production-запись.");
+  await acquireAccountLock(account, userKeyValue, executionId);
 }
 
 async function recordExecution(
@@ -948,8 +988,8 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
       ),
     };
   } else if (action === "confirm_creation") {
-    if (payload.confirmation !== "CREATE_SUSPENDED_CAMPAIGN") {
-      throw new Error("Нужно точное подтверждение создания реальной остановленной кампании.");
+    if (payload.confirmation !== "CREATE_NON_SERVING_CAMPAIGN") {
+      throw new Error("Нужно точное подтверждение создания реальной кампании с выключенными показами.");
     }
     if (state.campaign) throw new Error("Кампания по этой ревизии уже создана.");
     const projection = state.draft?.publish_projection as DirectProjection | undefined;
@@ -960,15 +1000,24 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
     if (!state.strategy) throw new Error("Campaign Strategy отсутствует.");
     validateWeeklyBudgetRub(state.strategy.weekly_budget_rub, limits.minimum_weekly_budget_rub);
     const campaignName = String(projection.direct.campaign.Name ?? "");
-    if (hasDuplicateCampaignName(catalog.names, campaignName)) {
-      throw new Error("В аккаунте уже существует активная кампания с таким названием.");
-    }
-    const executionId = await beginExecution(key, config.account, projection);
-    try {
-      await acquireAccountLock(config.account, key, executionId);
-    } catch (error) {
-      await recordExecution(executionId, "ACCOUNT_WRITE_LOCKED", {});
-      throw error;
+    const recovery = await findRecoverableExecution(key, config.account, projection);
+    let executionId: string;
+    let existingCampaignId = "";
+    if (recovery) {
+      executionId = recovery.executionId;
+      existingCampaignId = recovery.campaignId;
+      await claimRecoveryLock(config.account, key, executionId);
+    } else {
+      if (hasDuplicateCampaignName(catalog.names, campaignName)) {
+        throw new Error("В аккаунте уже существует активная кампания с таким названием.");
+      }
+      executionId = await beginExecution(key, config.account, projection);
+      try {
+        await acquireAccountLock(config.account, key, executionId);
+      } catch (error) {
+        await recordExecution(executionId, "ACCOUNT_WRITE_LOCKED", {});
+        throw error;
+      }
     }
     let releaseLock = true;
     try {
@@ -977,6 +1026,7 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
         projection,
         fetch,
         (status, progress) => recordExecution(executionId, status, progress),
+        existingCampaignId,
       );
       state.campaign = {
         source: "YANDEX_DIRECT_API",

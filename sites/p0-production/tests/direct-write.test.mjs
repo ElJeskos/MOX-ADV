@@ -47,7 +47,7 @@ function successfulFetcher(calls) {
     const results = {
       "campaigns.add": { AddResults: [{ Id: 101 }] },
       "campaigns.suspend": { SuspendResults: [{ Id: 101 }] },
-      "campaigns.get": { Campaigns: [{ Id: 101, State: "SUSPENDED", Status: "DRAFT" }] },
+      "campaigns.get": { Campaigns: [{ Id: 101, State: "OFF", Status: "DRAFT" }] },
       "adgroups.add": { AddResults: [{ Id: 201 }] },
       "keywords.add": { AddResults: [{ Id: 301 }] },
       "ads.add": { AddResults: [{ Id: 401 }] },
@@ -58,7 +58,7 @@ function successfulFetcher(calls) {
   };
 }
 
-test("creates a real-shape Direct graph and ends with suspended readback", async () => {
+test("creates a real-shape Direct graph and ends with non-serving readback", async () => {
   const calls = [];
   const progress = [];
   const result = await createSuspendedCampaign(
@@ -69,25 +69,39 @@ test("creates a real-shape Direct graph and ends with suspended readback", async
   );
 
   assert.equal(result.campaign_id, "101");
-  assert.equal(result.campaign_state, "SUSPENDED");
+  assert.equal(result.campaign_state, "OFF");
   assert.equal(result.spend_started, false);
   assert.equal(result.status, "MODERATION_PENDING");
   assert.deepEqual(progress, [
     "CAMPAIGN_CREATED",
-    "SUSPENDED_CONFIRMED",
+    "NON_SERVING_CONFIRMED",
     "OBJECT_GRAPH_CREATED",
     "MODERATION_PENDING",
   ]);
   assert.equal(calls.some((call) => call.method === "resume"), false);
+  assert.equal(calls.some((call) => call.method === "suspend"), false);
   assert.equal(
     calls[0].params.Campaigns[0].UnifiedCampaign.BiddingStrategy.Network.BiddingStrategyType,
     "SERVING_OFF",
   );
 });
 
-test("contains a partial campaign when initial suspension confirmation fails", async () => {
+test("continues an owned draft without creating a duplicate campaign", async () => {
   const calls = [];
-  let suspendCalls = 0;
+  const result = await createSuspendedCampaign(
+    { token: "secret", account: "moxstudio" },
+    projection(),
+    successfulFetcher(calls),
+    () => undefined,
+    "101",
+  );
+  assert.equal(result.campaign_id, "101");
+  assert.equal(result.recovered_existing, true);
+  assert.equal(calls.some((call) => call.service === "campaigns" && call.method === "add"), false);
+});
+
+test("confirms non-serving containment after a downstream failure", async () => {
+  const calls = [];
   const fetcher = async (url, init) => {
     const body = JSON.parse(String(init.body));
     const service = new URL(url).pathname.split("/").at(-1);
@@ -95,14 +109,11 @@ test("contains a partial campaign when initial suspension confirmation fails", a
     if (service === "campaigns" && body.method === "add") {
       return jsonResponse({ AddResults: [{ Id: 101 }] });
     }
-    if (service === "campaigns" && body.method === "suspend") {
-      suspendCalls += 1;
-      return suspendCalls === 1
-        ? jsonResponse({ SuspendResults: [{ Id: 101, Errors: [{ Code: 1 }] }] })
-        : jsonResponse({ SuspendResults: [{ Id: 101 }] });
-    }
     if (service === "campaigns" && body.method === "get") {
-      return jsonResponse({ Campaigns: [{ Id: 101, State: "SUSPENDED" }] });
+      return jsonResponse({ Campaigns: [{ Id: 101, State: "OFF", Status: "DRAFT" }] });
+    }
+    if (service === "adgroups" && body.method === "add") {
+      return jsonResponse({ AddResults: [{ Errors: [{ Code: 5002, Message: "Группа отклонена" }] }] });
     }
     throw new Error(`Unexpected call ${service}.${body.method}`);
   };
@@ -112,7 +123,7 @@ test("contains a partial campaign when initial suspension confirmation fails", a
     (error) => {
       assert.ok(error instanceof DirectWriteError);
       assert.equal(error.partial.campaign_id, "101");
-      assert.equal(error.partial.containment, "SUSPENDED_CONFIRMED");
+      assert.equal(error.partial.containment, "NON_SERVING_CONFIRMED");
       return true;
     },
   );
