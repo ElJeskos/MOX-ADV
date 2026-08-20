@@ -3,6 +3,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- API payloads are validated server-side and intentionally revisioned. */
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { buildAdText, buildAdTitle } from "../lib/ad-copy";
 
 type Payload = {
   revision: number;
@@ -231,8 +232,8 @@ function ModelStep({ payload, apply, back }: { payload: Payload; apply: (action:
   </>;
 }
 
-function Field({ label, name, value, wide, children }: { label: string; name: string; value: string; wide?: boolean; children?: React.ReactNode }) {
-  return <label className={wide ? "wide" : ""}><span>{label}</span><textarea name={name} required defaultValue={value} />{children}</label>;
+function Field({ label, name, value, wide, maxLength, children }: { label: string; name: string; value: string; wide?: boolean; maxLength?: number; children?: React.ReactNode }) {
+  return <label className={wide ? "wide" : ""}><span>{label}</span><textarea name={name} required maxLength={maxLength} defaultValue={value} />{children}</label>;
 }
 
 function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>) => Promise<void>; back: () => void }) {
@@ -267,6 +268,8 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   const strategy = payload.state.strategy || {};
   const existing = payload.state.draft || {};
   const participation = /участ|participant/i.test(model.qualified_result || "");
+  const adTitle = buildAdTitle(existing.ad_title || model.product);
+  const adText = buildAdText(existing.ad_text || strategy.message, model.product, participation);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -281,8 +284,8 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
       <label><span>Название группы</span><input name="group_name" required defaultValue={existing.group_name || `${strategy.geography} · Поиск`} /></label>
       <label className="wide"><span>Ключевая фраза · подготовлена агентом</span><input name="keyword" required defaultValue={existing.keyword || `${model.product}${participation ? " стать участником" : ""}`.toLowerCase()} /></label>
       <label className="wide"><span>Минус-фразы · выведены из исключений</span><input name="negative_keywords" required defaultValue={existing.negative_keywords || "бесплатно, вакансии, посетитель, билет"} /></label>
-      <label className="wide"><span>Заголовок объявления</span><input name="ad_title" maxLength={56} required defaultValue={existing.ad_title || String(model.product).slice(0, 56)} /></label>
-      <Field wide label="Текст объявления" name="ad_text" value={existing.ad_text || String(strategy.message).slice(0, 81)} />
+      <label className="wide"><span>Заголовок объявления · до 56 символов</span><input name="ad_title" maxLength={56} required defaultValue={adTitle} /></label>
+      <Field wide label="Текст объявления · до 81 символа, без обрыва слов" name="ad_text" maxLength={81} value={adText} />
       <div className="wide"><Actions revision={payload.revision} label="Зафиксировать проекцию" back={back} submit /></div>
     </form>
   </>;

@@ -121,6 +121,13 @@ function cleanText(value: string, maximum = 1_000) {
     .slice(0, maximum);
 }
 
+function requiredInput(value: unknown, label: string, maximum: number) {
+  const text = cleanText(String(value ?? ""), 10_000);
+  if (!text) throw new Error(`${label} не заполнено.`);
+  if (text.length > maximum) throw new Error(`${label}: максимум ${maximum} символов.`);
+  return text;
+}
+
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Неизвестная ошибка";
 }
@@ -652,8 +659,16 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
   } else if (action === "save_draft") {
     const value = payload.value as Record<string, unknown>;
     if (!state.strategy || !state.business_model) throw new Error("Сначала подтвердите модель и Strategy.");
+    const normalized = {
+      campaign_name: requiredInput(value?.campaign_name, "Название кампании", 255),
+      group_name: requiredInput(value?.group_name, "Название группы", 255),
+      keyword: requiredInput(value?.keyword, "Ключевая фраза", 4_096),
+      negative_keywords: requiredInput(value?.negative_keywords, "Минус-фразы", 1_000),
+      ad_title: requiredInput(value?.ad_title, "Заголовок объявления", 56),
+      ad_text: requiredInput(value?.ad_text, "Текст объявления", 81),
+    };
     state.draft = {
-      ...value,
+      ...normalized,
       source: "OWNER_REVIEWED_PUBLISH_PROJECTION",
       publish_projection: {
         schema_version: "p0-sites-projection-v1",
