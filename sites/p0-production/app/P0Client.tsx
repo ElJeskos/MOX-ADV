@@ -4,6 +4,7 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { buildAdText, buildAdTitle } from "../lib/ad-copy";
+import { buildCampaignNames } from "../lib/campaign-draft";
 
 type Payload = {
   revision: number;
@@ -223,7 +224,7 @@ function ModelStep({ payload, apply, back }: { payload: Payload; apply: (action:
     {model.assumptions?.length > 0 && <div className="assumption"><strong>Где нужна проверка</strong><span>{model.assumptions.join(" · ")}</span></div>}
     <form className="form two" onSubmit={submit}>
       <Field wide label="Продукт или предложение" name="product" value={model.product}><Evidence model={model} field="product" /></Field>
-      <Field label="Кто принимает решение" name="audience" value={model.audience}><Evidence model={model} field="audience" /></Field>
+      <Field label="Кто принимает решение · роли выделены агентом" name="audience" value={model.audience}><Evidence model={model} field="audience" /></Field>
       <Field label="Ценность для покупателя" name="value" value={model.value}><Evidence model={model} field="value" /></Field>
       <Field label="Квалифицированный результат" name="qualified_result" value={model.qualified_result}><Evidence model={model} field="qualified_result" /></Field>
       <Field label="Что не является результатом" name="exclusions" value={model.exclusions}><Evidence model={model} field="exclusions" /></Field>
@@ -268,6 +269,7 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   const strategy = payload.state.strategy || {};
   const existing = payload.state.draft || {};
   const participation = /участ|participant/i.test(model.qualified_result || "");
+  const names = buildCampaignNames(model.product, strategy.geography, model.qualified_result);
   const adTitle = buildAdTitle(existing.ad_title || model.product);
   const adText = buildAdText(existing.ad_text || strategy.message, model.product, participation);
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -278,10 +280,10 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   }
   return <>
     <ArtifactHead eyebrow="Шаг 4 · Campaign Draft" title="Точная publish projection" copy="Агент подготовил все поддерживаемые поля. Ничего не будет молча отброшено." />
-    <div className="context-strip"><Metric label="Цель" value={strategy.goal} copy={model.qualified_result} /><Metric label="Бюджет" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy="Search only · сети выключены" /><Metric label="Безопасный финиш" value="State = SUSPENDED" copy="resume отсутствует" /></div>
+    <div className="context-strip"><Metric label="Цель" value={strategy.goal} copy={model.qualified_result} /><Metric label="Бюджет" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy="Канал: поиск Яндекс Директа · сети выключены" /><Metric label="Безопасный финиш" value="State = SUSPENDED" copy="resume отсутствует" /></div>
     <form className="form two" onSubmit={submit}>
-      <label><span>Название кампании</span><input name="campaign_name" required defaultValue={existing.campaign_name || `${model.product} · Поиск`} /></label>
-      <label><span>Название группы</span><input name="group_name" required defaultValue={existing.group_name || `${strategy.geography} · Поиск`} /></label>
+      <label><span>Название кампании · предложение и география</span><input name="campaign_name" required defaultValue={existing.campaign_name || names.campaignName} /></label>
+      <label><span>Название группы · намерение аудитории</span><input name="group_name" required defaultValue={existing.group_name || names.groupName} /></label>
       <label className="wide"><span>Ключевая фраза · подготовлена агентом</span><input name="keyword" required defaultValue={existing.keyword || `${model.product}${participation ? " стать участником" : ""}`.toLowerCase()} /></label>
       <label className="wide"><span>Минус-фразы · выведены из исключений</span><input name="negative_keywords" required defaultValue={existing.negative_keywords || "бесплатно, вакансии, посетитель, билет"} /></label>
       <label className="wide"><span>Заголовок объявления · до 56 символов</span><input name="ad_title" maxLength={56} required defaultValue={adTitle} /></label>

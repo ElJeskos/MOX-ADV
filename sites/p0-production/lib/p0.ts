@@ -1,4 +1,6 @@
 import { env } from "cloudflare:workers";
+import { inferDecisionMakers, isUnprocessedAudience } from "./business-model";
+import { buildCampaignNames, isLegacySearchName } from "./campaign-draft";
 
 const MAX_SITE_BYTES = 5_000_000;
 const MAX_SITE_PAGES = 6;
@@ -89,6 +91,41 @@ type Context = {
   campaign_catalog: Record<string, unknown> | null;
 };
 
+function migrateDocument(state: P0Document) {
+  let changed = false;
+  const model = state.business_model;
+  const evidence = model?.field_evidence?.audience;
+  if (model && evidence) {
+    const inferred = inferDecisionMakers(evidence.quote);
+    const needsCorrection = isUnprocessedAudience(model.audience, evidence.quote)
+      || (model.research.agent === "GPT_SITES_EVIDENCE_RESEARCH_V2" && inferred !== model.audience);
+    if (inferred && needsCorrection) {
+      model.audience = inferred;
+      evidence.confidence = "MEDIUM";
+      delete evidence.owner_confirmed;
+      model.research.agent = "GPT_SITES_EVIDENCE_RESEARCH_V2";
+      const correction = "audience: агент выделил роли из evidence; проверьте соответствие реальному решению о покупке";
+      if (!model.assumptions.includes(correction)) model.assumptions.push(correction);
+      changed = true;
+    }
+  }
+
+  const draft = state.draft;
+  const strategy = state.strategy;
+  if (draft && strategy && model) {
+    const names = buildCampaignNames(model.product, strategy.geography, model.qualified_result);
+    if (isLegacySearchName(draft.campaign_name)) {
+      draft.campaign_name = names.campaignName;
+      changed = true;
+    }
+    if (isLegacySearchName(draft.group_name)) {
+      draft.group_name = names.groupName;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function runtimeEnv() {
   return env as unknown as Record<string, string | undefined> & {
     DB: typeof env.DB;
@@ -165,10 +202,13 @@ async function ensureState(key: string) {
 
 async function loadState(key: string) {
   const row = await ensureState(key);
+  const revision = Number(row.revision);
+  const state = JSON.parse(String(row.value_json)) as P0Document;
+  if (migrateDocument(state)) return saveState(key, revision, state);
   return {
-    revision: Number(row.revision),
+    revision,
     updated_at: String(row.updated_at),
-    state: JSON.parse(String(row.value_json)) as P0Document,
+    state,
   };
 }
 
@@ -533,7 +573,7 @@ function inferModel(site: SiteAnalysis, context: Context): BusinessModel {
     "register",
   ]);
   const visitorEvidence = bestEvidence(rows, ["посетител", "visitor", "билет", "free ticket"]);
-  const audience = cleanText(audienceEvidence?.text ?? "", 1_000);
+  const audience = inferDecisionMakers(audienceEvidence?.text ?? "");
   const value = cleanText(valueEvidence?.text ?? site.description, 1_000);
   const qualified = resultEvidence
     ? /участ|participant/i.test(resultEvidence.text)
@@ -580,7 +620,7 @@ function inferModel(site: SiteAnalysis, context: Context): BusinessModel {
       .filter(([, fact]) => !fact.value)
       .map(([name]) => questions[name]),
     research: {
-      agent: "GPT_SITES_EVIDENCE_RESEARCH_V1",
+      agent: "GPT_SITES_EVIDENCE_RESEARCH_V2",
       pages_analyzed: site.pages.length,
       sources,
       completed_fields: Object.entries(facts).filter(([, fact]) => fact.value).map(([name]) => name),
