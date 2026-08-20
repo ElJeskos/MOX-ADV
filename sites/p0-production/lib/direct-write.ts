@@ -1,3 +1,7 @@
+import JSONbigFactory from "json-bigint";
+
+const JSONbig = JSONbigFactory({ useNativeBigInt: true });
+
 export type DirectProjection = {
   schema_version: string;
   business: Record<string, unknown>;
@@ -13,6 +17,12 @@ export type DirectProjection = {
 type DirectConfig = {
   token: string;
   account: string;
+};
+
+type DirectRecovery = {
+  campaignId: string;
+  adGroupId?: string;
+  keywordId?: string;
 };
 
 type DirectResult = Record<string, unknown>;
@@ -63,12 +73,12 @@ async function callDirect(
       "Accept-Language": "ru",
       "Content-Type": "application/json; charset=utf-8",
     },
-    body: JSON.stringify({ method, params }),
+    body: JSONbig.stringify({ method, params }),
   });
   if (!response.ok) {
     throw new DirectWriteError("P0_DIRECT_HTTP_FAILED", `Яндекс Директ вернул HTTP ${response.status}.`);
   }
-  const payload = (await response.json()) as { error?: Record<string, unknown>; result?: unknown };
+  const payload = JSONbig.parse(await response.text()) as { error?: Record<string, unknown>; result?: unknown };
   if (payload.error) {
     const apiError: DirectApiIssue = {
       code: Number.isFinite(Number(payload.error.error_code)) ? Number(payload.error.error_code) : String(payload.error.error_code ?? ""),
@@ -85,6 +95,13 @@ async function callDirect(
     throw new DirectWriteError("P0_DIRECT_RESPONSE_INVALID", "Ответ Яндекс Директа не соответствует P0-контракту.");
   }
   return payload.result as DirectResult;
+}
+
+function directId(value: string) {
+  if (!/^\d+$/u.test(value)) {
+    throw new DirectWriteError("P0_DIRECT_ID_INVALID", "Direct API вернул некорректный идентификатор.");
+  }
+  return BigInt(value);
 }
 
 function addedId(result: DirectResult, key: string, operation: string) {
@@ -118,7 +135,7 @@ async function campaignReadback(config: DirectConfig, campaignId: string, fetche
     "Campaigns",
     "get",
     {
-      SelectionCriteria: { Ids: [Number(campaignId)] },
+      SelectionCriteria: { Ids: [directId(campaignId)] },
       FieldNames: ["Id", "Name", "Type", "Status", "State"],
       UnifiedCampaignFieldNames: ["BiddingStrategy"],
     },
@@ -137,7 +154,7 @@ async function adReadback(config: DirectConfig, adId: string, fetcher: Fetcher) 
     "Ads",
     "get",
     {
-      SelectionCriteria: { Ids: [Number(adId)] },
+      SelectionCriteria: { Ids: [directId(adId)] },
       FieldNames: ["Id", "CampaignId", "AdGroupId", "Type", "Status", "State", "StatusClarification"],
       TextAdFieldNames: ["Title", "Text", "Href", "Mobile"],
     },
@@ -150,20 +167,73 @@ async function adReadback(config: DirectConfig, adId: string, fetcher: Fetcher) 
   return rows[0] as Record<string, unknown>;
 }
 
-async function ensureNonServing(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
-  let campaign = await campaignReadback(config, campaignId, fetcher);
-  if (campaign.State === "OFF" || campaign.State === "SUSPENDED") return campaign;
+async function adReadbackByGroup(config: DirectConfig, adGroupId: string, fetcher: Fetcher) {
+  const result = await callDirect(
+    config,
+    "Ads",
+    "get",
+    {
+      SelectionCriteria: { AdGroupIds: [directId(adGroupId)] },
+      FieldNames: ["Id", "CampaignId", "AdGroupId", "Type", "Status", "State", "StatusClarification"],
+      TextAdFieldNames: ["Title", "Text", "Href", "Mobile"],
+    },
+    fetcher,
+  );
+  const rows = result.Ads;
+  if (!Array.isArray(rows) || rows.length !== 1 || !rows[0]?.Id) {
+    throw new DirectWriteError("P0_DIRECT_READBACK_FAILED", "Ads.get не нашёл единственное объявление созданной группы.");
+  }
+  return rows[0] as Record<string, unknown>;
+}
+
+async function suspendAndReadback(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
   const suspended = await callDirect(
     config,
     "Campaigns",
     "suspend",
-    { SelectionCriteria: { Ids: [Number(campaignId)] } },
+    { SelectionCriteria: { Ids: [directId(campaignId)] } },
     fetcher,
   );
   actionAccepted(suspended, "SuspendResults", "Campaigns.suspend");
-  campaign = await campaignReadback(config, campaignId, fetcher);
+  return campaignReadback(config, campaignId, fetcher);
+}
+
+async function ensureNonServing(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
+  let campaign = await campaignReadback(config, campaignId, fetcher);
+  if (campaign.State === "OFF" || campaign.State === "SUSPENDED") return campaign;
+  campaign = await suspendAndReadback(config, campaignId, fetcher);
   if (campaign.State !== "OFF" && campaign.State !== "SUSPENDED") {
     throw new DirectWriteError("P0_NON_SERVING_NOT_CONFIRMED", "Директ не подтвердил выключенные показы кампании.");
+  }
+  return campaign;
+}
+
+async function ensureOwnerSuspendedAfterModeration(
+  config: DirectConfig,
+  campaignId: string,
+  fetcher: Fetcher,
+) {
+  let campaign = await campaignReadback(config, campaignId, fetcher);
+  for (let attempt = 0; campaign.Status === "DRAFT" && attempt < 8; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    campaign = await campaignReadback(config, campaignId, fetcher);
+  }
+  if (campaign.Status === "DRAFT") {
+    throw new DirectWriteError(
+      "P0_FINAL_SUSPEND_PENDING",
+      "Direct ещё не перевёл кампанию из черновика после отправки на модерацию.",
+      { requires_reconciliation: true },
+    );
+  }
+  if (campaign.State !== "SUSPENDED") {
+    campaign = await suspendAndReadback(config, campaignId, fetcher);
+  }
+  if (campaign.State !== "SUSPENDED") {
+    throw new DirectWriteError(
+      "P0_FINAL_SUSPEND_NOT_CONFIRMED",
+      "Директ не подтвердил пользовательскую остановку кампании после модерации.",
+      { requires_reconciliation: true },
+    );
   }
   return campaign;
 }
@@ -173,7 +243,7 @@ export async function createSuspendedCampaign(
   projection: DirectProjection,
   fetcher: Fetcher = fetch,
   onProgress: (status: string, result: Record<string, unknown>) => void | Promise<void> = () => undefined,
-  existingCampaignId = "",
+  recovery: DirectRecovery | null = null,
 ) {
   if (!config.token || !config.account) {
     throw new DirectWriteError("P0_WRITE_CREDENTIAL_MISSING", "Direct production credentials не настроены.");
@@ -187,7 +257,7 @@ export async function createSuspendedCampaign(
   }
 
   const result: Record<string, unknown> = { steps: [] as string[] };
-  let campaignId = existingCampaignId;
+  let campaignId = recovery?.campaignId ?? "";
   try {
     if (campaignId) {
       result.campaign_id = campaignId;
@@ -210,38 +280,51 @@ export async function createSuspendedCampaign(
     (result.steps as string[]).push("NON_SERVING_CONFIRMED");
     await onProgress("NON_SERVING_CONFIRMED", result);
 
-    const adGroup = { ...projection.direct.ad_group, CampaignId: Number(campaignId) };
-    const adGroupId = addedId(
-      await callDirect(config, "AdGroups", "add", { AdGroups: [adGroup] }, fetcher),
-      "AddResults",
-      "AdGroups.add",
-    );
-    const keyword = { ...projection.direct.keyword, AdGroupId: Number(adGroupId) };
-    const keywordId = addedId(
-      await callDirect(config, "Keywords", "add", { Keywords: [keyword] }, fetcher),
-      "AddResults",
-      "Keywords.add",
-    );
-    const ad = { ...projection.direct.ad, AdGroupId: Number(adGroupId) };
-    const adId = addedId(
-      await callDirect(config, "Ads", "add", { Ads: [ad] }, fetcher),
-      "AddResults",
-      "Ads.add",
-    );
-    Object.assign(result, { ad_group_id: adGroupId, keyword_id: keywordId, ad_id: adId });
-    (result.steps as string[]).push("OBJECT_GRAPH_CREATED");
-    await onProgress("OBJECT_GRAPH_CREATED", result);
+    let adGroupId: string;
+    let keywordId: string;
+    let adId: string;
+    if (recovery?.adGroupId && recovery.keywordId) {
+      const recoveredAd = await adReadbackByGroup(config, recovery.adGroupId, fetcher);
+      adGroupId = recovery.adGroupId;
+      keywordId = recovery.keywordId;
+      adId = String(recoveredAd.Id);
+      Object.assign(result, { ad_group_id: adGroupId, keyword_id: keywordId, ad_id: adId });
+      (result.steps as string[]).push("OBJECT_GRAPH_RECOVERED");
+      await onProgress("OBJECT_GRAPH_RECOVERED", result);
+    } else {
+      const adGroup = { ...projection.direct.ad_group, CampaignId: directId(campaignId) };
+      adGroupId = addedId(
+        await callDirect(config, "AdGroups", "add", { AdGroups: [adGroup] }, fetcher),
+        "AddResults",
+        "AdGroups.add",
+      );
+      const keyword = { ...projection.direct.keyword, AdGroupId: directId(adGroupId) };
+      keywordId = addedId(
+        await callDirect(config, "Keywords", "add", { Keywords: [keyword] }, fetcher),
+        "AddResults",
+        "Keywords.add",
+      );
+      const ad = { ...projection.direct.ad, AdGroupId: directId(adGroupId) };
+      adId = addedId(
+        await callDirect(config, "Ads", "add", { Ads: [ad] }, fetcher),
+        "AddResults",
+        "Ads.add",
+      );
+      Object.assign(result, { ad_group_id: adGroupId, keyword_id: keywordId, ad_id: adId });
+      (result.steps as string[]).push("OBJECT_GRAPH_CREATED");
+      await onProgress("OBJECT_GRAPH_CREATED", result);
+    }
 
     const moderated = await callDirect(
       config,
       "Ads",
       "moderate",
-      { SelectionCriteria: { Ids: [Number(adId)] } },
+      { SelectionCriteria: { Ids: [directId(adId)] } },
       fetcher,
     );
     actionAccepted(moderated, "ModerateResults", "Ads.moderate");
     const adState = await adReadback(config, adId, fetcher);
-    const finalCampaign = await ensureNonServing(config, campaignId, fetcher);
+    const finalCampaign = await ensureOwnerSuspendedAfterModeration(config, campaignId, fetcher);
     const moderation = String(adState.Status ?? "UNKNOWN");
     const status = moderation === "ACCEPTED"
       ? "READY_TO_LAUNCH"
@@ -260,11 +343,15 @@ export async function createSuspendedCampaign(
     return completed;
   } catch (error) {
     if (campaignId) {
-      try {
-        await ensureNonServing(config, campaignId, fetcher);
-        result.containment = "NON_SERVING_CONFIRMED";
-      } catch {
+      if (error instanceof DirectWriteError && error.partial.requires_reconciliation === true) {
         result.containment = "MANUAL_RECONCILIATION_REQUIRED";
+      } else {
+        try {
+          await ensureNonServing(config, campaignId, fetcher);
+          result.containment = "NON_SERVING_CONFIRMED";
+        } catch {
+          result.containment = "MANUAL_RECONCILIATION_REQUIRED";
+        }
       }
       await onProgress(String(result.containment), result);
     } else if (result.add_attempted && !(error instanceof DirectWriteError && error.partial.rejected === true)) {

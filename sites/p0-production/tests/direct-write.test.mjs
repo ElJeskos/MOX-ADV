@@ -38,27 +38,41 @@ function projection() {
   );
 }
 
-function successfulFetcher(calls) {
+function successfulFetcher(calls, adId = "401") {
+  let campaignGetCalls = 0;
   return async (url, init) => {
-    const body = JSON.parse(String(init.body));
+    const rawBody = String(init.body);
+    const body = JSON.parse(rawBody);
     const service = new URL(url).pathname.split("/").at(-1);
-    calls.push({ service, method: body.method, params: body.params });
+    calls.push({ service, method: body.method, params: body.params, rawBody });
     const key = `${service}.${body.method}`;
     const results = {
       "campaigns.add": { AddResults: [{ Id: 101 }] },
       "campaigns.suspend": { SuspendResults: [{ Id: 101 }] },
-      "campaigns.get": { Campaigns: [{ Id: 101, State: "OFF", Status: "DRAFT" }] },
       "adgroups.add": { AddResults: [{ Id: 201 }] },
       "keywords.add": { AddResults: [{ Id: 301 }] },
-      "ads.add": { AddResults: [{ Id: 401 }] },
-      "ads.moderate": { ModerateResults: [{ Id: 401 }] },
-      "ads.get": { Ads: [{ Id: 401, Status: "DRAFT", State: "OFF" }] },
+      "ads.moderate": { ModerateResults: [{ Id: adId }] },
     };
+    if (key === "campaigns.get") {
+      campaignGetCalls += 1;
+      const campaign = campaignGetCalls === 1
+        ? { Id: 101, State: "OFF", Status: "DRAFT" }
+        : campaignGetCalls === 2
+          ? { Id: 101, State: "OFF", Status: "MODERATION" }
+          : { Id: 101, State: "SUSPENDED", Status: "MODERATION" };
+      return jsonResponse({ Campaigns: [campaign] });
+    }
+    if (key === "ads.add") {
+      return new Response(`{"result":{"AddResults":[{"Id":${adId}}]}}`, { headers: { "Content-Type": "application/json" } });
+    }
+    if (key === "ads.get") {
+      return new Response(`{"result":{"Ads":[{"Id":${adId},"Status":"DRAFT","State":"OFF"}]}}`, { headers: { "Content-Type": "application/json" } });
+    }
     return jsonResponse(results[key]);
   };
 }
 
-test("creates a real-shape Direct graph and ends with non-serving readback", async () => {
+test("creates a real-shape Direct graph and ends owner-suspended after moderation", async () => {
   const calls = [];
   const progress = [];
   const result = await createSuspendedCampaign(
@@ -69,7 +83,7 @@ test("creates a real-shape Direct graph and ends with non-serving readback", asy
   );
 
   assert.equal(result.campaign_id, "101");
-  assert.equal(result.campaign_state, "OFF");
+  assert.equal(result.campaign_state, "SUSPENDED");
   assert.equal(result.spend_started, false);
   assert.equal(result.status, "MODERATION_PENDING");
   assert.deepEqual(progress, [
@@ -79,11 +93,24 @@ test("creates a real-shape Direct graph and ends with non-serving readback", asy
     "MODERATION_PENDING",
   ]);
   assert.equal(calls.some((call) => call.method === "resume"), false);
-  assert.equal(calls.some((call) => call.method === "suspend"), false);
+  assert.equal(calls.filter((call) => call.method === "suspend").length, 1);
   assert.equal(
     calls[0].params.Campaigns[0].UnifiedCampaign.BiddingStrategy.Network.BiddingStrategyType,
     "SERVING_OFF",
   );
+});
+
+test("preserves a Direct ad ID larger than JavaScript safe integer", async () => {
+  const calls = [];
+  const exactAdId = "1919036093096389375";
+  const result = await createSuspendedCampaign(
+    { token: "secret", account: "moxstudio" },
+    projection(),
+    successfulFetcher(calls, exactAdId),
+  );
+  assert.equal(result.ad_id, exactAdId);
+  const moderate = calls.find((call) => call.service === "ads" && call.method === "moderate");
+  assert.match(moderate.rawBody, new RegExp(exactAdId));
 });
 
 test("continues an owned draft without creating a duplicate campaign", async () => {
@@ -93,11 +120,27 @@ test("continues an owned draft without creating a duplicate campaign", async () 
     projection(),
     successfulFetcher(calls),
     () => undefined,
-    "101",
+    { campaignId: "101" },
   );
   assert.equal(result.campaign_id, "101");
   assert.equal(result.recovered_existing, true);
   assert.equal(calls.some((call) => call.service === "campaigns" && call.method === "add"), false);
+});
+
+test("continues an owned object graph without duplicating children", async () => {
+  const calls = [];
+  const result = await createSuspendedCampaign(
+    { token: "secret", account: "moxstudio" },
+    projection(),
+    successfulFetcher(calls, "1919036093096389375"),
+    () => undefined,
+    { campaignId: "101", adGroupId: "201", keywordId: "301" },
+  );
+  assert.equal(result.campaign_id, "101");
+  assert.equal(result.ad_group_id, "201");
+  assert.equal(result.keyword_id, "301");
+  assert.equal(result.ad_id, "1919036093096389375");
+  assert.equal(calls.some((call) => call.method === "add"), false);
 });
 
 test("confirms non-serving containment after a downstream failure", async () => {

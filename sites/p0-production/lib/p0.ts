@@ -351,12 +351,24 @@ async function findRecoverableExecution(
   const storedProjection = JSON.parse(row.projection_json) as DirectProjection;
   const storedResult = JSON.parse(row.result_json) as Record<string, unknown>;
   const steps = Array.isArray(storedResult.steps) ? storedResult.steps : [];
-  if (
-    storedProjection.direct.campaign.Name !== projection.direct.campaign.Name
-    || steps.length !== 1
-    || steps[0] !== "CAMPAIGN_CREATED"
-  ) return null;
-  return { executionId: row.execution_id, campaignId: String(row.campaign_id) };
+  if (storedProjection.direct.campaign.Name !== projection.direct.campaign.Name) return null;
+  const campaignOnly = steps.length === 1 && steps[0] === "CAMPAIGN_CREATED";
+  const graphCreated = steps.includes("OBJECT_GRAPH_CREATED")
+    && storedResult.ad_group_id
+    && storedResult.keyword_id;
+  if (!campaignOnly && !graphCreated) return null;
+  return {
+    executionId: row.execution_id,
+    recovery: {
+      campaignId: String(row.campaign_id),
+      ...(graphCreated
+        ? {
+            adGroupId: String(storedResult.ad_group_id),
+            keywordId: String(storedResult.keyword_id),
+          }
+        : {}),
+    },
+  };
 }
 
 async function claimRecoveryLock(account: string, userKeyValue: string, executionId: string) {
@@ -981,10 +993,10 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
     const campaignName = String(projection.direct.campaign.Name ?? "");
     const recovery = await findRecoverableExecution(key, config.account, projection);
     let executionId: string;
-    let existingCampaignId = "";
+    let directRecovery: { campaignId: string; adGroupId?: string; keywordId?: string } | null = null;
     if (recovery) {
       executionId = recovery.executionId;
-      existingCampaignId = recovery.campaignId;
+      directRecovery = recovery.recovery;
       await claimRecoveryLock(config.account, key, executionId);
     } else {
       if (hasDuplicateCampaignName(catalog.names, campaignName)) {
@@ -1005,7 +1017,7 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
         projection,
         fetch,
         (status, progress) => recordExecution(executionId, status, progress),
-        existingCampaignId,
+        directRecovery,
       );
       state.campaign = {
         source: "YANDEX_DIRECT_API",
