@@ -12,6 +12,7 @@ import {
   hasDuplicateCampaignName,
   isLegacySearchName,
 } from "./campaign-draft";
+import { minimumWeeklyBudgetRub, validateWeeklyBudgetRub } from "./direct-limits";
 import {
   createSuspendedCampaign,
   DirectWriteError,
@@ -368,6 +369,33 @@ async function holdAccountLock(account: string, executionId: string) {
     .run();
 }
 
+async function readCurrencyLimits() {
+  const runtime = runtimeEnv();
+  const token = runtime.YANDEX_DIRECT_OAUTH_TOKEN;
+  const account = runtime.YANDEX_DIRECT_CLIENT_LOGIN;
+  if (!token || !account) throw new Error("Direct read credentials не настроены в Sites.");
+  const response = await fetch("https://api.direct.yandex.com/json/v501/dictionaries", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Client-Login": account,
+      Accept: "application/json",
+      "Accept-Language": "ru",
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify({ method: "get", params: { DictionaryNames: ["Currencies"] } }),
+  });
+  if (!response.ok) throw new Error(`Яндекс Директ вернул HTTP ${response.status} для Currencies.`);
+  const payload = (await response.json()) as {
+    error?: unknown;
+    result?: { Currencies?: Array<{ Currency?: unknown; Properties?: Array<{ Name?: unknown; Value?: unknown }> }> };
+  };
+  if (payload.error || !Array.isArray(payload.result?.Currencies)) {
+    throw new Error("Ответ Direct Currencies не соответствует контракту.");
+  }
+  return { minimum_weekly_budget_rub: minimumWeeklyBudgetRub(payload.result.Currencies) };
+}
+
 async function readCampaignCatalog() {
   const runtime = runtimeEnv();
   const token = runtime.YANDEX_DIRECT_OAUTH_TOKEN;
@@ -460,19 +488,28 @@ async function readMetrika() {
 }
 
 async function readContext(): Promise<Context> {
-  const [directResult, metrikaResult] = await Promise.allSettled([
+  const [directResult, limitsResult, metrikaResult] = await Promise.allSettled([
     readCampaignCatalog(),
+    readCurrencyLimits(),
     readMetrika(),
   ]);
   const direct =
-    directResult.status === "fulfilled"
+    directResult.status === "fulfilled" && limitsResult.status === "fulfilled"
       ? {
           ready: true,
           access: "REAL_API_READ",
           account: directResult.value.account,
           campaigns_total: directResult.value.total,
+          minimum_weekly_budget_rub: limitsResult.value.minimum_weekly_budget_rub,
         }
-      : { ready: false, access: "REAL_API_READ", blockers: [errorMessage(directResult.reason)] };
+      : {
+          ready: false,
+          access: "REAL_API_READ",
+          blockers: [
+            ...(directResult.status === "rejected" ? [errorMessage(directResult.reason)] : []),
+            ...(limitsResult.status === "rejected" ? [errorMessage(limitsResult.reason)] : []),
+          ],
+        };
   const metrika =
     metrikaResult.status === "fulfilled"
       ? {
@@ -811,6 +848,14 @@ function writeReadiness(state: P0Document, context: Context) {
   const blockers: string[] = [];
   if (!config.token || !config.account) blockers.push("Direct production credentials не настроены");
   if (context.direct.ready !== true) blockers.push("Текущий аккаунт Директа не прошёл production preflight");
+  const minimumBudget = Number(context.direct.minimum_weekly_budget_rub);
+  if (Number.isFinite(minimumBudget) && state.strategy) {
+    try {
+      validateWeeklyBudgetRub(state.strategy.weekly_budget_rub, minimumBudget);
+    } catch (error) {
+      blockers.push(errorMessage(error));
+    }
+  }
   if (!state.draft?.publish_projection) blockers.push("Campaign Draft ещё не зафиксирован");
   if (state.campaign) blockers.push("Кампания по этой ревизии уже создана");
   return { ready: blockers.length === 0, blockers };
@@ -860,6 +905,8 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
     state.business_model.source = "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION";
     state.business_model.assumptions = [];
     state.business_model.missing_questions = [];
+    state.strategy = null;
+    state.draft = null;
   } else if (action === "save_strategy") {
     const value = payload.value as Record<string, unknown>;
     const required = ["goal", "geography", "period_start", "period_end", "landing_page", "weekly_budget_rub", "target_cpa_rub", "message"];
@@ -867,7 +914,10 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
       throw new Error("Критические решения Campaign Strategy заполнены не полностью.");
     }
     const landing = validateSiteUrl(String(value.landing_page));
+    const limits = await readCurrencyLimits();
+    validateWeeklyBudgetRub(value.weekly_budget_rub, limits.minimum_weekly_budget_rub);
     state.strategy = { ...value, landing_page: landing.toString(), source: "OWNER_APPROVED_REAL_BUSINESS_INPUT" };
+    state.draft = null;
   } else if (action === "save_draft") {
     const value = payload.value as Record<string, unknown>;
     if (!state.strategy || !state.business_model) throw new Error("Сначала подтвердите модель и Strategy.");
@@ -897,7 +947,9 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
     if (!projection) throw new Error("Campaign Draft не готов к созданию.");
     const config = directWriteConfig();
     if (!config.token || !config.account) throw new Error("Direct production credentials не настроены.");
-    const catalog = await readCampaignCatalog();
+    const [catalog, limits] = await Promise.all([readCampaignCatalog(), readCurrencyLimits()]);
+    if (!state.strategy) throw new Error("Campaign Strategy отсутствует.");
+    validateWeeklyBudgetRub(state.strategy.weekly_budget_rub, limits.minimum_weekly_budget_rub);
     const campaignName = String(projection.direct.campaign.Name ?? "");
     if (hasDuplicateCampaignName(catalog.names, campaignName)) {
       throw new Error("В аккаунте уже существует активная кампания с таким названием.");

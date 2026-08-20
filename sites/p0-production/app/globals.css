@@ -113,6 +113,7 @@ body::before {
 .form .wide { grid-column: 1 / -1; }
 .form label { display: grid; gap: 7px; }
 .form label > span { color: var(--muted); font-size: 9px; font-weight: 700; }
+.form label > small { color: var(--muted); font-size: 8px; }
 .form input, .form textarea, .form select { width: 100%; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--ink); background: white; outline: none; }
 .form input, .form select { height: 44px; padding: 0 13px; }
 .form textarea { min-height: 88px; padding: 12px 13px; resize: vertical; }

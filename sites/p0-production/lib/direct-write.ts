@@ -17,6 +17,23 @@ type DirectConfig = {
 
 type DirectResult = Record<string, unknown>;
 type Fetcher = typeof fetch;
+type DirectApiIssue = { code: number | string; message: string; details: string };
+
+function directApiIssues(value: unknown): DirectApiIssue[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((issue) => {
+    const row = issue && typeof issue === "object" ? issue as Record<string, unknown> : {};
+    return {
+      code: Number.isFinite(Number(row.Code)) ? Number(row.Code) : String(row.Code ?? ""),
+      message: String(row.Message ?? "Direct API отклонил объект"),
+      details: String(row.Details ?? ""),
+    };
+  });
+}
+
+function issueMessage(issue: DirectApiIssue) {
+  return [issue.message, issue.details].filter(Boolean).join(": ");
+}
 
 export class DirectWriteError extends Error {
   readonly code: string;
@@ -51,8 +68,20 @@ async function callDirect(
   if (!response.ok) {
     throw new DirectWriteError("P0_DIRECT_HTTP_FAILED", `Яндекс Директ вернул HTTP ${response.status}.`);
   }
-  const payload = (await response.json()) as { error?: unknown; result?: unknown };
-  if (payload.error || !payload.result || typeof payload.result !== "object") {
+  const payload = (await response.json()) as { error?: Record<string, unknown>; result?: unknown };
+  if (payload.error) {
+    const apiError: DirectApiIssue = {
+      code: Number.isFinite(Number(payload.error.error_code)) ? Number(payload.error.error_code) : String(payload.error.error_code ?? ""),
+      message: String(payload.error.error_string ?? "Direct API отклонил запрос"),
+      details: String(payload.error.error_detail ?? ""),
+    };
+    throw new DirectWriteError(
+      "P0_DIRECT_API_REJECTED",
+      `${service}.${method}: ${issueMessage(apiError)}`,
+      { rejected: true, api_error: apiError },
+    );
+  }
+  if (!payload.result || typeof payload.result !== "object") {
     throw new DirectWriteError("P0_DIRECT_RESPONSE_INVALID", "Ответ Яндекс Директа не соответствует P0-контракту.");
   }
   return payload.result as DirectResult;
@@ -60,16 +89,26 @@ async function callDirect(
 
 function addedId(result: DirectResult, key: string, operation: string) {
   const rows = result[key];
-  if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.Errors || !rows[0]?.Id) {
-    throw new DirectWriteError("P0_DIRECT_ITEM_FAILED", `${operation} отклонил объект.`);
+  const issues = directApiIssues(Array.isArray(rows) ? rows[0]?.Errors : undefined);
+  if (!Array.isArray(rows) || rows.length !== 1 || issues.length || !rows[0]?.Id) {
+    throw new DirectWriteError(
+      "P0_DIRECT_ITEM_FAILED",
+      issues.length ? `${operation}: ${issues.map(issueMessage).join("; ")}` : `${operation} отклонил объект.`,
+      issues.length ? { rejected: true, api_errors: issues } : {},
+    );
   }
   return String(rows[0].Id);
 }
 
 function actionAccepted(result: DirectResult, key: string, operation: string) {
   const rows = result[key];
-  if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.Errors) {
-    throw new DirectWriteError("P0_DIRECT_ACTION_FAILED", `${operation} не подтверждён.`);
+  const issues = directApiIssues(Array.isArray(rows) ? rows[0]?.Errors : undefined);
+  if (!Array.isArray(rows) || rows.length !== 1 || issues.length) {
+    throw new DirectWriteError(
+      "P0_DIRECT_ACTION_FAILED",
+      issues.length ? `${operation}: ${issues.map(issueMessage).join("; ")}` : `${operation} не подтверждён.`,
+      { rejected: true, api_errors: issues },
+    );
   }
 }
 
@@ -221,7 +260,7 @@ export async function createSuspendedCampaign(
         result.containment = "MANUAL_RECONCILIATION_REQUIRED";
       }
       await onProgress(String(result.containment), result);
-    } else if (result.add_attempted) {
+    } else if (result.add_attempted && !(error instanceof DirectWriteError && error.partial.rejected === true)) {
       result.containment = "RECONCILIATION_REQUIRED";
       await onProgress("RECONCILIATION_REQUIRED", result);
     }

@@ -166,7 +166,7 @@ export default function P0Client() {
             {step === 1 && <ModelStep payload={payload} apply={apply} back={() => setStep(0)} />}
             {step === 2 && <StrategyStep payload={payload} apply={apply} back={() => setStep(1)} />}
             {step === 3 && <DraftStep payload={payload} apply={apply} back={() => setStep(2)} />}
-            {step === 4 && <ConfirmationStep payload={payload} apply={apply} back={() => setStep(3)} />}
+            {step === 4 && <ConfirmationStep payload={payload} apply={apply} back={() => setStep(3)} editStrategy={() => setStep(2)} />}
             {busy && <p className="notice">{busy}</p>}
             {error && <p className="notice error">{error}</p>}
           </section>
@@ -241,6 +241,7 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
   const model = payload.state.business_model || {};
   const site = payload.state.site_analysis || {};
   const existing = payload.state.strategy || {};
+  const minimumWeeklyBudget = Number(payload.context.direct?.minimum_weekly_budget_rub || 1);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -256,7 +257,7 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
       <label><span>Посадочная страница · проверена агентом</span><input type="url" name="landing_page" required defaultValue={existing.landing_page || site.url} /></label>
       <label><span>Дата начала · решение владельца</span><input type="date" name="period_start" required defaultValue={existing.period_start || ""} /></label>
       <label><span>Дата окончания · решение владельца</span><input type="date" name="period_end" required defaultValue={existing.period_end || ""} /></label>
-      <label><span>Недельный бюджет, ₽ · решение владельца</span><input type="number" min="1" name="weekly_budget_rub" required defaultValue={existing.weekly_budget_rub || ""} /></label>
+      <label><span>Недельный бюджет, ₽ · решение владельца</span><input type="number" min={minimumWeeklyBudget} name="weekly_budget_rub" required defaultValue={existing.weekly_budget_rub || ""} /><small>Минимум Direct для RUB сейчас: {minimumWeeklyBudget} ₽ в неделю.</small></label>
       <label><span>Целевой CPA, ₽ · решение владельца</span><input type="number" min="1" name="target_cpa_rub" required defaultValue={existing.target_cpa_rub || ""} /></label>
       <Field wide label="Основное сообщение · предложено агентом" name="message" value={existing.message || model.value} />
       <div className="wide"><Actions revision={payload.revision} label="Принять критические решения" back={back} submit /></div>
@@ -293,7 +294,7 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   </>;
 }
 
-function ConfirmationStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; back: () => void }) {
+function ConfirmationStep({ payload, apply, back, editStrategy }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; back: () => void; editStrategy: () => void }) {
   const [confirmed, setConfirmed] = useState(false);
   const campaign = payload.state.campaign;
   if (campaign) {
@@ -306,12 +307,13 @@ function ConfirmationStep({ payload, apply, back }: { payload: Payload; apply: (
   const ready = payload.write_readiness.ready;
   const draft = payload.state.draft || {};
   const strategy = payload.state.strategy || {};
+  const budgetBlocked = payload.write_readiness.blockers.some((item) => item.includes("Недельный бюджет"));
   return <>
     <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Создать реальную остановленную кампанию" copy="Это единственное критическое решение: после подтверждения модуль выполнит официальный Direct API-контур и проверит SUSPENDED readback." badge={ready ? "READY" : "FAIL CLOSED"} />
     <div className="context-strip"><Metric label="Кампания" value={draft.campaign_name} copy={payload.context.direct.account} /><Metric label="Экспозиция" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy={`${strategy.period_start} — ${strategy.period_end}`} /><Metric label="Посадочная" value={strategy.landing_page} copy="Search only · сети выключены" /></div>
     <div className="confirmation"><p className="eyebrow">Обещание безопасности</p><h3>Показы и списания не начнутся</h3><p>Campaigns.add → suspend → readback → группа → фраза → объявление → модерация → повторный readback. Campaigns.resume отсутствует.</p></div>
     {!ready && <ul className="blockers">{payload.write_readiness.blockers.map((item, index) => <li key={item}><span>{index + 1}</span>{item}</li>)}</ul>}
     {ready && <div className="decision-confirm"><input aria-label="Подтверждаю создание реальной кампании" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю создание реальной кампании</strong><small>Кампания появится в аккаунте {payload.context.direct.account} и останется остановленной.</small></span></div>}
-    <footer className="actions"><span>Ревизия {payload.revision} · production write</span><button type="button" className="secondary" onClick={back}>Назад</button><button type="button" disabled={!ready || !confirmed} onClick={() => void apply("confirm_creation", undefined, { confirmation: "CREATE_SUSPENDED_CAMPAIGN" })}>Создать и остановить кампанию</button></footer>
+    <footer className="actions"><span>Ревизия {payload.revision} · production write</span><button type="button" className="secondary" onClick={budgetBlocked ? editStrategy : back}>{budgetBlocked ? "Исправить Strategy" : "Назад"}</button><button type="button" disabled={!ready || !confirmed} onClick={() => void apply("confirm_creation", undefined, { confirmation: "CREATE_SUSPENDED_CAMPAIGN" })}>Создать и остановить кампанию</button></footer>
   </>;
 }

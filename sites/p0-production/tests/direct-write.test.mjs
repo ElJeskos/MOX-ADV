@@ -119,6 +119,30 @@ test("contains a partial campaign when initial suspension confirmation fails", a
   assert.equal(calls.includes("campaigns.resume"), false);
 });
 
+test("preserves a known Campaigns.add rejection without false reconciliation", async () => {
+  await assert.rejects(
+    () => createSuspendedCampaign(
+      { token: "secret", account: "moxstudio" },
+      projection(),
+      async () => jsonResponse({
+        AddResults: [{ Errors: [{ Code: 5001, Message: "Недельный бюджет ниже минимального" }] }],
+      }),
+    ),
+    (error) => {
+      assert.ok(error instanceof DirectWriteError);
+      assert.equal(error.partial.rejected, true);
+      assert.equal(error.partial.containment, undefined);
+      assert.deepEqual(error.partial.api_errors, [{
+        code: 5001,
+        message: "Недельный бюджет ниже минимального",
+        details: "",
+      }]);
+      assert.match(error.message, /Недельный бюджет ниже минимального/u);
+      return true;
+    },
+  );
+});
+
 test("marks a lost Campaigns.add response for reconciliation before any retry", async () => {
   await assert.rejects(
     () => createSuspendedCampaign(
