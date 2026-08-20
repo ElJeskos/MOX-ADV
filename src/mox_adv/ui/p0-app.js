@@ -240,6 +240,23 @@ async function loadP0() {
   p0Elements.error.hidden = true;
   try {
     state.p0Production = await requestJson("/api/p0");
+    const legacyModel = state.p0Production.state?.business_model;
+    const site = state.p0Production.state?.site_analysis;
+    if (legacyModel?.source === "REAL_SITE_ANALYSIS" && site?.url) {
+      setText(p0Elements.loading, "Агент самостоятельно обновляет прежнюю одностраничную модель…");
+      const upgraded = await requestJson("/api/p0", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "analyze_site",
+          expected_revision: state.p0Production.revision,
+          url: site.url,
+        }),
+      });
+      state.p0Production.revision = upgraded.revision;
+      state.p0Production.updated_at = upgraded.updated_at;
+      state.p0Production.state = upgraded.state;
+    }
     state.p0Step = p0StateStep();
     p0Elements.app.hidden = false;
     renderP0();
@@ -248,6 +265,7 @@ async function loadP0() {
     setText(p0Elements.error, error.message);
   } finally {
     p0Elements.loading.hidden = true;
+    setText(p0Elements.loading, "Загружаем подключённый production-контекст…");
   }
 }
 
