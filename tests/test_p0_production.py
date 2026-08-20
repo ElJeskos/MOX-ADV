@@ -380,6 +380,7 @@ class P0ProductionModuleTests(unittest.TestCase):
                     '<a href="/about">About</a>'
                     '<a href="/terms-of-participation">Participate</a>'
                     '<a href="https://external.example/services">External</a>'
+                    '<a href="https://expo.example.com/">Event site</a>'
                     '<a href="/privacy-policy">Privacy</a>'
                     "</body></html>"
                 ),
@@ -389,6 +390,12 @@ class P0ProductionModuleTests(unittest.TestCase):
                 "https://example.com/terms-of-participation": (
                     "<html><h1>Fill out the form to participate</h1><form></form></html>"
                 ),
+                "https://expo.example.com/": (
+                    '<html><h1>Event</h1><a href="/terms-of-participation">Terms</a></html>'
+                ),
+                "https://expo.example.com/terms-of-participation": (
+                    "<html><h1>Become an event participant</h1></html>"
+                ),
             }
         )
         reader = HttpsSiteReader(
@@ -397,13 +404,15 @@ class P0ProductionModuleTests(unittest.TestCase):
         )
         result = reader.read("https://example.com/")
 
-        self.assertEqual(3, result["research"]["pages_analyzed"])
+        self.assertEqual(5, result["research"]["pages_analyzed"])
         self.assertEqual(1, result["forms_detected"])
         self.assertEqual(
             {
                 "https://example.com/",
                 "https://example.com/about",
                 "https://example.com/terms-of-participation",
+                "https://expo.example.com/",
+                "https://expo.example.com/terms-of-participation",
             },
             {page["url"] for page in result["pages"]},
         )

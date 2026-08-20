@@ -415,19 +415,26 @@ class HttpsSiteReader:
         pages = [entry_page]
         failed_pages: list[str] = []
         entry_host = _site_host(str(entry_page["url"]))
-        for candidate in self._research_links(str(entry_page["url"]), links):
-            if len(pages) >= _MAX_SITE_PAGES:
-                break
+        candidates = self._research_links(str(entry_page["url"]), links)
+        attempted: set[str] = set()
+        while candidates and len(pages) < _MAX_SITE_PAGES:
+            candidate = candidates.pop(0)
+            if candidate in attempted:
+                continue
+            attempted.add(candidate)
             try:
-                page, _ = self._fetch_page(candidate)
+                page, page_links = self._fetch_page(candidate)
             except P0ProductionError:
                 failed_pages.append(candidate)
                 continue
-            if _site_host(str(page["url"])) != entry_host:
+            page_host = _site_host(str(page["url"]))
+            if not _is_first_party_host(entry_host, page_host):
                 continue
             if any(item["url"] == page["url"] for item in pages):
                 continue
             pages.append(page)
+            discovered = self._research_links(str(page["url"]), page_links)
+            candidates = [item for item in discovered if item not in attempted] + candidates
 
         combined_text = _clean_text(
             " ".join(str(page.get("text_excerpt", "")) for page in pages),
@@ -542,13 +549,16 @@ class HttpsSiteReader:
                 continue
             candidate = urljoin(base_url, href)
             parsed = urlparse(candidate)
-            if parsed.scheme != "https" or _site_host(candidate) != base_host:
+            candidate_host = _site_host(candidate)
+            if parsed.scheme != "https" or not _is_first_party_host(base_host, candidate_host):
                 continue
             normalized = parsed._replace(query="", fragment="").geturl()
             if normalized.rstrip("/") == base_url.rstrip("/"):
                 continue
             haystack = (parsed.path + " " + parsed.query).casefold()
             score = sum(3 for term in _SITE_RESEARCH_TERMS if term in haystack)
+            if candidate_host != base_host:
+                score += 6
             if score == 0:
                 continue
             if "terms" in haystack and "particip" in haystack:
@@ -1837,6 +1847,10 @@ def _validated_public_https_url(url: str, resolver: Callable[..., Any]) -> str:
 def _site_host(url: str) -> str:
     host = (urlparse(url).hostname or "").casefold().rstrip(".")
     return host.removeprefix("www.")
+
+
+def _is_first_party_host(base_host: str, candidate_host: str) -> bool:
+    return candidate_host == base_host or candidate_host.endswith("." + base_host)
 
 
 def _clean_text(value: str, maximum: int) -> str:
