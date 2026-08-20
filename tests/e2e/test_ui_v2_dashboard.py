@@ -749,8 +749,8 @@ class UiV2DashboardTests(unittest.TestCase):
                             name="Управление рекламой",
                         ).is_visible()
                     )
-                    self.assertEqual(7, page.locator(".main-nav a").count())
-                    self.assertEqual(8, page.locator(".main-nav > *").count())
+                    self.assertEqual(8, page.locator(".main-nav a").count())
+                    self.assertEqual(9, page.locator(".main-nav > *").count())
                     self.assertEqual(0, page.locator("#operating-modes").count())
 
                     expected_pages = {

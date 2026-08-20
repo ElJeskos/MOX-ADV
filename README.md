@@ -47,6 +47,8 @@ Because the read-only APIs do not establish a trusted optimization baseline or c
 The main mode does not create an approval, invoke an executor, expose a write-capable transport method, or permit write requests.
 If any trusted binding or read credential is missing, the main mode fails closed and does not fall back to fixture data.
 
+The separate production P0 candidate is available at `http://127.0.0.1:8878/strategy`. It analyzes a user-supplied public HTTPS site, combines that real business input with the connected Direct campaign catalog and Metrika performance context, and durably revises the business model, Campaign Strategy, and exact one-campaign publish projection. It contains no Test Scenario fallback. The final creation control is absent until the tracked policy binds the current Direct account and single writer, production write is explicitly authorized, and `MOX_ADV_DIRECT_PILOT_WRITE` exists in macOS Keychain. When armed, the adapter uses only official Direct v501 methods and must confirm `State=SUSPENDED`; P0 never calls `Campaigns.resume`.
+
 Copy the non-secret configuration template to the local user configuration directory and replace the campaign and goal identifiers.
 The Direct client login and the single Metrika counter ID come from `.env`.
 

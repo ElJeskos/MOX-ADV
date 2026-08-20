@@ -7,6 +7,7 @@
     <title>MOX-ADV — управление рекламой</title>
     <link rel="stylesheet" href="/assets/app.css">
     <script src="/assets/app.js" defer></script>
+    <script src="/assets/p0-app.js" defer></script>
   </head>
   <body>
     <header class="app-header">
@@ -16,6 +17,7 @@
       </a>
       <nav class="main-nav" aria-label="Основная навигация">
         <a href="/overview" data-nav data-page-link="overview">Обзор</a>
+        <a href="/strategy" data-nav data-page-link="strategy">Стратегия</a>
         <a href="/cycle" data-nav data-page-link="cycle">Запуск цикла</a>
         <a href="/autopilot" data-nav data-page-link="autopilot">Автопилот</a>
         <a href="/rules" data-nav data-page-link="rules">Правила</a>
@@ -63,6 +65,26 @@
       <div class="overview-actions">
         <a href="/autopilot" data-nav>Настроить автопилот <span>→</span></a>
         <a href="/history" data-nav>Посмотреть историю решений <span>→</span></a>
+      </div>
+    </section>
+
+    <section class="page p0-production-page" data-page="strategy" aria-labelledby="p0-title">
+      <div class="operator-console-head p0-production-head">
+        <div>
+          <p class="eyebrow">Production Module · P0</p>
+          <h2 id="p0-title">Стратегия и создание кампании</h2>
+          <p>Реальный сайт, подключённые данные Директа и Метрики и одна безопасно остановленная кампания.</p>
+        </div>
+        <div class="p0-production-badge"><span class="state-dot"></span><strong>Только реальные данные</strong></div>
+      </div>
+      <div class="p0-production-loading" id="p0-loading">Загружаем подключённый production-контекст…</div>
+      <div class="p0-production-error" id="p0-error" hidden role="alert"></div>
+      <div id="p0-app" hidden>
+        <ol class="p0-production-steps" id="p0-steps" aria-label="Путь создания кампании"></ol>
+        <div class="p0-production-desk">
+          <aside class="p0-agent-pane" id="p0-agent-pane" aria-label="Контекст AI-агента"></aside>
+          <main class="p0-artifact-pane" id="p0-artifact-pane"></main>
+        </div>
       </div>
     </section>
 

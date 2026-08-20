@@ -765,6 +765,7 @@ function setText(element, value) {
 
 const pageTitles = {
   overview: "Обзор",
+  strategy: "Стратегия",
   cycle: "Запуск цикла",
   autopilot: "Автопилот",
   rules: "Правила",
