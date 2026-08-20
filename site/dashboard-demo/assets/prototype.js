@@ -1,20 +1,24 @@
 const PAGES = new Set([
   "overview",
+  "strategy",
   "cycle",
   "autopilot",
   "rules",
   "history",
   "campaign",
+  "seo",
   "control",
 ]);
 
 const PAGE_TITLES = {
   overview: "Обзор",
+  strategy: "Стратегия",
   cycle: "Запуск цикла",
   autopilot: "Автопилот",
   rules: "Правила",
-  history: "История",
+  history: "Мониторинг",
   campaign: "Кампания",
+  seo: "SEO",
   control: "Контроль",
 };
 
@@ -25,6 +29,9 @@ const state = {
   freeze: false,
   channel: "direct",
   running: false,
+  onboardingStep: 1,
+  adPaused: false,
+  seoPaused: false,
   campaignName: "Участие со стендом — ИННОПРОМ-2027",
   history: [
     {
@@ -336,6 +343,67 @@ function showCampaignChannel(channel) {
   $("#hybrid-seo-workspace").hidden = state.channel !== "seo";
 }
 
+function showOnboarding(step = 1) {
+  state.onboardingStep = Math.max(1, Math.min(4, step));
+  renderOnboarding();
+  const dialog = $("#hybrid-strategy-dialog");
+  if (dialog && !dialog.open) dialog.showModal();
+}
+
+function renderOnboarding() {
+  $$("[data-onboarding-step]").forEach((section) => {
+    section.hidden = Number(section.dataset.onboardingStep) !== state.onboardingStep;
+  });
+  $$("[data-onboarding-progress]").forEach((item) => {
+    item.classList.toggle("is-active", Number(item.dataset.onboardingProgress) <= state.onboardingStep);
+  });
+  $("#onboarding-back").hidden = state.onboardingStep === 1;
+  $("#onboarding-next").hidden = state.onboardingStep === 4;
+  $("#save-hybrid-strategy").hidden = state.onboardingStep !== 4;
+}
+
+function completeOnboarding() {
+  const goal = $("#hybrid-strategy-goal").value.trim();
+  const product = $("#onboarding-product").value.trim();
+  const audience = $("#onboarding-audience").value.trim();
+  const value = $("#onboarding-value").value.trim();
+  if (goal) {
+    setText("#hybrid-goal-value", goal);
+    $("#strategy-business-goal").value = goal;
+  }
+  if (product) setText("#strategy-product", product);
+  if (audience) setText("#strategy-audience", audience);
+  if (value) setText("#strategy-value", value);
+  $("#strategy-target-cpa").value = $("#onboarding-cpa").value;
+  $("#strategy-budget").value = $("#onboarding-budget").value;
+  $("#strategy-period").value = $("#onboarding-period").value;
+  $("#strategy-channel-plan").value = $("#onboarding-final-strategy").value;
+  setText("#agent-onboarding-state", "Новая стратегия подтверждена");
+  $("#hybrid-strategy-dialog").close();
+  showPage("strategy");
+  setText("#strategy-save-message", "Агент сформировал модель бизнеса, цель и финальную стратегию. Теперь её можно редактировать вручную.");
+  showToast("Стратегия подтверждена. Campaign Draft готов к ручной проверке.");
+}
+
+function showSeoTab(tab) {
+  const selected = ["recommendations", "articles", "paid"].includes(tab)
+    ? tab
+    : "recommendations";
+  $$("[data-seo-tab]").forEach((button) => {
+    const active = button.dataset.seoTab === selected;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  $$("[data-seo-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.seoPanel !== selected;
+  });
+}
+
+function updateMonitoring() {
+  setText("#monitoring-ad-state", state.adPaused ? "Остановлено человеком" : "Автопилот работает");
+  setText("#monitoring-seo-state", state.seoPaused ? "SEO-действия остановлены" : "3 действия в работе");
+}
+
 function renderEvidence() {
   $$("#gate-strip [data-gate]").forEach((gate, index) => {
     setText($("strong", gate), index === 4 ? "READY FOR TEST" : "Готово");
@@ -483,25 +551,78 @@ function bindInteractions() {
     $("#campaign-source-test").classList.add("is-active");
   });
   $$("[data-hybrid-channel]").forEach((button) => button.addEventListener("click", () => {
-    if (!button.closest(".hybrid-channel-switch") && button.dataset.hybridChannel === "seo") showPage("campaign");
-    showCampaignChannel(button.dataset.hybridChannel);
+    if (button.dataset.hybridChannel === "seo") {
+      showPage("seo");
+      showSeoTab("recommendations");
+      return;
+    }
+    showCampaignChannel("direct");
   }));
   $("#save-seo-draft")?.addEventListener("click", () => setText("#hybrid-seo-message", "SEO-черновик сохранён только в памяти браузера."));
   $("#request-seo-approval")?.addEventListener("click", () => {
     if (!state.history.some((item) => item.action === "Подтвердить SEO-изменение страницы")) {
       addHistory({ time: "Сейчас", origin: "SEO", trigger: "Изменение готово", action: "Подтвердить SEO-изменение страницы", reason: "Публикация контента требует решения владельца.", status: "Ждёт решения" });
     }
-    setText("#hybrid-seo-message", "Предложение добавлено в Историю решений.");
+    setText("#hybrid-seo-message", "Предложение добавлено в Мониторинг.");
   });
-  $("#open-strategy")?.addEventListener("click", () => $("#hybrid-strategy-dialog").showModal());
-  $("#hybrid-strategy-form")?.addEventListener("submit", (event) => {
-    const submitter = event.submitter;
-    if (submitter?.id !== "save-hybrid-strategy") return;
-    event.preventDefault();
-    const goal = $("#hybrid-strategy-goal").value.trim();
+
+  $("#start-agent-onboarding")?.addEventListener("click", () => showOnboarding(1));
+  $("#restart-agent-onboarding")?.addEventListener("click", () => showOnboarding(1));
+  $("#correct-business-model")?.addEventListener("click", () => showOnboarding(2));
+  $("#close-agent-onboarding")?.addEventListener("click", () => $("#hybrid-strategy-dialog").close());
+  $("#onboarding-next")?.addEventListener("click", () => {
+    state.onboardingStep = Math.min(4, state.onboardingStep + 1);
+    renderOnboarding();
+  });
+  $("#onboarding-back")?.addEventListener("click", () => {
+    state.onboardingStep = Math.max(1, state.onboardingStep - 1);
+    renderOnboarding();
+  });
+  $("#save-hybrid-strategy")?.addEventListener("click", completeOnboarding);
+  $("#hybrid-strategy-form")?.addEventListener("submit", (event) => event.preventDefault());
+  $("#save-full-strategy")?.addEventListener("click", () => {
+    const goal = $("#strategy-business-goal").value.trim();
     if (goal) setText("#hybrid-goal-value", goal);
-    $("#hybrid-strategy-dialog").close();
-    showToast("Стратегия обновлена для всех рабочих контуров Test Scenario.");
+    setText("#strategy-save-message", "Ревизия 4 сохранена. Ручное вмешательство записано в историю и приостановило конфликтующие автоматические действия.");
+    addHistory({ time: "Сейчас", origin: "Стратегия", trigger: "Ручная ревизия", action: "Обновить стратегию кампании", reason: "Владелец отредактировал финальную стратегию в Dashboard.", status: "Сохранено в Test Scenario" });
+  });
+
+  $$("[data-seo-tab]").forEach((button) => button.addEventListener("click", () => showSeoTab(button.dataset.seoTab)));
+  $("#save-seo-recommendation")?.addEventListener("click", () => setText("#seo-recommendation-message", "Правки сохранены в SEO-черновике."));
+  $("#apply-seo-text")?.addEventListener("click", () => {
+    setText("#seo-recommendation-message", "Текст применён в Test Scenario. Предыдущая версия сохранена для отката.");
+    addHistory({ time: "Сейчас", origin: "SEO", trigger: "Текст страницы ниже потенциала", action: "Обновить первый экран /exhibitors", reason: "Новая формулировка связывает страницу с измеримой бизнес-целью.", status: "Применено в Test Scenario" });
+  });
+  $(".seo-recommendation-editor [data-monitor-action=\"pause-seo\"]")?.addEventListener("click", () => {
+    state.seoPaused = true;
+    updateMonitoring();
+    setText("#seo-recommendation-message", "Изменение оставлено черновиком. SEO-анализ продолжается без публикации.");
+  });
+  $("#create-article-draft")?.addEventListener("click", () => {
+    setText("#editorial-message", "Агент создал структуру и первый черновик статьи. Публикация не выполнялась.");
+    showToast("Черновик статьи создан для сайта и VC.ru.");
+  });
+  $("#approve-paid-placement")?.addEventListener("click", () => {
+    setText("#paid-placement-message", "Решение подтверждено в Test Scenario. Реальный заказ, публикация и списание не выполнялись.");
+    addHistory({ time: "Сейчас", origin: "SEO · платное размещение", trigger: "Решение владельца", action: "Подтвердить площадку, статью и ссылку", reason: "Человек подтвердил размещение стоимостью 95 000 ₽.", status: "Подтверждено только в Test Scenario" });
+  });
+  $("#reject-paid-placement")?.addEventListener("click", () => setText("#paid-placement-message", "Размещение отклонено. Агент продолжит искать площадки без покупки."));
+
+  $("#confirm-conversions")?.addEventListener("click", () => {
+    setText("#conversion-check-state", "Подтверждено сегодня");
+    setText("#monitoring-message", "7 конверсий сверены человеком с фактическими заявками.");
+  });
+  $(".monitoring-action-list")?.addEventListener("click", (event) => {
+    const action = event.target.closest("[data-monitor-action]")?.dataset.monitorAction;
+    if (action === "pause-ad") {
+      state.adPaused = !state.adPaused;
+      setText("#monitoring-message", state.adPaused ? "Рекламные изменения остановлены человеком; наблюдение продолжается." : "Рекламные изменения возобновлены внутри Mandate.");
+    }
+    if (action === "pause-seo") {
+      state.seoPaused = !state.seoPaused;
+      setText("#monitoring-message", state.seoPaused ? "SEO-публикации остановлены человеком; анализ продолжается." : "SEO-действия возобновлены внутри полномочий.");
+    }
+    updateMonitoring();
   });
 }
 
@@ -516,7 +637,10 @@ function initialize() {
   renderEvidence();
   updateFreeze();
   showCampaignChannel("direct");
+  showSeoTab("recommendations");
   showHistoryTab("decisions");
+  renderOnboarding();
+  updateMonitoring();
   showPage(pageFromLocation(), false);
   bindInteractions();
 }

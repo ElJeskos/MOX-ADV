@@ -17,13 +17,15 @@
       </a>
       <nav class="main-nav" aria-label="Основная навигация">
         <a href="/overview" data-nav data-page-link="overview">Обзор</a>
-        <a href="/cycle" data-nav data-page-link="cycle">Запуск цикла</a>
+        <a href="/strategy" data-nav data-page-link="strategy">Стратегия</a>
+        <a href="/campaign" data-nav data-page-link="campaign">Кампания</a>
+        <a href="/cycle" data-nav data-page-link="cycle">Цикл</a>
         <a href="/autopilot" data-nav data-page-link="autopilot">Автопилот</a>
         <a href="/rules" data-nav data-page-link="rules">Правила</a>
-        <a href="/history" data-nav data-page-link="history">История</a>
-        <a href="/campaign" data-nav data-page-link="campaign">Кампания</a>
+        <a href="/history" data-nav data-page-link="history">Мониторинг</a>
+        <a href="/seo" data-nav data-page-link="seo">SEO</a>
         <a href="/control" data-nav data-page-link="control">Контроль</a>
-        <span class="nav-disabled" aria-disabled="true">Вебвизор</span>
+        <span class="nav-disabled" aria-disabled="true">VK · В разработке</span>
       </nav>
       <div class="service-state" id="service-state">
         <span class="state-dot" aria-hidden="true"></span>
@@ -39,7 +41,7 @@
       <div class="hybrid-business-identity"><span class="hybrid-avatar">ИП</span><div><small>Подключённый бизнес</small><strong>ИННОПРОМ · экспоненты</strong></div></div>
       <div class="hybrid-goal"><small>Основной измеримый результат</small><strong id="hybrid-goal-value">Квалифицированная заявка промышленной компании</strong></div>
       <div class="hybrid-agent-state"><span class="state-dot"></span><div><small>Агент</small><strong id="hybrid-agent-label">Автопилот выключен</strong></div></div>
-      <div class="hybrid-context-actions"><button class="text-button" id="open-strategy" type="button">Стратегия</button><button class="primary-button compact" type="button" data-hybrid-page="history">Решения · <span id="hybrid-decision-count">2</span></button></div>
+      <div class="hybrid-context-actions"><button class="text-button" type="button" data-hybrid-page="strategy">Стратегия</button><button class="primary-button compact" type="button" data-hybrid-page="history">Решения · <span id="hybrid-decision-count">2</span></button></div>
     </section>
 
     <section class="page overview-page" data-page="overview" aria-labelledby="overview-title">
@@ -51,6 +53,11 @@
         </div>
         <a class="primary-link" href="/cycle" data-nav>Запустить цикл</a>
       </div>
+      <section class="agent-onboarding-card" aria-labelledby="agent-onboarding-card-title">
+        <div class="agent-onboarding-mark" aria-hidden="true">AI</div>
+        <div><p class="eyebrow">Начало взаимодействия</p><h2 id="agent-onboarding-card-title">Агент сформирует модель бизнеса и стратегию кампании</h2><p>Ответьте на вопросы о продукте, аудитории, цели и границах. Агент покажет своё понимание, спросит только недостающее и подготовит редактируемую стратегию.</p></div>
+        <div class="agent-onboarding-actions"><span id="agent-onboarding-state">Демо-профиль уже сформирован</span><button class="primary-link" id="start-agent-onboarding" type="button">Новый запуск с агентом</button></div>
+      </section>
       <div class="overview-status">
         <div>
           <span>Автопилот</span>
@@ -89,6 +96,36 @@
         <a href="/autopilot" data-nav>Настроить автопилот <span>→</span></a>
         <a href="/history" data-nav>Посмотреть историю решений <span>→</span></a>
       </div>
+    </section>
+
+    <section class="page strategy-console" data-page="strategy" aria-labelledby="strategy-page-title">
+      <div class="operator-console-head">
+        <div><p class="eyebrow">Модуль 1 · результат работы агента</p><h2 id="strategy-page-title">Рекламная стратегия</h2></div>
+        <div class="strategy-head-actions"><span class="hybrid-status is-good">Версия 3 · подтверждена</span><button class="primary-button" id="restart-agent-onboarding" type="button">Сформировать заново с агентом</button></div>
+      </div>
+      <div class="strategy-workspace">
+        <aside class="strategy-model" aria-labelledby="business-model-title">
+          <div class="panel-head"><div><p class="eyebrow">Понимание агента</p><h3 id="business-model-title">Модель бизнеса</h3></div><span class="panel-index">AI</span></div>
+          <dl class="strategy-model-facts"><div><dt>Продукт</dt><dd id="strategy-product">Участие со стендом на ИННОПРОМ-2027</dd></div><div><dt>Целевая аудитория</dt><dd id="strategy-audience">Руководители промышленных компаний</dd></div><div><dt>Ценность</dt><dd id="strategy-value">Контакты с заказчиками, партнёрами и государственными структурами</dd></div><div><dt>Цикл решения</dt><dd>Длинный · несколько участников</dd></div></dl>
+          <button class="secondary-button" id="correct-business-model" type="button">Уточнить модель</button>
+        </aside>
+        <section class="strategy-editor" aria-labelledby="strategy-editor-title">
+          <div class="campaign-inspector-head"><div><div class="campaign-status-line"><span class="campaign-status-badge">Strategy</span><span>Можно редактировать вручную</span></div><h3 id="strategy-editor-title">Финальная стратегия кампании</h3><p>Изменения проходят те же safety-проверки и сохраняются как новая ревизия.</p></div><button class="secondary-button compact" id="save-full-strategy" type="button">Сохранить ревизию</button></div>
+          <div class="strategy-editor-grid">
+            <label class="hybrid-field-wide"><span>Основная бизнес-цель</span><input id="strategy-business-goal" value="Квалифицированная заявка промышленной компании"></label>
+            <label><span>Профиль эффективности</span><select id="strategy-efficiency-profile"><option>Квалифицированные лиды</option><option>Прибыль / маржинальная ценность</option><option>Выручка</option><option>Конечные конверсии</option></select></label>
+            <label><span>Целевой CPA, ₽</span><input id="strategy-target-cpa" type="number" min="1" value="12000"></label>
+            <label><span>Период кампании</span><input id="strategy-period" value="01.09 — 30.11.2026"></label>
+            <label><span>Максимальный бюджет, ₽</span><input id="strategy-budget" type="number" min="1" value="600000"></label>
+            <label class="hybrid-field-wide"><span>Сегменты аудитории</span><textarea id="strategy-segments" rows="4">Производители оборудования; технологические компании; промышленные интеграторы; региональные институты развития.</textarea></label>
+            <label class="hybrid-field-wide"><span>Позиционирование и сообщение</span><textarea id="strategy-message" rows="4">Представьте технологию ключевым промышленным заказчикам и заключите новые контракты на главной индустриальной площадке России.</textarea></label>
+            <label class="hybrid-field-wide"><span>Стратегия каналов</span><textarea id="strategy-channel-plan" rows="5">Яндекс Директ закрывает сформированный спрос на участие и выставочные стенды. SEO создаёт долгосрочный органический спрос и усиливает целевые страницы. Платные статьи используются только после подтверждения площадки, цены, статьи и ссылки.</textarea></label>
+          </div>
+          <div class="strategy-safety-row"><div><small>Автономия</small><strong>Поэтапно: наблюдение → подтверждение → действия в Mandate</strong></div><div><small>Критические решения</small><strong>Цель, бюджет, необратимые и платные действия — только человек</strong></div></div>
+          <p class="automation-message" id="strategy-save-message" aria-live="polite"></p>
+        </section>
+      </div>
+      <section class="strategy-channel-readiness"><div><span class="state-dot"></span><div><small>Реклама</small><strong>Campaign Draft готов</strong></div></div><div><span class="state-dot"></span><div><small>SEO</small><strong>План на 90 дней готов</strong></div></div><div class="is-future"><span class="state-dot"></span><div><small>VK</small><strong>В разработке</strong></div></div><button class="primary-link" type="button" data-hybrid-page="campaign">Перейти к созданию кампании</button></section>
     </section>
 
     <main class="page shell" data-page="cycle">
@@ -505,6 +542,12 @@
             </select>
           </label>
 
+          <section class="autopilot-boundaries" aria-labelledby="autopilot-boundaries-title">
+            <div class="panel-head"><div><p class="eyebrow">Полный автопилот</p><h4 id="autopilot-boundaries-title">Утверждённый период и финансовые границы</h4></div><span class="automation-state">Внутри Mandate</span></div>
+            <div class="autopilot-boundary-grid"><label><span>Начало периода</span><input id="autopilot-period-start" type="date" value="2026-09-01"></label><label><span>Окончание периода</span><input id="autopilot-period-end" type="date" value="2026-11-30"></label><label><span>Бюджет периода, ₽</span><input id="autopilot-period-budget" type="number" value="600000"></label><label><span>Максимальный шаг бюджета, %</span><input id="autopilot-budget-step" type="number" value="10"></label></div>
+            <p>Внутри периода и бюджета агент действует без подтверждения каждого шага. При выходе за границы соответствующее действие останавливается и попадает в Мониторинг.</p>
+          </section>
+
           <div class="rule-list">
             <div class="rule-row">
               <label class="rule-toggle">
@@ -725,6 +768,14 @@
       </section>
 
       <section class="page history-console" data-page="history" aria-labelledby="history-title">
+        <div class="monitoring-head"><div><p class="eyebrow">Реклама + SEO · вмешательство человека</p><h2>Мониторинг работы агента</h2><p>Текущие действия, надёжность данных, активные гипотезы и точки, где требуется человек.</p></div><div class="monitoring-head-actions"><button class="secondary-button" id="confirm-conversions" type="button">Подтвердить конверсии</button><button class="danger-button" type="button" data-hybrid-page="control">Остановить изменения</button></div></div>
+        <div class="monitoring-status-grid">
+          <article><span>Реклама</span><strong id="monitoring-ad-state">Автопилот работает</strong><small>Гипотеза: отсечь посетительский спрос</small></article>
+          <article><span>SEO</span><strong id="monitoring-seo-state">3 действия в работе</strong><small>1 публикация требует решения</small></article>
+          <article><span>Надёжность данных</span><strong class="is-good">Сопоставимы</strong><small>Директ 2 мин · Метрика 4 мин</small></article>
+          <article><span>Подтверждение человека</span><strong id="conversion-check-state">Нужно сегодня</strong><small>7 конверсий ждут сверки</small></article>
+        </div>
+        <section class="monitoring-actions" aria-labelledby="monitoring-actions-title"><div class="panel-head"><div><p class="eyebrow">Сейчас</p><h3 id="monitoring-actions-title">Действия и гипотезы</h3></div><span class="automation-state">4 активных</span></div><div class="monitoring-action-list"><article><span class="monitoring-channel">Реклама</span><div><strong>Снижение ставки посетительского сегмента</strong><small>Применено −8% · наблюдение до завтра</small></div><span class="hybrid-status is-good">В Mandate</span><button class="text-button" type="button" data-monitor-action="pause-ad">Вмешаться</button></article><article><span class="monitoring-channel">SEO</span><div><strong>Корректировка текста страницы /exhibitors</strong><small>Черновик готов · ожидает публикации</small></div><span class="hybrid-status is-info">Низкий риск</span><button class="text-button" type="button" data-monitor-action="pause-seo">Вмешаться</button></article><article><span class="monitoring-channel">SEO</span><div><strong>Покупная статья на отраслевой площадке</strong><small>95 000 ₽ · статья и ссылка подготовлены</small></div><span class="hybrid-status is-warning">Нужно решение</span><button class="primary-button compact" type="button" data-hybrid-page="seo">Решить</button></article></div><p class="automation-message" id="monitoring-message" aria-live="polite"></p></section>
         <div class="history-tabs" role="tablist" aria-label="Разделы истории">
           <button
             id="history-decisions-tab"
@@ -1301,6 +1352,28 @@
       </dialog>
     </section>
 
+    <section class="page seo-console" data-page="seo" aria-labelledby="seo-page-title">
+      <div class="operator-console-head"><div><p class="eyebrow">Полный SEO-контур</p><h2 id="seo-page-title">SEO и контент</h2></div><p>Агент использует общую модель бизнеса и цель, но ведёт отдельный SEO-план, публикации и платные размещения.</p></div>
+      <div class="seo-module-tabs" role="tablist" aria-label="SEO-модули"><button class="is-active" type="button" role="tab" aria-selected="true" data-seo-tab="recommendations"><span>Рекомендации</span><small>Тексты и страницы сайта</small></button><button type="button" role="tab" aria-selected="false" data-seo-tab="articles"><span>Статьи</span><small>Сайт, VC.ru, LinkedIn</small></button><button type="button" role="tab" aria-selected="false" data-seo-tab="paid"><span>Покупные статьи</span><small>Площадки, ссылки и бюджеты</small></button></div>
+
+      <section class="seo-tab-panel" data-seo-panel="recommendations">
+        <div class="seo-kpi-strip"><div><span>Страницы в наблюдении</span><strong>12</strong><small>8 проиндексированы</small></div><div><span>Рекомендации</span><strong>7</strong><small>3 готовы к применению</small></div><div><span>Органические заявки</span><strong>2</strong><small>за текущий период</small></div><div><span>Автономия</span><strong>После подтверждения</strong><small>для класса «тексты сайта»</small></div></div>
+        <div class="seo-recommendation-layout"><aside class="seo-recommendation-list"><div class="campaign-registry-head"><div><p class="eyebrow">Анализ сайта</p><h3>Рекомендации агента</h3></div><span>7 объектов</span></div><button class="is-active" type="button"><strong>/exhibitors · первый экран</strong><small>Высокий приоритет · текст</small></button><button type="button"><strong>/exhibitors/benefits · структура</strong><small>Средний приоритет · блоки</small></button><button type="button"><strong>/program · перелинковка</strong><small>Низкий приоритет · ссылки</small></button></aside><section class="seo-recommendation-editor"><div class="campaign-inspector-head"><div><div class="campaign-status-line"><span class="campaign-status-badge">Draft</span><span>Корректировка текста на сайте</span></div><h3>Усилить первый экран страницы участия</h3><p>Рекомендация основана на запросах экспонентов и данных рекламной кампании.</p></div><button class="secondary-button compact" id="save-seo-recommendation" type="button">Сохранить правки</button></div><div class="seo-text-comparison"><label><span>Сейчас</span><textarea rows="7" readonly>Примите участие в международной промышленной выставке.</textarea></label><label><span>Предложение агента</span><textarea id="seo-recommended-text" rows="7">Представьте технологию промышленным заказчикам и заключите новые контракты на ИННОПРОМ-2027.</textarea></label></div><div class="seo-recommendation-proof"><div><small>Почему</small><strong>Текст не объясняет бизнес-результат участия и не квалифицирует аудиторию.</strong></div><div><small>Ожидаемый эффект</small><strong>+12–18% отправок формы при сопоставимом трафике</strong></div><div><small>Откат</small><strong>Предыдущая версия сохраняется автоматически</strong></div></div><div class="seo-editor-actions"><button class="text-button" type="button" data-monitor-action="pause-seo">Оставить черновиком</button><button class="primary-button" id="apply-seo-text" type="button">Применить в Test Scenario</button></div><p class="automation-message" id="seo-recommendation-message" aria-live="polite"></p></section></div>
+      </section>
+
+      <section class="seo-tab-panel" data-seo-panel="articles" hidden>
+        <div class="editorial-head"><div><p class="eyebrow">Editorial Pipeline</p><h3>Статьи для собственных и внешних каналов</h3><p>Агент исследует тему, пишет, согласует и публикует материалы на поддерживаемых площадках внутри выданных полномочий.</p></div><button class="primary-button" id="create-article-draft" type="button">Создать статью с агентом</button></div>
+        <div class="editorial-channel-grid"><article><div class="hybrid-card-head"><div><p class="eyebrow">Свой сайт</p><h3>База знаний</h3></div><span class="hybrid-status is-good">Подключено</span></div><strong>4 статьи в плане</strong><small>1 готова к публикации</small></article><article><div class="hybrid-card-head"><div><p class="eyebrow">VC.ru</p><h3>Корпоративный блог</h3></div><span class="hybrid-status is-info">Черновики</span></div><strong>2 статьи в плане</strong><small>Публикация после подтверждения класса действий</small></article><article><div class="hybrid-card-head"><div><p class="eyebrow">LinkedIn</p><h3>Company Page</h3></div><span class="hybrid-status is-warning">Не подключено</span></div><strong>Интеграция готовится</strong><small>Можно готовить локальные черновики</small></article></div>
+        <div class="editorial-pipeline"><article><span>Тема</span><strong>Как промышленной компании получить максимум от выставки</strong><small>Кластер «участие в выставке»</small></article><article><span>Исследование</span><strong>Источники собраны</strong><small>7 материалов · 3 внутренних факта</small></article><article><span>Черновик</span><strong>2 400 слов · версия 2</strong><small>Готов к редактуре</small></article><article><span>Каналы</span><strong>Сайт + VC.ru</strong><small>LinkedIn — после подключения</small></article><article><span>Публикация</span><strong>Ждёт разрешения</strong><small>Можно выдать автономию классу действий</small></article></div><p class="automation-message" id="editorial-message" aria-live="polite"></p>
+      </section>
+
+      <section class="seo-tab-panel" data-seo-panel="paid" hidden>
+        <div class="paid-placement-head"><div><p class="eyebrow">Approval-gated pipeline</p><h3>Покупные статьи и ссылки</h3><p>Агент находит площадку, готовит статью и ссылку. Заказ и списание выполняются только после подтверждения человека.</p></div><span class="hybrid-status is-warning">Всегда требует решения</span></div>
+        <div class="paid-placement-layout"><aside class="paid-placement-list"><button class="is-active" type="button"><strong>Промышленность России</strong><small>95 000 ₽ · DR 68 · аудитория совпадает</small></button><button type="button"><strong>Технологии производства</strong><small>64 000 ₽ · DR 54 · отраслевой материал</small></button><button type="button"><strong>Деловой регион</strong><small>38 000 ₽ · DR 41 · региональный охват</small></button></aside><section class="paid-placement-inspector"><div class="campaign-inspector-head"><div><div class="campaign-status-line"><span class="campaign-status-badge">Approval</span><span>Покупка не выполнена</span></div><h3>Статья о выходе на промышленных заказчиков</h3><p>Площадка «Промышленность России» · размещение навсегда</p></div><strong class="paid-placement-price">95 000 ₽</strong></div><dl class="paid-placement-facts"><div><dt>Статья</dt><dd>«5 способов найти промышленных заказчиков на выставке»</dd></div><div><dt>Ссылка</dt><dd>expo.innoprom.com/exhibitors</dd></div><div><dt>Анкор</dt><dd>стать экспонентом ИННОПРОМ</dd></div><div><dt>Маркировка</dt><dd>Нативный материал · рекламная пометка по правилам площадки</dd></div><div><dt>Ожидаемый эффект</dt><dd>Реферальный спрос + усиление тематического авторитета</dd></div></dl><div class="paid-article-preview"><span>Фрагмент статьи</span><p>Промышленные выставки становятся не витриной, а коротким путём к техническим заказчикам. Чтобы участие дало измеримый результат, компании заранее формируют список целевых встреч...</p><button class="text-button" type="button">Открыть полный текст</button></div><div class="paid-placement-actions"><button class="text-button" id="reject-paid-placement" type="button">Отклонить</button><button class="primary-button" id="approve-paid-placement" type="button">Подтвердить заказ в Test Scenario</button></div><p class="automation-message" id="paid-placement-message" aria-live="polite"></p></section></div>
+      </section>
+      <section class="future-channels"><div><p class="eyebrow">Следующие каналы</p><h3>Единая модель, отдельные рабочие контуры</h3></div><div><span>VK Ads</span><strong>В разработке</strong></div><div><span>Другие рекламные системы</span><strong>Позже</strong></div></section>
+    </section>
+
     <section class="page evidence-console" data-page="control" aria-labelledby="evidence-title">
       <div class="operator-console-head">
         <div>
@@ -1347,11 +1420,15 @@
       <p class="automation-message" id="evidence-message" aria-live="polite"></p>
     </section>
 
-    <dialog class="hybrid-strategy-dialog" id="hybrid-strategy-dialog" aria-labelledby="hybrid-strategy-title">
-      <form method="dialog" id="hybrid-strategy-form">
-        <div class="hybrid-dialog-head"><div><p class="eyebrow">Общий контекст для старых рабочих контуров</p><h2 id="hybrid-strategy-title">Бизнес-цель и стратегия</h2></div><button class="text-button" value="cancel" type="submit">Закрыть</button></div>
-        <div class="hybrid-strategy-grid"><label class="hybrid-field-wide"><span>Основной измеримый результат</span><input id="hybrid-strategy-goal" value="Квалифицированная заявка промышленной компании"></label><label><span>План на период</span><input type="number" value="10" min="1"></label><label><span>Целевой CPA, ₽</span><input type="number" value="12000" min="1"></label><label class="hybrid-field-wide"><span>Стратегия</span><textarea rows="6">Привлекать руководителей производственных компаний к участию со стендом. Реклама закрывает сформированный спрос, SEO выращивает и перехватывает органический спрос. Оба канала измеряются квалифицированной заявкой.</textarea></label></div>
-        <div class="hybrid-dialog-actions"><span>Test Scenario · сохраняется только в памяти браузера</span><button class="primary-button" id="save-hybrid-strategy" value="default" type="submit">Сохранить стратегию</button></div>
+    <dialog class="hybrid-strategy-dialog agent-onboarding-dialog" id="hybrid-strategy-dialog" aria-labelledby="hybrid-strategy-title">
+      <form id="hybrid-strategy-form">
+        <div class="hybrid-dialog-head"><div><p class="eyebrow">Разговор с AI-агентом</p><h2 id="hybrid-strategy-title">Новая рекламная кампания</h2></div><button class="text-button" id="close-agent-onboarding" type="button">Закрыть</button></div>
+        <div class="agent-onboarding-progress" aria-label="Прогресс опроса"><span class="is-active" data-onboarding-progress="1">1 · Бизнес</span><span data-onboarding-progress="2">2 · Модель</span><span data-onboarding-progress="3">3 · Цель</span><span data-onboarding-progress="4">4 · Стратегия</span></div>
+        <section class="agent-onboarding-step" data-onboarding-step="1"><div class="agent-question"><span class="agent-question-mark">AI</span><div><strong>Расскажите, что вы продвигаете</strong><p>Я сначала анализирую сайт и доступный контекст, затем спрашиваю только то, чего не хватает.</p></div></div><div class="hybrid-strategy-grid"><label class="hybrid-field-wide"><span>Сайт или посадочная страница</span><input id="onboarding-site" type="url" value="https://expo.innoprom.com/exhibitors"></label><label class="hybrid-field-wide"><span>Продукт или предложение</span><textarea id="onboarding-product" rows="4">Участие со стендом на международной промышленной выставке ИННОПРОМ-2027.</textarea></label><label><span>География</span><input id="onboarding-region" value="Россия"></label><label><span>Сфера</span><input value="Промышленность / B2B"></label></div></section>
+        <section class="agent-onboarding-step" data-onboarding-step="2" hidden><div class="agent-question"><span class="agent-question-mark">AI</span><div><strong>Вот как я понял бизнес</strong><p>Проверьте модель. Исправления станут общим контекстом для рекламы и SEO.</p></div></div><div class="business-model-review"><label><span>Кто покупатель</span><textarea id="onboarding-audience" rows="3">Руководители и коммерческие директора промышленных компаний, которые ищут заказчиков, партнёров и выход на новые рынки.</textarea></label><label><span>Какую ценность получает</span><textarea id="onboarding-value" rows="3">Доступ к промышленным заказчикам, деловым встречам и государственным структурам на одной площадке.</textarea></label><label><span>Что считаем квалифицированным результатом</span><textarea rows="3">Заявка компании, которая соответствует профилю экспонента и готова обсуждать формат участия.</textarea></label><label><span>Что не является результатом</span><textarea rows="3">Покупка билета посетителя, поиск работы, общий информационный интерес.</textarea></label></div></section>
+        <section class="agent-onboarding-step" data-onboarding-step="3" hidden><div class="agent-question"><span class="agent-question-mark">AI</span><div><strong>Какой бизнес-результат должна улучшать кампания?</strong><p>Диагностические метрики не заменяют основную цель. Финансовые границы обязательны до полного автопилота.</p></div></div><div class="hybrid-strategy-grid"><label class="hybrid-field-wide"><span>Основная цель кампании</span><input id="hybrid-strategy-goal" value="Квалифицированная заявка промышленной компании"></label><label><span>Профиль эффективности</span><select><option>Квалифицированные лиды</option><option>Прибыль / маржа</option><option>Выручка</option><option>Конечные конверсии</option></select></label><label><span>Целевой CPA, ₽</span><input id="onboarding-cpa" type="number" value="12000" min="1"></label><label><span>План результатов</span><input id="onboarding-result-plan" type="number" value="10" min="1"></label><label><span>Максимальный бюджет, ₽</span><input id="onboarding-budget" type="number" value="600000" min="1"></label><label><span>Период</span><input id="onboarding-period" value="01.09 — 30.11.2026"></label></div></section>
+        <section class="agent-onboarding-step" data-onboarding-step="4" hidden><div class="agent-question"><span class="agent-question-mark">AI</span><div><strong>Стратегия готова</strong><p>После подтверждения появится Campaign Draft. Финальную стратегию можно вручную редактировать в Dashboard.</p></div></div><div class="agent-strategy-result"><div><span>Бизнес-модель</span><strong>Промышленный B2B · длинный цикл решения · квалификация по профилю экспонента</strong></div><div><span>Реклама</span><strong>Поиск с явным намерением участия; посетительские и карьерные запросы исключаются</strong></div><div><span>SEO</span><strong>Страницы участия, экспертные статьи и внешние размещения работают на ту же бизнес-цель</strong></div><div><span>Автономия</span><strong>Полный автопилот внутри 600 000 ₽ и утверждённого периода; критические решения остаются человеку</strong></div></div><label class="agent-strategy-text"><span>Финальная стратегия</span><textarea id="onboarding-final-strategy" rows="7">Привлекать руководителей промышленных компаний на страницу участия со стендом. Яндекс Директ закрывает существующий спрос, SEO выращивает долгосрочный спрос. Оптимизировать по квалифицированной заявке, отсекать посетителей и соискателей, постепенно повышать автономность классов действий.</textarea></label></section>
+        <div class="hybrid-dialog-actions"><span>Test Scenario · сохраняется только в памяти браузера</span><div><button class="text-button" id="onboarding-back" type="button" hidden>Назад</button><button class="primary-button" id="onboarding-next" type="button">Продолжить</button><button class="primary-button" id="save-hybrid-strategy" type="button" hidden>Подтвердить стратегию</button></div></div>
       </form>
     </dialog>
     <div class="hybrid-toast" id="hybrid-toast" role="status" aria-live="polite"></div>
