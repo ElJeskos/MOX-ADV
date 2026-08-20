@@ -1,0 +1,675 @@
+import { env } from "cloudflare:workers";
+
+const MAX_SITE_BYTES = 5_000_000;
+const MAX_SITE_PAGES = 6;
+const RESEARCH_TERMS = [
+  "about",
+  "product",
+  "service",
+  "solution",
+  "particip",
+  "partner",
+  "price",
+  "tariff",
+  "registration",
+  "become",
+  "visitor",
+  "client",
+  "faq",
+  "contact",
+  "услов",
+  "участ",
+  "партнер",
+  "регистра",
+  "посетител",
+  "клиент",
+  "контакт",
+];
+
+export type P0Document = {
+  site_analysis: SiteAnalysis | null;
+  business_model: BusinessModel | null;
+  strategy: Record<string, unknown> | null;
+  draft: Record<string, unknown> | null;
+  campaign: Record<string, unknown> | null;
+};
+
+type StateRow = {
+  revision: number;
+  updated_at: string;
+  value_json: string;
+};
+
+type PageEvidence = {
+  url: string;
+  title: string;
+  description: string;
+  headings: string[];
+  forms_detected: number;
+  text_excerpt: string;
+};
+
+type SiteAnalysis = PageEvidence & {
+  fetched_at: string;
+  pages: PageEvidence[];
+  research: {
+    pages_analyzed: number;
+    links_discovered: number;
+    scope: string;
+  };
+};
+
+type BusinessModel = {
+  product: string;
+  audience: string;
+  value: string;
+  qualified_result: string;
+  exclusions: string;
+  source: string;
+  assumptions: string[];
+  missing_questions: string[];
+  research: {
+    agent: string;
+    pages_analyzed: number;
+    sources: string[];
+    completed_fields: string[];
+  };
+  field_evidence: Record<
+    string,
+    { confidence: string; source_url: string; quote: string; owner_confirmed?: boolean }
+  >;
+};
+
+type Context = {
+  environment: "PRODUCTION";
+  test_scenario: false;
+  direct: Record<string, unknown>;
+  metrika: Record<string, unknown>;
+  performance: Record<string, unknown> | null;
+  campaign_catalog: Record<string, unknown> | null;
+};
+
+function runtimeEnv() {
+  return env as unknown as Record<string, string | undefined> & {
+    DB: typeof env.DB;
+  };
+}
+
+function emptyDocument(): P0Document {
+  return {
+    site_analysis: null,
+    business_model: null,
+    strategy: null,
+    draft: null,
+    campaign: null,
+  };
+}
+
+function now() {
+  return new Date().toISOString();
+}
+
+function cleanText(value: string, maximum = 1_000) {
+  return value
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maximum);
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Неизвестная ошибка";
+}
+
+export function userKey(request: Request) {
+  const authenticated = request.headers.get("oai-authenticated-user-id")?.trim();
+  if (authenticated) return authenticated;
+  const hostname = new URL(request.url).hostname;
+  if (hostname === "localhost" || hostname === "127.0.0.1") return "local-preview";
+  throw new Error("Для production-модуля требуется вход через GPT Sites.");
+}
+
+async function ensureState(key: string) {
+  const db = runtimeEnv().DB;
+  if (!db) throw new Error("Sites D1 binding DB недоступен.");
+  await db
+    .prepare(
+      "CREATE TABLE IF NOT EXISTS p0_state (user_key TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, value_json TEXT NOT NULL)",
+    )
+    .run();
+  const existing = await db
+    .prepare("SELECT revision, updated_at, value_json FROM p0_state WHERE user_key = ?")
+    .bind(key)
+    .first<StateRow>();
+  if (existing) return existing;
+  const updatedAt = now();
+  await db
+    .prepare(
+      "INSERT INTO p0_state(user_key, revision, updated_at, value_json) VALUES (?, 0, ?, ?)",
+    )
+    .bind(key, updatedAt, JSON.stringify(emptyDocument()))
+    .run();
+  return { revision: 0, updated_at: updatedAt, value_json: JSON.stringify(emptyDocument()) };
+}
+
+async function loadState(key: string) {
+  const row = await ensureState(key);
+  return {
+    revision: Number(row.revision),
+    updated_at: String(row.updated_at),
+    state: JSON.parse(String(row.value_json)) as P0Document,
+  };
+}
+
+async function saveState(key: string, expectedRevision: number, state: P0Document) {
+  const updatedAt = now();
+  const result = await runtimeEnv()
+    .DB.prepare(
+      "UPDATE p0_state SET revision = revision + 1, updated_at = ?, value_json = ? WHERE user_key = ? AND revision = ?",
+    )
+    .bind(updatedAt, JSON.stringify(state), key, expectedRevision)
+    .run();
+  if (Number(result.meta.changes) !== 1) {
+    throw new Error("P0 изменился в другой вкладке. Обновите страницу.");
+  }
+  return { revision: expectedRevision + 1, updated_at: updatedAt, state };
+}
+
+async function readCampaignCatalog() {
+  const runtime = runtimeEnv();
+  const token = runtime.YANDEX_DIRECT_OAUTH_TOKEN;
+  const account = runtime.YANDEX_DIRECT_CLIENT_LOGIN;
+  if (!token || !account) throw new Error("Direct read credentials не настроены в Sites.");
+  const response = await fetch("https://api.direct.yandex.com/json/v501/campaigns", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Client-Login": account,
+      Accept: "application/json",
+      "Accept-Language": "ru",
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify({
+      method: "get",
+      params: {
+        SelectionCriteria: {},
+        FieldNames: ["Id", "Name", "Type", "Status", "State", "StartDate", "EndDate"],
+        Page: { Limit: 1000, Offset: 0 },
+      },
+    }),
+  });
+  if (!response.ok) throw new Error(`Яндекс Директ вернул HTTP ${response.status}.`);
+  const payload = (await response.json()) as {
+    error?: unknown;
+    result?: { Campaigns?: Array<Record<string, unknown>>; LimitedBy?: number };
+  };
+  if (payload.error || !Array.isArray(payload.result?.Campaigns)) {
+    throw new Error("Ответ Яндекс Директа не соответствует read-only контракту.");
+  }
+  const campaigns = payload.result.Campaigns;
+  return {
+    account,
+    total: campaigns.length,
+    active: campaigns
+      .filter((item) => item.Status !== "ARCHIVED")
+      .slice(0, 20)
+      .map((item) => ({
+        campaign_id: String(item.Id ?? ""),
+        name: cleanText(String(item.Name ?? ""), 255),
+        state: String(item.State ?? "UNKNOWN"),
+        status: String(item.Status ?? "UNKNOWN"),
+      })),
+  };
+}
+
+function isoDateDaysAgo(days: number) {
+  const value = new Date();
+  value.setUTCDate(value.getUTCDate() - days);
+  return value.toISOString().slice(0, 10);
+}
+
+async function readMetrika() {
+  const runtime = runtimeEnv();
+  const token = runtime.YANDEX_METRICA_OAUTH_TOKEN;
+  const counter = runtime.YANDEX_METRICA_COUNTER_ID;
+  const goal = runtime.YANDEX_METRICA_GOAL_ID;
+  const campaign = runtime.YANDEX_DIRECT_CAMPAIGN_ID;
+  if (!token || !counter || !goal || !campaign) {
+    throw new Error("Metrika production bindings не настроены в Sites.");
+  }
+  const dimension = "ym:s:lastDirectClickOrder";
+  const start = isoDateDaysAgo(8);
+  const end = isoDateDaysAgo(1);
+  const query = new URLSearchParams({
+    ids: counter,
+    date1: start,
+    date2: end,
+    dimensions: `ym:s:date,${dimension}`,
+    metrics: `ym:s:visits,ym:s:goal${goal}visits`,
+    filters: `${dimension}=='${campaign}'`,
+    accuracy: "full",
+    limit: "100000",
+  });
+  const response = await fetch(`https://api-metrika.yandex.net/stat/v1/data?${query}`, {
+    headers: { Authorization: `OAuth ${token}`, Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error(`Яндекс Метрика вернула HTTP ${response.status}.`);
+  const payload = (await response.json()) as {
+    data?: Array<{ metrics?: number[] }>;
+  };
+  if (!Array.isArray(payload.data)) throw new Error("Ответ Метрики некорректен.");
+  const visits = payload.data.reduce((sum, row) => sum + Number(row.metrics?.[0] ?? 0), 0);
+  const goals = payload.data.reduce((sum, row) => sum + Number(row.metrics?.[1] ?? 0), 0);
+  return { counter, goal, period_start: start, period_end: end, visits, goals };
+}
+
+async function readContext(): Promise<Context> {
+  const [directResult, metrikaResult] = await Promise.allSettled([
+    readCampaignCatalog(),
+    readMetrika(),
+  ]);
+  const direct =
+    directResult.status === "fulfilled"
+      ? {
+          ready: true,
+          access: "REAL_API_READ",
+          account: directResult.value.account,
+          campaigns_total: directResult.value.total,
+        }
+      : { ready: false, access: "REAL_API_READ", blockers: [errorMessage(directResult.reason)] };
+  const metrika =
+    metrikaResult.status === "fulfilled"
+      ? {
+          ready: true,
+          access: "REAL_API_READ",
+          counter_connected: true,
+          goal_connected: true,
+        }
+      : { ready: false, access: "REAL_API_READ", blockers: [errorMessage(metrikaResult.reason)] };
+  return {
+    environment: "PRODUCTION",
+    test_scenario: false,
+    direct,
+    metrika,
+    campaign_catalog:
+      directResult.status === "fulfilled"
+        ? { total: directResult.value.total, active: directResult.value.active }
+        : null,
+    performance:
+      metrikaResult.status === "fulfilled"
+        ? {
+            period_start: metrikaResult.value.period_start,
+            period_end: metrikaResult.value.period_end,
+            display_metrics: {
+              visits: String(metrikaResult.value.visits),
+              goal_visits: String(metrikaResult.value.goals),
+            },
+          }
+        : null,
+  };
+}
+
+function normalizeHost(hostname: string) {
+  return hostname.toLowerCase().replace(/^www\./, "");
+}
+
+function firstParty(base: string, candidate: string) {
+  return candidate === base || candidate.endsWith(`.${base}`);
+}
+
+function validateSiteUrl(raw: string) {
+  const url = new URL(raw);
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    (url.port && url.port !== "443") ||
+    url.hash
+  ) {
+    throw new Error("Нужен публичный HTTPS-адрес без credentials, нестандартного порта и fragment.");
+  }
+  const host = url.hostname.toLowerCase();
+  if (
+    host === "localhost" ||
+    host.endsWith(".local") ||
+    /^(127\.|10\.|192\.168\.|169\.254\.|0\.|::1$)/.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+  ) {
+    throw new Error("Локальные и частные адреса запрещены.");
+  }
+  return url;
+}
+
+function extractMatches(source: string, pattern: RegExp, maximum: number) {
+  const values: string[] = [];
+  for (const match of source.matchAll(pattern)) {
+    const value = cleanText(match[1] ?? "", 1_000);
+    if (value && !values.includes(value)) values.push(value);
+    if (values.length >= maximum) break;
+  }
+  return values;
+}
+
+async function fetchPage(rawUrl: string): Promise<{ page: PageEvidence; links: string[] }> {
+  const requested = validateSiteUrl(rawUrl);
+  const response = await fetch(requested, {
+    headers: {
+      "User-Agent": "MOX-ADV-GPT-Sites/1.0",
+      Accept: "text/html,application/xhtml+xml",
+    },
+    redirect: "follow",
+  });
+  if (!response.ok) throw new Error(`Сайт вернул HTTP ${response.status}.`);
+  const finalUrl = validateSiteUrl(response.url);
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!/text\/html|application\/xhtml\+xml/i.test(contentType)) {
+    throw new Error("Страница не вернула HTML.");
+  }
+  const html = await response.text();
+  if (new TextEncoder().encode(html).byteLength > MAX_SITE_BYTES) {
+    throw new Error("HTML страницы превышает безопасный размер.");
+  }
+  const title = extractMatches(html, /<title[^>]*>([\s\S]*?)<\/title>/gi, 1)[0] ?? "";
+  const descriptions = extractMatches(
+    html,
+    /<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']*)["'][^>]*>/gi,
+    2,
+  );
+  const headings = extractMatches(html, /<h[12][^>]*>([\s\S]*?)<\/h[12]>/gi, 20);
+  const links = extractMatches(html, /<a[^>]+href=["']([^"']+)["'][^>]*>/gi, 500);
+  const body = cleanText(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " "),
+    8_000,
+  );
+  return {
+    page: {
+      url: finalUrl.toString(),
+      title,
+      description: descriptions[0] ?? "",
+      headings: headings.slice(0, 10),
+      forms_detected: (html.match(/<form\b/gi) ?? []).length,
+      text_excerpt: body,
+    },
+    links,
+  };
+}
+
+function rankedLinks(baseUrl: string, links: string[]) {
+  const base = new URL(baseUrl);
+  const baseHost = normalizeHost(base.hostname);
+  const scores = new Map<string, number>();
+  for (const href of links) {
+    if (/^(mailto:|tel:|javascript:)/i.test(href) || /privacy|cookie|login|logout|\.pdf|\.zip/i.test(href)) {
+      continue;
+    }
+    let candidate: URL;
+    try {
+      candidate = new URL(href, base);
+    } catch {
+      continue;
+    }
+    const candidateHost = normalizeHost(candidate.hostname);
+    if (candidate.protocol !== "https:" || !firstParty(baseHost, candidateHost)) continue;
+    candidate.search = "";
+    candidate.hash = "";
+    if (candidate.toString().replace(/\/$/, "") === base.toString().replace(/\/$/, "")) continue;
+    const haystack = `${candidate.pathname} ${candidate.search}`.toLowerCase();
+    let score = RESEARCH_TERMS.reduce((total, term) => total + (haystack.includes(term) ? 3 : 0), 0);
+    if (candidateHost !== baseHost) score += 6;
+    if (/terms.*particip|услов.*участ/.test(haystack)) score += 10;
+    if (/become|стать-участ/.test(haystack)) score += 8;
+    if (/participants|partner-country|list/.test(haystack)) score -= 4;
+    if (score > 0) scores.set(candidate.toString(), Math.max(score, scores.get(candidate.toString()) ?? -100));
+  }
+  return [...scores.entries()].sort((a, b) => b[1] - a[1]).map(([url]) => url);
+}
+
+async function researchSite(rawUrl: string): Promise<SiteAnalysis> {
+  const entry = await fetchPage(rawUrl);
+  const entryHost = normalizeHost(new URL(entry.page.url).hostname);
+  const pages = [entry.page];
+  const attempted = new Set<string>();
+  let candidates = rankedLinks(entry.page.url, entry.links);
+  while (candidates.length && pages.length < MAX_SITE_PAGES) {
+    const candidate = candidates.shift()!;
+    if (attempted.has(candidate)) continue;
+    attempted.add(candidate);
+    try {
+      const result = await fetchPage(candidate);
+      const pageHost = normalizeHost(new URL(result.page.url).hostname);
+      if (!firstParty(entryHost, pageHost) || pages.some((item) => item.url === result.page.url)) continue;
+      pages.push(result.page);
+      candidates = [
+        ...rankedLinks(result.page.url, result.links).filter((item) => !attempted.has(item)),
+        ...candidates,
+      ];
+    } catch {
+      // Secondary pages are best-effort; the entry page remains authoritative.
+    }
+  }
+  return {
+    ...entry.page,
+    fetched_at: now(),
+    forms_detected: pages.reduce((sum, page) => sum + page.forms_detected, 0),
+    text_excerpt: cleanText(pages.map((page) => page.text_excerpt).join(" "), 8_000),
+    pages,
+    research: {
+      pages_analyzed: pages.length,
+      links_discovered: entry.links.length,
+      scope: "FIRST_PARTY_PUBLIC_HTTPS",
+    },
+  };
+}
+
+function evidenceRows(site: SiteAnalysis) {
+  const rows: Array<{ text: string; url: string }> = [];
+  const seen = new Set<string>();
+  for (const page of site.pages) {
+    const values = [page.description, ...page.headings, ...page.text_excerpt.split(/(?<=[.!?])\s+|\s*[|•]\s*/g)];
+    for (const value of values) {
+      const text = cleanText(value, 1_000);
+      const key = text.toLowerCase();
+      if (text.length < 12 || seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ text, url: page.url });
+    }
+  }
+  return rows;
+}
+
+function bestEvidence(rows: Array<{ text: string; url: string }>, terms: string[]) {
+  return rows
+    .map((row) => ({ row, score: terms.reduce((sum, term) => sum + (row.text.toLowerCase().includes(term) ? 1 : 0), 0) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.row.text.length - b.row.text.length)[0]?.row;
+}
+
+function inferModel(site: SiteAnalysis, context: Context): BusinessModel {
+  const rows = evidenceRows(site);
+  const productEvidence = { text: cleanText(site.title.split(/\s[|—–-]\s/)[0] || site.headings[0] || "", 500), url: site.url };
+  const audienceEvidence = bestEvidence(rows, [
+    "руководител",
+    "заказчик",
+    "инвестор",
+    "покупател",
+    "байер",
+    "производител",
+    "decision-maker",
+    "buyer",
+    "manufacturer",
+  ]);
+  const valueEvidence = bestEvidence(rows, [
+    "найдите",
+    "получите",
+    "возможност",
+    "привлеч",
+    "инвестиц",
+    "партнер",
+    "find new",
+    "opportunit",
+    "connect",
+  ]);
+  const resultEvidence = bestEvidence(rows, [
+    "заполните короткую форму",
+    "менеджер свяж",
+    "оставьте заявку",
+    "стать участник",
+    "become a participant",
+    "submit an application",
+    "register",
+  ]);
+  const visitorEvidence = bestEvidence(rows, ["посетител", "visitor", "билет", "free ticket"]);
+  const audience = cleanText(audienceEvidence?.text ?? "", 1_000);
+  const value = cleanText(valueEvidence?.text ?? site.description, 1_000);
+  const qualified = resultEvidence
+    ? /участ|participant/i.test(resultEvidence.text)
+      ? "Отправленная заявка на участие через форму сайта"
+      : /регистра|register/i.test(resultEvidence.text)
+        ? "Завершённая регистрация на сайте"
+        : "Отправленная квалифицированная заявка через сайт"
+    : site.forms_detected
+      ? "Отправленная форма с контактными данными"
+      : "";
+  const exclusions = visitorEvidence
+    ? "Посетители без намерения оставить коммерческую заявку"
+    : qualified
+      ? "Информационные обращения без намерения выполнить целевое действие"
+      : "";
+  const facts: Record<string, { value: string; evidence?: { text: string; url: string }; confidence: string }> = {
+    product: { value: productEvidence.text, evidence: productEvidence, confidence: productEvidence.text ? "HIGH" : "LOW" },
+    audience: { value: audience, evidence: audienceEvidence, confidence: audience ? "MEDIUM" : "LOW" },
+    value: { value, evidence: valueEvidence, confidence: value ? "MEDIUM" : "LOW" },
+    qualified_result: { value: qualified, evidence: resultEvidence, confidence: qualified ? "HIGH" : "LOW" },
+    exclusions: { value: exclusions, evidence: visitorEvidence, confidence: exclusions ? "MEDIUM" : "LOW" },
+  };
+  const questions: Record<string, string> = {
+    product: "Какое предложение нужно рекламировать?",
+    audience: "Кто фактически принимает решение о покупке?",
+    value: "Какая подтверждённая ценность важнее всего?",
+    qualified_result: "Какой результат считается квалифицированным?",
+    exclusions: "Какие обращения нужно исключить?",
+  };
+  const sources = ["PUBLIC_FIRST_PARTY_SITE"];
+  if (context.direct.ready === true) sources.push("DIRECT_REAL_ACCOUNT");
+  if (context.metrika.ready === true) sources.push("METRIKA_REAL_COUNTER");
+  return {
+    product: facts.product.value,
+    audience: facts.audience.value,
+    value: facts.value.value,
+    qualified_result: facts.qualified_result.value,
+    exclusions: facts.exclusions.value,
+    source: "REAL_SITE_AND_CONNECTED_DATA_RESEARCH",
+    assumptions: Object.entries(facts)
+      .filter(([, fact]) => fact.value && fact.confidence === "MEDIUM")
+      .map(([name]) => `${name}: вывод агента требует подтверждения владельца`),
+    missing_questions: Object.entries(facts)
+      .filter(([, fact]) => !fact.value)
+      .map(([name]) => questions[name]),
+    research: {
+      agent: "GPT_SITES_EVIDENCE_RESEARCH_V1",
+      pages_analyzed: site.pages.length,
+      sources,
+      completed_fields: Object.entries(facts).filter(([, fact]) => fact.value).map(([name]) => name),
+    },
+    field_evidence: Object.fromEntries(
+      Object.entries(facts).map(([name, fact]) => [
+        name,
+        {
+          confidence: fact.confidence,
+          source_url: fact.evidence?.url ?? "",
+          quote: fact.evidence?.text ?? "",
+        },
+      ]),
+    ),
+  };
+}
+
+export async function overview(key: string) {
+  const [stored, context] = await Promise.all([loadState(key), readContext()]);
+  return {
+    module: "P0_PRODUCTION",
+    environment: "PRODUCTION",
+    test_scenario: false,
+    ...stored,
+    context,
+    write_readiness: {
+      ready: false,
+      blockers: [
+        "Production write не разрешён для GPT Sites-кандидата",
+        "Создание кампании доступно только после отдельного Human Decision Gate",
+      ],
+    },
+  };
+}
+
+export async function applyAction(key: string, payload: Record<string, unknown>) {
+  const expectedRevision = Number(payload.expected_revision);
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+    throw new Error("Для изменения нужна текущая ревизия.");
+  }
+  const current = await loadState(key);
+  if (current.revision !== expectedRevision) throw new Error("P0 изменился в другой вкладке.");
+  const state = structuredClone(current.state);
+  const action = String(payload.action ?? "");
+  if (action === "analyze_site") {
+    const site = await researchSite(String(payload.url ?? ""));
+    const context = await readContext();
+    state.site_analysis = site;
+    state.business_model = inferModel(site, context);
+    state.strategy = null;
+    state.draft = null;
+  } else if (action === "save_business_model") {
+    if (!state.business_model) throw new Error("Сначала исследуйте сайт.");
+    const value = payload.value as Record<string, unknown>;
+    for (const field of ["product", "audience", "value", "qualified_result", "exclusions"]) {
+      const text = cleanText(String(value?.[field] ?? ""), 1_000);
+      if (!text) throw new Error(`Поле ${field} требует подтверждённого значения.`);
+      (state.business_model as unknown as Record<string, unknown>)[field] = text;
+      state.business_model.field_evidence[field] = {
+        ...state.business_model.field_evidence[field],
+        confidence: "OWNER_CONFIRMED",
+        owner_confirmed: true,
+      };
+    }
+    state.business_model.source = "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION";
+    state.business_model.assumptions = [];
+    state.business_model.missing_questions = [];
+  } else if (action === "save_strategy") {
+    const value = payload.value as Record<string, unknown>;
+    const required = ["goal", "geography", "period_start", "period_end", "landing_page", "weekly_budget_rub", "target_cpa_rub", "message"];
+    if (required.some((field) => String(value?.[field] ?? "").trim() === "")) {
+      throw new Error("Критические решения Campaign Strategy заполнены не полностью.");
+    }
+    const landing = validateSiteUrl(String(value.landing_page));
+    state.strategy = { ...value, landing_page: landing.toString(), source: "OWNER_APPROVED_REAL_BUSINESS_INPUT" };
+  } else if (action === "save_draft") {
+    const value = payload.value as Record<string, unknown>;
+    if (!state.strategy || !state.business_model) throw new Error("Сначала подтвердите модель и Strategy.");
+    state.draft = {
+      ...value,
+      source: "OWNER_REVIEWED_PUBLISH_PROJECTION",
+      publish_projection: {
+        schema_version: "p0-sites-projection-v1",
+        safety: { must_end_suspended: true, resume_allowed: false, network_serving: false },
+        business: {
+          product: state.business_model.product,
+          audience: state.business_model.audience,
+          qualified_result: state.business_model.qualified_result,
+          goal: state.strategy.goal,
+        },
+      },
+    };
+  } else if (action === "reset") {
+    Object.assign(state, emptyDocument());
+  } else {
+    throw new Error("Действие не поддерживается production-модулем.");
+  }
+  return saveState(key, expectedRevision, state);
+}
