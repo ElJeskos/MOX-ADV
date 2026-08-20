@@ -19,6 +19,7 @@ import {
   DirectWriteError,
   type DirectProjection,
 } from "./direct-write";
+import { mustHoldAccountLock } from "./execution-safety";
 import { normalizePublicHttpsUrl, requirePublicHttpsUrl } from "./site-url";
 
 const MAX_SITE_BYTES = 5_000_000;
@@ -1019,7 +1020,7 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
         error instanceof DirectWriteError ? error.code : "P0_DIRECT_WRITE_FAILED",
         partial,
       );
-      if (partial.campaign_id || partial.containment === "RECONCILIATION_REQUIRED") {
+      if (mustHoldAccountLock(partial)) {
         releaseLock = false;
         await holdAccountLock(config.account, executionId);
       }
