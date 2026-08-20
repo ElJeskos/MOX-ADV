@@ -1253,7 +1253,7 @@ body {
 
 .future-channels {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 240px 240px;
+  grid-template-columns: minmax(0, 1fr) repeat(3, 210px);
   gap: 0;
   align-items: center;
   margin-top: 16px;
