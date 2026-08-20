@@ -19,6 +19,7 @@ import {
   DirectWriteError,
   type DirectProjection,
 } from "./direct-write";
+import { normalizePublicHttpsUrl, requirePublicHttpsUrl } from "./site-url";
 
 const MAX_SITE_BYTES = 5_000_000;
 const MAX_SITE_PAGES = 6;
@@ -599,29 +600,6 @@ function firstParty(base: string, candidate: string) {
   return candidate === base || candidate.endsWith(`.${base}`);
 }
 
-function validateSiteUrl(raw: string) {
-  const url = new URL(raw);
-  if (
-    url.protocol !== "https:" ||
-    url.username ||
-    url.password ||
-    (url.port && url.port !== "443") ||
-    url.hash
-  ) {
-    throw new Error("Нужен публичный HTTPS-адрес без credentials, нестандартного порта и fragment.");
-  }
-  const host = url.hostname.toLowerCase();
-  if (
-    host === "localhost" ||
-    host.endsWith(".local") ||
-    /^(127\.|10\.|192\.168\.|169\.254\.|0\.|::1$)/.test(host) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(host)
-  ) {
-    throw new Error("Локальные и частные адреса запрещены.");
-  }
-  return url;
-}
-
 function extractMatches(source: string, pattern: RegExp, maximum: number) {
   const values: string[] = [];
   for (const match of source.matchAll(pattern)) {
@@ -633,7 +611,7 @@ function extractMatches(source: string, pattern: RegExp, maximum: number) {
 }
 
 async function fetchPage(rawUrl: string): Promise<{ page: PageEvidence; links: string[] }> {
-  const requested = validateSiteUrl(rawUrl);
+  const requested = normalizePublicHttpsUrl(rawUrl);
   const response = await fetch(requested, {
     headers: {
       "User-Agent": "MOX-ADV-GPT-Sites/1.0",
@@ -642,7 +620,7 @@ async function fetchPage(rawUrl: string): Promise<{ page: PageEvidence; links: s
     redirect: "follow",
   });
   if (!response.ok) throw new Error(`Сайт вернул HTTP ${response.status}.`);
-  const finalUrl = validateSiteUrl(response.url);
+  const finalUrl = requirePublicHttpsUrl(response.url);
   const contentType = response.headers.get("content-type") ?? "";
   if (!/text\/html|application\/xhtml\+xml/i.test(contentType)) {
     throw new Error("Страница не вернула HTML.");
@@ -962,7 +940,7 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
     if (required.some((field) => String(value?.[field] ?? "").trim() === "")) {
       throw new Error("Критические решения Campaign Strategy заполнены не полностью.");
     }
-    const landing = validateSiteUrl(String(value.landing_page));
+    const landing = normalizePublicHttpsUrl(String(value.landing_page));
     const limits = await readCurrencyLimits();
     validateWeeklyBudgetRub(value.weekly_budget_rub, limits.minimum_weekly_budget_rub);
     state.strategy = { ...value, landing_page: landing.toString(), source: "OWNER_APPROVED_REAL_BUSINESS_INPUT" };
