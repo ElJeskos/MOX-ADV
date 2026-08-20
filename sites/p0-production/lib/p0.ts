@@ -1,5 +1,11 @@
 import { env } from "cloudflare:workers";
-import { inferDecisionMakers, isUnprocessedAudience } from "./business-model";
+import { buildAdTitle } from "./ad-copy";
+import {
+  inferDecisionMakers,
+  inferOffer,
+  isUnprocessedAudience,
+  isUnprocessedOffer,
+} from "./business-model";
 import { buildCampaignNames, isLegacySearchName } from "./campaign-draft";
 
 const MAX_SITE_BYTES = 5_000_000;
@@ -93,17 +99,46 @@ type Context = {
 
 function migrateDocument(state: P0Document) {
   let changed = false;
+  let previousProduct = "";
   const model = state.business_model;
-  const evidence = model?.field_evidence?.audience;
-  if (model && evidence) {
-    const inferred = inferDecisionMakers(evidence.quote);
-    const needsCorrection = isUnprocessedAudience(model.audience, evidence.quote)
+  const site = state.site_analysis;
+  const productEvidence = model?.field_evidence?.product;
+  if (model && site && productEvidence) {
+    const supportingEvidence = bestOfferEvidence(evidenceRows(site));
+    const brand = brandFromSite(site);
+    const inferred = inferOffer(
+      brand,
+      supportingEvidence?.text ?? site.text_excerpt,
+      model.qualified_result,
+    );
+    if (inferred && isUnprocessedOffer(model.product, productEvidence.quote, brand)) {
+      previousProduct = model.product;
+      model.product = inferred;
+      productEvidence.confidence = "MEDIUM";
+      productEvidence.quote = supportingEvidence?.text ?? site.description;
+      productEvidence.source_url = supportingEvidence?.url ?? site.url;
+      delete productEvidence.owner_confirmed;
+      model.research.agent = "GPT_SITES_EVIDENCE_RESEARCH_V3";
+      const correction = "product: агент превратил название бренда в конкретное рекламируемое предложение; проверьте формулировку";
+      if (!model.assumptions.includes(correction)) model.assumptions.push(correction);
+      model.missing_questions = model.missing_questions.filter((item) => !item.includes("предложение"));
+      if (!model.research.completed_fields.includes("product")) model.research.completed_fields.push("product");
+      changed = true;
+    }
+  }
+
+  const audienceEvidence = model?.field_evidence?.audience;
+  if (model && audienceEvidence) {
+    const inferred = inferDecisionMakers(audienceEvidence.quote);
+    const needsCorrection = isUnprocessedAudience(model.audience, audienceEvidence.quote)
       || (model.research.agent === "GPT_SITES_EVIDENCE_RESEARCH_V2" && inferred !== model.audience);
     if (inferred && needsCorrection) {
       model.audience = inferred;
-      evidence.confidence = "MEDIUM";
-      delete evidence.owner_confirmed;
-      model.research.agent = "GPT_SITES_EVIDENCE_RESEARCH_V2";
+      audienceEvidence.confidence = "MEDIUM";
+      delete audienceEvidence.owner_confirmed;
+      if (model.research.agent !== "GPT_SITES_EVIDENCE_RESEARCH_V3") {
+        model.research.agent = "GPT_SITES_EVIDENCE_RESEARCH_V2";
+      }
       const correction = "audience: агент выделил роли из evidence; проверьте соответствие реальному решению о покупке";
       if (!model.assumptions.includes(correction)) model.assumptions.push(correction);
       changed = true;
@@ -114,12 +149,16 @@ function migrateDocument(state: P0Document) {
   const strategy = state.strategy;
   if (draft && strategy && model) {
     const names = buildCampaignNames(model.product, strategy.geography, model.qualified_result);
-    if (isLegacySearchName(draft.campaign_name)) {
+    if (isLegacySearchName(draft.campaign_name) || (previousProduct && String(draft.campaign_name).startsWith(`${previousProduct} ·`))) {
       draft.campaign_name = names.campaignName;
       changed = true;
     }
     if (isLegacySearchName(draft.group_name)) {
       draft.group_name = names.groupName;
+      changed = true;
+    }
+    if (previousProduct && draft.ad_title === previousProduct) {
+      draft.ad_title = buildAdTitle(model.product);
       changed = true;
     }
   }
@@ -538,9 +577,27 @@ function bestEvidence(rows: Array<{ text: string; url: string }>, terms: string[
     .sort((a, b) => b.score - a.score || a.row.text.length - b.row.text.length)[0]?.row;
 }
 
+function brandFromSite(site: SiteAnalysis) {
+  return cleanText(site.title.split(/\s[|—–-]\s/)[0] || "", 200);
+}
+
+function bestOfferEvidence(rows: Array<{ text: string; url: string }>) {
+  return bestEvidence(rows, [
+    "участ",
+    "выстав",
+    "стенд",
+    "экспонент",
+    "participant",
+    "exhibitor",
+    "exhibition",
+    "booth",
+  ]);
+}
+
 function inferModel(site: SiteAnalysis, context: Context): BusinessModel {
   const rows = evidenceRows(site);
-  const productEvidence = { text: cleanText(site.title.split(/\s[|—–-]\s/)[0] || site.headings[0] || "", 500), url: site.url };
+  const productEvidence = bestOfferEvidence(rows);
+  const brand = brandFromSite(site);
   const audienceEvidence = bestEvidence(rows, [
     "руководител",
     "заказчик",
@@ -589,8 +646,13 @@ function inferModel(site: SiteAnalysis, context: Context): BusinessModel {
     : qualified
       ? "Информационные обращения без намерения выполнить целевое действие"
       : "";
+  const product = inferOffer(
+    brand,
+    productEvidence?.text ?? site.text_excerpt,
+    qualified,
+  );
   const facts: Record<string, { value: string; evidence?: { text: string; url: string }; confidence: string }> = {
-    product: { value: productEvidence.text, evidence: productEvidence, confidence: productEvidence.text ? "HIGH" : "LOW" },
+    product: { value: product, evidence: productEvidence, confidence: product ? "MEDIUM" : "LOW" },
     audience: { value: audience, evidence: audienceEvidence, confidence: audience ? "MEDIUM" : "LOW" },
     value: { value, evidence: valueEvidence, confidence: value ? "MEDIUM" : "LOW" },
     qualified_result: { value: qualified, evidence: resultEvidence, confidence: qualified ? "HIGH" : "LOW" },
@@ -620,7 +682,7 @@ function inferModel(site: SiteAnalysis, context: Context): BusinessModel {
       .filter(([, fact]) => !fact.value)
       .map(([name]) => questions[name]),
     research: {
-      agent: "GPT_SITES_EVIDENCE_RESEARCH_V2",
+      agent: "GPT_SITES_EVIDENCE_RESEARCH_V3",
       pages_analyzed: site.pages.length,
       sources,
       completed_fields: Object.entries(facts).filter(([, fact]) => fact.value).map(([name]) => name),

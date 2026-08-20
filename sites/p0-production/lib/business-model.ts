@@ -6,6 +6,27 @@ function joinRoles(roles: string[]) {
   return joined ? `${joined[0].toUpperCase()}${joined.slice(1)}` : "";
 }
 
+export function inferOffer(brand: unknown, evidence: unknown, qualifiedResult: unknown) {
+  const name = normalized(brand);
+  const context = normalized(`${evidence ?? ""} ${qualifiedResult ?? ""}`).toLowerCase();
+  const participation = /участ|participant|exhibitor/u.test(context);
+  const exhibition = /выстав|exhibition|expo\b/u.test(context);
+  if (!participation || !exhibition) return "";
+
+  const format = /стенд|exhibition stand|booth/u.test(context) ? "Участие со стендом" : "Участие";
+  const scope = /международ|international/u.test(context) ? "международной " : "";
+  const industry = /промышлен|industrial/u.test(context) ? "промышленной " : "";
+  return `${format} в ${scope}${industry}выставке${name ? ` ${name}` : ""}`;
+}
+
+export function isUnprocessedOffer(offer: unknown, evidence: unknown, brand: unknown) {
+  const value = normalized(offer).toLowerCase();
+  const quote = normalized(evidence).toLowerCase();
+  const name = normalized(brand).toLowerCase();
+  if (!value) return false;
+  return value === quote || (Boolean(name) && value === name);
+}
+
 export function inferDecisionMakers(evidence: unknown) {
   const text = normalized(evidence).toLowerCase();
   const roles: string[] = [];
