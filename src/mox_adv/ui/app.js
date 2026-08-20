@@ -4746,6 +4746,7 @@ fetch("/api/status")
     state.status = payload;
     state.statusError = false;
     elements.publicDemoBanner.hidden = payload.public_demo !== true;
+    if (typeof syncP0PublicBanner === "function") syncP0PublicBanner();
     if (payload.test_automation) {
       applyAutomationSettings(payload.test_automation);
     }

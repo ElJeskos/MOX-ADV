@@ -282,11 +282,33 @@ p0Elements.artifact?.addEventListener("click", (event) => {
   if (action) applyP0Action(action);
 });
 
+function syncP0PublicBanner() {
+  const banner = elements.publicDemoBanner;
+  if (!banner || banner.hidden) return;
+  const strategy = window.location.pathname === "/strategy";
+  setText(
+    banner.querySelector("strong"),
+    strategy ? "Production P0 candidate" : "Публичная демонстрация",
+  );
+  setText(
+    banner.querySelector("span"),
+    strategy
+      ? "Модуль читает реальные данные сайта, Директа и Метрики. Внешняя запись недоступна, пока production gates не разрешены."
+      : "Работает полный Dashboard, включая подключённые интеграции Яндекса. Тестовые изменения сохраняются в общей демонстрационной среде.",
+  );
+}
+
 const p0StrategyLink = document.querySelector('[data-page-link="strategy"]');
 p0StrategyLink?.addEventListener("click", () => {
+  window.setTimeout(syncP0PublicBanner, 0);
   if (!state.p0Production) loadP0();
 });
+document.querySelectorAll('[data-page-link]:not([data-page-link="strategy"])').forEach((link) => {
+  link.addEventListener("click", () => window.setTimeout(syncP0PublicBanner, 0));
+});
 window.addEventListener("popstate", () => {
+  window.setTimeout(syncP0PublicBanner, 0);
   if (window.location.pathname === "/strategy" && !state.p0Production) loadP0();
 });
+syncP0PublicBanner();
 if (window.location.pathname === "/strategy") loadP0();
