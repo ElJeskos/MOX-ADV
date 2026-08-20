@@ -12,7 +12,6 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from mox_adv.control_state import ControlRejected
-from mox_adv.p0_production import P0ProductionError
 from mox_adv.ui_campaign import DashboardCampaignRejected
 from mox_adv.ui_dashboard import DashboardApplication
 from mox_adv.ui_service import UiRunRejected, UiRunService
@@ -22,7 +21,6 @@ ASSET_ROOT = Path(__file__).with_name("ui")
 _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/overview": ("index.html", "text/html; charset=utf-8"),
-    "/strategy": ("index.html", "text/html; charset=utf-8"),
     "/cycle": ("index.html", "text/html; charset=utf-8"),
     "/autopilot": ("index.html", "text/html; charset=utf-8"),
     "/rules": ("index.html", "text/html; charset=utf-8"),
@@ -33,7 +31,6 @@ _ASSETS = {
     "/prototype/mox-adv": ("prototype.html", "text/html; charset=utf-8"),
     "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
-    "/assets/p0-app.js": ("p0-app.js", "text/javascript; charset=utf-8"),
     "/assets/prototype.css": ("prototype.css", "text/css; charset=utf-8"),
     "/assets/prototype.js": ("prototype.js", "text/javascript; charset=utf-8"),
 }
@@ -115,18 +112,6 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 self.server.dashboard.control_overview(),
             )
-            return
-        if path == "/api/p0":
-            try:
-                result = self.server.dashboard.p0_overview()
-            except P0ProductionError as error:
-                self._send_error(
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                    error.reason_code,
-                    str(error),
-                )
-                return
-            self._send_json(HTTPStatus.OK, result)
             return
         if path == "/api/campaigns":
             self._send_json(
@@ -292,7 +277,6 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             "/api/control-plane/mandates",
             "/api/control-plane/approvals",
             "/api/proposals/revise",
-            "/api/p0",
             "/api/campaign",
             "/api/campaigns",
             "/api/workflows/campaign",
@@ -309,10 +293,6 @@ class UiRequestHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/runs/stream":
                 self._stream_production_run(self._read_json())
-                return
-            if path == "/api/p0":
-                result = self.server.dashboard.apply_p0_action(self._read_json())
-                self._send_json(HTTPStatus.CREATED, result)
                 return
             if path == "/api/runs":
                 payload = self._read_json()
@@ -489,13 +469,6 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             else:
                 result = self.server.dashboard.run_full_evidence()
             self._send_json(HTTPStatus.CREATED, result)
-            return
-        except P0ProductionError as error:
-            self._send_error(
-                HTTPStatus.BAD_REQUEST,
-                error.reason_code,
-                str(error),
-            )
             return
         except UiRunRejected as error:
             status = (

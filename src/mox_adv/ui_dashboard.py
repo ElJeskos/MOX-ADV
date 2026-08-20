@@ -22,16 +22,7 @@ from mox_adv.control_state import (
 )
 from mox_adv.mandate_signing import HMACMandateSigner
 from mox_adv.mandate_store import DurableMandateAuthority
-from mox_adv.p0_production import (
-    HttpsSiteReader,
-    P0ProductionModule,
-    P0ProductionStore,
-    UnavailableP0CampaignCreator,
-    YandexDirectP0CampaignCreator,
-    YandexP0ContextReader,
-)
 from mox_adv.trust_boundary import required_capability_contract
-from mox_adv.yandex_read import YandexProductionReader
 from mox_adv.ui_campaign import (
     DashboardCampaignLaunchHistory,
     DashboardCampaignRejected,
@@ -116,47 +107,7 @@ class DashboardApplication:
             policy_path=POLICY_PATH,
             campaign_safety=campaign_safety,
         )
-        production_reader = (
-            getattr(self.run_service, "production_reader", None)
-            or YandexProductionReader()
-        )
-        p0_store = P0ProductionStore(self.runs_root / "ui-p0-production.sqlite3")
-        try:
-            direct_account = (
-                production_reader.credential_provider
-                .snapshot()
-                .direct_configuration_binding()
-            )
-        except RuntimeError as error:
-            p0_creator = UnavailableP0CampaignCreator([str(error)])
-        else:
-            p0_creator = YandexDirectP0CampaignCreator(
-                policy=self.policy,
-                direct_account=direct_account,
-                store=p0_store,
-            )
-        self.p0 = P0ProductionModule(
-            store=p0_store,
-            context_reader=YandexP0ContextReader(
-                production_reader,
-                self.policy,
-            ),
-            site_reader=HttpsSiteReader(),
-            creator=p0_creator,
-        )
         self._reconcile_completed_goal_evidence()
-
-    def p0_overview(self) -> dict[str, Any]:
-        """Return the separate production-candidate state and real context."""
-
-        return self.p0.overview()
-
-    def apply_p0_action(self, value: Mapping[str, Any]) -> dict[str, Any]:
-        """Apply one authenticated production-candidate action."""
-
-        if str(value.get("action", "")) == "confirm_creation":
-            self.authenticator.authenticate()
-        return self.p0.apply(value)
 
     def control_overview(self) -> dict[str, Any]:
         return self.control.overview(
