@@ -33,8 +33,6 @@ _ASSETS = {
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/assets/prototype.css": ("prototype.css", "text/css; charset=utf-8"),
     "/assets/prototype.js": ("prototype.js", "text/javascript; charset=utf-8"),
-    "/assets/p0-prototype.css": ("p0-prototype.css", "text/css; charset=utf-8"),
-    "/assets/p0-prototype.js": ("p0-prototype.js", "text/javascript; charset=utf-8"),
 }
 
 
