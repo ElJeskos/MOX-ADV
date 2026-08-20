@@ -11,13 +11,25 @@ export function minimumWeeklyBudgetRub(currencies: CurrencyRow[]) {
   return micros / 1_000_000;
 }
 
+export function weeklyBudgetValidationMessage(value: unknown, minimum: number) {
+  const entered = String(value ?? "").trim();
+  if (!entered) return "";
+  const budget = Number(entered);
+  if (!Number.isFinite(budget) || budget <= 0) {
+    return "Введите положительный недельный бюджет.";
+  }
+  if (budget < minimum) {
+    return `Минимальный недельный бюджет в Яндекс Директе — ${minimum} ₽. Укажите ${minimum} ₽ или больше.`;
+  }
+  return "";
+}
+
 export function validateWeeklyBudgetRub(value: unknown, minimum: number) {
+  const message = weeklyBudgetValidationMessage(value, minimum);
+  if (message) throw new Error(message);
   const budget = Number(value);
   if (!Number.isFinite(budget) || budget <= 0) {
     throw new Error("Недельный бюджет должен быть положительным числом.");
-  }
-  if (budget < minimum) {
-    throw new Error(`Недельный бюджет должен быть не меньше ${minimum} ₽ — это актуальный минимум Яндекс Директа для RUB.`);
   }
   return budget;
 }

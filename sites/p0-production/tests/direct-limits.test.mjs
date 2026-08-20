@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { minimumWeeklyBudgetRub, validateWeeklyBudgetRub } from "../lib/direct-limits.ts";
+import {
+  minimumWeeklyBudgetRub,
+  validateWeeklyBudgetRub,
+  weeklyBudgetValidationMessage,
+} from "../lib/direct-limits.ts";
 
 const currencies = [{
   Currency: "RUB",
@@ -18,7 +22,16 @@ test("reads the current RUB minimum from the Direct currencies dictionary", () =
 test("rejects a weekly budget below the live Direct minimum", () => {
   assert.throws(
     () => validateWeeklyBudgetRub("100", 300),
-    /не меньше 300 ₽/u,
+    /Укажите 300 ₽ или больше/u,
   );
   assert.equal(validateWeeklyBudgetRub("300", 300), 300);
+});
+
+test("returns an inline message while the owner enters an invalid budget", () => {
+  assert.equal(weeklyBudgetValidationMessage("", 300), "");
+  assert.equal(
+    weeklyBudgetValidationMessage("200", 300),
+    "Минимальный недельный бюджет в Яндекс Директе — 300 ₽. Укажите 300 ₽ или больше.",
+  );
+  assert.equal(weeklyBudgetValidationMessage("300", 300), "");
 });

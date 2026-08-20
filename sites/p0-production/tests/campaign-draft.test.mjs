@@ -4,19 +4,26 @@ import test from "node:test";
 import {
   buildCampaignNames,
   hasDuplicateCampaignName,
+  isCampaignNameWithGeography,
   isLegacySearchName,
 } from "../lib/campaign-draft.ts";
 
-test("names campaign and group by business meaning without duplicate channel markers", () => {
+test("keeps campaign name and geography as separate meanings", () => {
   assert.deepEqual(buildCampaignNames("ИННОПРОМ", "Россия", "Заявка на участие"), {
-    campaignName: "ИННОПРОМ · Россия",
+    campaignName: "ИННОПРОМ",
     groupName: "Заявка на участие",
   });
+  assert.equal(
+    buildCampaignNames("ИННОПРОМ", "Москва", "Заявка на участие").campaignName,
+    "ИННОПРОМ",
+  );
 });
 
-test("recognizes legacy names ending in the search channel marker", () => {
+test("recognizes legacy compound campaign names", () => {
   assert.equal(isLegacySearchName("ИННОПРОМ · Поиск"), true);
   assert.equal(isLegacySearchName("ИННОПРОМ · Россия"), false);
+  assert.equal(isCampaignNameWithGeography("ИННОПРОМ · Россия", "Россия"), true);
+  assert.equal(isCampaignNameWithGeography("ИННОПРОМ", "Россия"), false);
 });
 
 test("blocks a duplicate active campaign name independent of case", () => {

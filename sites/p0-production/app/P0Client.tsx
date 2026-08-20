@@ -5,6 +5,7 @@ import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { buildAdText, buildAdTitle } from "../lib/ad-copy";
 import { buildCampaignNames } from "../lib/campaign-draft";
+import { weeklyBudgetValidationMessage } from "../lib/direct-limits";
 
 type Payload = {
   revision: number;
@@ -223,11 +224,11 @@ function ModelStep({ payload, apply, back }: { payload: Payload; apply: (action:
     <div className="research-strip"><Metric label="Исследовано" value={`${research.pages_analyzed || 1} страниц`} copy="First-party public HTTPS" /><Metric label="Источники" value={String(research.sources?.length || 0)} copy={(research.sources || []).join(" · ")} /><Metric label="Сделано агентом" value={`${research.completed_fields?.length || 0} / 5 полей`} copy="Человеку — подтверждение и разногласия" /></div>
     {model.assumptions?.length > 0 && <div className="assumption"><strong>Где нужна проверка</strong><span>{model.assumptions.join(" · ")}</span></div>}
     <form className="form two" onSubmit={submit}>
-      <Field wide label="Продукт или предложение" name="product" value={model.product}><Evidence model={model} field="product" /></Field>
-      <Field label="Кто принимает решение · роли выделены агентом" name="audience" value={model.audience}><Evidence model={model} field="audience" /></Field>
+      <Field wide label="Рекламируемое предложение" name="product" value={model.product}><Evidence model={model} field="product" /></Field>
+      <Field label="Лица, принимающие решение" name="audience" value={model.audience}><Evidence model={model} field="audience" /></Field>
       <Field label="Ценность для покупателя" name="value" value={model.value}><Evidence model={model} field="value" /></Field>
       <Field label="Квалифицированный результат" name="qualified_result" value={model.qualified_result}><Evidence model={model} field="qualified_result" /></Field>
-      <Field label="Что не является результатом" name="exclusions" value={model.exclusions}><Evidence model={model} field="exclusions" /></Field>
+      <Field label="Исключения из результата" name="exclusions" value={model.exclusions}><Evidence model={model} field="exclusions" /></Field>
       <div className="wide"><Actions revision={payload.revision} label="Подтвердить вывод агента" back={back} submit /></div>
     </form>
   </>;
@@ -242,6 +243,8 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
   const site = payload.state.site_analysis || {};
   const existing = payload.state.strategy || {};
   const minimumWeeklyBudget = Number(payload.context.direct?.minimum_weekly_budget_rub || 1);
+  const [weeklyBudget, setWeeklyBudget] = useState(String(existing.weekly_budget_rub || ""));
+  const weeklyBudgetError = weeklyBudgetValidationMessage(weeklyBudget, minimumWeeklyBudget);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -252,15 +255,15 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
     <ArtifactHead eyebrow="Шаг 3 · Human Decision Gate" title="Агент подготовил Campaign Strategy" copy="Безопасные поля уже предложены. Человек задаёт только период и денежные границы." />
     <div className="decision-packet"><article><span>1</span><div><strong>Период размещения</strong><p>Укажите допустимое рекламное окно. До решения внешняя запись невозможна.</p></div></article><article><span>2</span><div><strong>Экономика кампании</strong><p>В реальном срезе недостаточно оснований изобретать бюджет и CPA. Зафиксируйте максимальную экспозицию.</p></div></article></div>
     <form className="form two" onSubmit={submit}>
-      <label className="wide"><span>Бизнес-цель · предложено агентом</span><input name="goal" required defaultValue={existing.goal || `Получать: ${model.qualified_result}`} /></label>
-      <label><span>География · предложено агентом</span><select name="geography" defaultValue={existing.geography || "Россия"}><option>Россия</option><option>Москва</option><option>Санкт-Петербург</option></select></label>
-      <label><span>Посадочная страница · проверена агентом</span><input type="url" name="landing_page" required defaultValue={existing.landing_page || site.url} /></label>
-      <label><span>Дата начала · решение владельца</span><input type="date" name="period_start" required defaultValue={existing.period_start || ""} /></label>
-      <label><span>Дата окончания · решение владельца</span><input type="date" name="period_end" required defaultValue={existing.period_end || ""} /></label>
-      <label><span>Недельный бюджет, ₽ · решение владельца</span><input type="number" min={minimumWeeklyBudget} name="weekly_budget_rub" required defaultValue={existing.weekly_budget_rub || ""} /><small>Минимум Direct для RUB сейчас: {minimumWeeklyBudget} ₽ в неделю.</small></label>
-      <label><span>Целевой CPA, ₽ · решение владельца</span><input type="number" min="1" name="target_cpa_rub" required defaultValue={existing.target_cpa_rub || ""} /></label>
-      <Field wide label="Основное сообщение · предложено агентом" name="message" value={existing.message || model.value} />
-      <div className="wide"><Actions revision={payload.revision} label="Принять критические решения" back={back} submit /></div>
+      <label className="wide"><span>Бизнес-цель</span><input name="goal" required defaultValue={existing.goal || `Получать: ${model.qualified_result}`} /></label>
+      <label><span>География</span><select name="geography" defaultValue={existing.geography || "Россия"}><option>Россия</option><option>Москва</option><option>Санкт-Петербург</option></select></label>
+      <label><span>Посадочная страница</span><input type="url" name="landing_page" required defaultValue={existing.landing_page || site.url} /></label>
+      <label><span>Дата начала</span><input type="date" name="period_start" required defaultValue={existing.period_start || ""} /></label>
+      <label><span>Дата окончания</span><input type="date" name="period_end" required defaultValue={existing.period_end || ""} /></label>
+      <label><span>Недельный бюджет, ₽</span><input className={weeklyBudgetError ? "field-invalid" : ""} type="number" min={minimumWeeklyBudget} name="weekly_budget_rub" required value={weeklyBudget} aria-invalid={Boolean(weeklyBudgetError)} aria-describedby="weekly-budget-help" onChange={(event) => setWeeklyBudget(event.target.value)} /><small id="weekly-budget-help" className={weeklyBudgetError ? "field-error" : ""} role={weeklyBudgetError ? "alert" : undefined}>{weeklyBudgetError || `Минимум Direct для RUB сейчас: ${minimumWeeklyBudget} ₽ в неделю.`}</small></label>
+      <label><span>Целевой CPA, ₽</span><input type="number" min="1" name="target_cpa_rub" required defaultValue={existing.target_cpa_rub || ""} /></label>
+      <Field wide label="Основное сообщение" name="message" value={existing.message || model.value} />
+      <div className="wide"><Actions revision={payload.revision} label="Принять критические решения" disabled={Boolean(weeklyBudgetError)} back={back} submit /></div>
     </form>
   </>;
 }
@@ -283,12 +286,12 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
     <ArtifactHead eyebrow="Шаг 4 · Campaign Draft" title="Точная publish projection" copy="Агент подготовил все поддерживаемые поля. Ничего не будет молча отброшено." />
     <div className="context-strip"><Metric label="Цель" value={strategy.goal} copy={model.qualified_result} /><Metric label="Бюджет" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy="Канал: поиск Яндекс Директа · сети выключены" /><Metric label="Безопасный финиш" value="State = SUSPENDED" copy="resume отсутствует" /></div>
     <form className="form two" onSubmit={submit}>
-      <label><span>Название кампании · предложение и география</span><input name="campaign_name" required defaultValue={existing.campaign_name || names.campaignName} /></label>
-      <label><span>Название группы · намерение аудитории</span><input name="group_name" required defaultValue={existing.group_name || names.groupName} /></label>
-      <label className="wide"><span>Ключевая фраза · подготовлена агентом</span><input name="keyword" required defaultValue={existing.keyword || `${model.product}${participation ? " стать участником" : ""}`.toLowerCase()} /></label>
-      <label className="wide"><span>Минус-фразы · выведены из исключений</span><input name="negative_keywords" required defaultValue={existing.negative_keywords || "бесплатно, вакансии, посетитель, билет"} /></label>
-      <label className="wide"><span>Заголовок объявления · до 56 символов</span><input name="ad_title" maxLength={56} required defaultValue={adTitle} /></label>
-      <Field wide label="Текст объявления · до 81 символа, без обрыва слов" name="ad_text" maxLength={81} value={adText} />
+      <label><span>Название кампании</span><input name="campaign_name" required defaultValue={existing.campaign_name || names.campaignName} /></label>
+      <label><span>Название группы объявлений</span><input name="group_name" required defaultValue={existing.group_name || names.groupName} /></label>
+      <label className="wide"><span>Ключевая фраза</span><input name="keyword" required defaultValue={existing.keyword || `${model.product}${participation ? " стать участником" : ""}`.toLowerCase()} /></label>
+      <label className="wide"><span>Минус-фразы</span><input name="negative_keywords" required defaultValue={existing.negative_keywords || "бесплатно, вакансии, посетитель, билет"} /></label>
+      <label className="wide"><span>Заголовок объявления</span><input name="ad_title" maxLength={56} required defaultValue={adTitle} /><small>До 56 символов.</small></label>
+      <Field wide label="Текст объявления" name="ad_text" maxLength={81} value={adText}><small>До 81 символа; слова не обрезаются.</small></Field>
       <div className="wide"><Actions revision={payload.revision} label="Зафиксировать проекцию" back={back} submit /></div>
     </form>
   </>;

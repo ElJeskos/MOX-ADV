@@ -8,18 +8,22 @@ const REGION_IDS: Record<string, number> = {
   "санкт-петербург": 2,
 };
 
-export function buildCampaignNames(product: unknown, geography: unknown, qualifiedResult: unknown) {
+export function buildCampaignNames(product: unknown, _geography: unknown, qualifiedResult: unknown) {
   const offer = text(product) || "Новая кампания";
-  const region = text(geography) || "Россия";
   const participation = /участ|participant/u.test(text(qualifiedResult).toLowerCase());
   return {
-    campaignName: `${offer} · ${region}`,
+    campaignName: offer,
     groupName: participation ? "Заявка на участие" : "Основной коммерческий спрос",
   };
 }
 
 export function isLegacySearchName(value: unknown) {
   return /\s·\sПоиск$/iu.test(text(value));
+}
+
+export function isCampaignNameWithGeography(value: unknown, geography: unknown) {
+  const region = text(geography);
+  return Boolean(region) && text(value).endsWith(` · ${region}`);
 }
 
 export function hasDuplicateCampaignName(existingNames: unknown[], candidate: unknown) {

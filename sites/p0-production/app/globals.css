@@ -118,6 +118,8 @@ body::before {
 .form input, .form select { height: 44px; padding: 0 13px; }
 .form textarea { min-height: 88px; padding: 12px 13px; resize: vertical; }
 .form input:focus, .form textarea:focus, .form select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(17,122,77,.1); }
+.form input.field-invalid { border-color: var(--danger); background: #fff8f7; box-shadow: 0 0 0 3px rgba(178,52,43,.08); }
+.form label > small.field-error { color: var(--danger); font-weight: 700; }
 .agent-work { padding: 15px; border: 1px solid #acd1ba; border-radius: 8px; background: var(--green-soft); }
 .agent-work strong { font-size: 10px; }
 .agent-work p { margin: 5px 0 0; color: var(--muted); font-size: 8px; line-height: 1.5; }

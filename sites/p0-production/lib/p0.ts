@@ -10,6 +10,7 @@ import {
   buildCampaignNames,
   buildPublishProjection,
   hasDuplicateCampaignName,
+  isCampaignNameWithGeography,
   isLegacySearchName,
 } from "./campaign-draft";
 import { minimumWeeklyBudgetRub, validateWeeklyBudgetRub } from "./direct-limits";
@@ -159,20 +160,28 @@ function migrateDocument(state: P0Document) {
   const draft = state.draft;
   const strategy = state.strategy;
   if (draft && strategy && model) {
+    let draftChanged = false;
     const names = buildCampaignNames(model.product, strategy.geography, model.qualified_result);
-    if (isLegacySearchName(draft.campaign_name) || (previousProduct && String(draft.campaign_name).startsWith(`${previousProduct} ·`))) {
+    if (
+      isLegacySearchName(draft.campaign_name)
+      || isCampaignNameWithGeography(draft.campaign_name, strategy.geography)
+      || (previousProduct && String(draft.campaign_name).startsWith(`${previousProduct} ·`))
+    ) {
       draft.campaign_name = names.campaignName;
       changed = true;
+      draftChanged = true;
     }
     if (isLegacySearchName(draft.group_name)) {
       draft.group_name = names.groupName;
       changed = true;
+      draftChanged = true;
     }
     if (previousProduct && draft.ad_title === previousProduct) {
       draft.ad_title = buildAdTitle(model.product);
       changed = true;
+      draftChanged = true;
     }
-    if ((draft.publish_projection as Record<string, unknown> | undefined)?.schema_version !== "p0-direct-projection-v1" || previousProduct) {
+    if ((draft.publish_projection as Record<string, unknown> | undefined)?.schema_version !== "p0-direct-projection-v1" || previousProduct || draftChanged) {
       draft.publish_projection = buildPublishProjection(
         model as unknown as Record<string, unknown>,
         strategy,
