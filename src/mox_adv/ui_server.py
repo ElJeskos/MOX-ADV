@@ -28,8 +28,11 @@ _ASSETS = {
     "/campaign": ("index.html", "text/html; charset=utf-8"),
     "/workflows": ("index.html", "text/html; charset=utf-8"),
     "/control": ("index.html", "text/html; charset=utf-8"),
+    "/prototype/mox-adv": ("prototype.html", "text/html; charset=utf-8"),
     "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/assets/prototype.css": ("prototype.css", "text/css; charset=utf-8"),
+    "/assets/prototype.js": ("prototype.js", "text/javascript; charset=utf-8"),
 }
 
 
