@@ -27,6 +27,9 @@ test("right Campaign Draft drawer has a keyboard dialog, focus trap, Escape clos
   assert.match(clientSource, /event\.key !== "Tab"/u);
   assert.match(clientSource, /querySelectorAll<HTMLElement>/u);
   assert.match(clientSource, /DraftFieldRegistryDisclosure registry=\{recommendationSet\.field_registry\}/u);
+  assert.match(clientSource, /recommendationSet\.field_registry\?\.fields/u);
+  assert.match(clientSource, /field\.editable === true && typeof field\.input_name === "string"/u);
+  assert.doesNotMatch(clientSource, /\["campaign_name", "group_name", "negative_keywords", "keyword", "ad_title", "ad_text"\]/u);
   assert.match(disclosureSource, /field\.editable === true/u);
   assert.match(disclosureSource, /NOT_PRESENT/u);
 });

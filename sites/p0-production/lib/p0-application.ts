@@ -20,7 +20,7 @@ import {
 } from "./campaign-draft.ts";
 import {
   DIRECT_V501_DRAFT_FIELD_REGISTRY,
-  editableDraftFieldNames,
+  isCanonicalDirectV501DraftFieldRegistry,
   nextDraftRevisionId,
 } from "./campaign-draft-fields.ts";
 import {
@@ -29,6 +29,7 @@ import {
   directProjectionMaterialDelta,
   fingerprintDirectProjection,
   preserveSelectedConditionalProjection,
+  resolveActivePlaybookReleaseIdentity,
   type CampaignRecommendationSet,
   type DirectCapabilitySnapshot,
 } from "./campaign-fanout.ts";
@@ -366,6 +367,152 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function activePlaybookReleaseIdentity(recommendationSet: CampaignRecommendationSet) {
+  const release = record(recommendationSet.playbook_release);
+  const appliedRuleIds = Array.isArray(release.applied_rule_ids)
+    ? release.applied_rule_ids.map(String)
+    : [];
+  const explicitRuleIdentities = Array.isArray(release.applied_rule_identities)
+    ? release.applied_rule_identities.map((identity) => ({
+        rule_id: String(record(identity).rule_id ?? ""),
+        rule_version: String(record(identity).rule_version ?? ""),
+      }))
+    : null;
+  const compatibleRuleIdentities = appliedRuleIds.flatMap((ruleId) => [...new Set(recommendationSet.drafts
+    .filter((draft) => draft.playbook_rule_id === ruleId)
+    .map((draft) => String(draft.playbook_rule_version ?? "")))]
+    .sort()
+    .map((ruleVersion) => ({ rule_id: ruleId, rule_version: ruleVersion })));
+  return {
+    status: String(release.status ?? ""),
+    release_id: release.release_id === null ? null : String(release.release_id ?? ""),
+    release_version: release.release_version === null ? null : String(release.release_version ?? ""),
+    content_digest: release.content_digest === null ? null : String(release.content_digest ?? ""),
+    applied_governed_rule_identities: explicitRuleIdentities ?? compatibleRuleIdentities,
+  };
+}
+
+function draftReplacementSemanticKey(draft: CampaignRecommendationSet["drafts"][number]) {
+  const variant = record(draft.variant);
+  const treatment = record(draft.treatment_delta);
+  const controlBasis = record(variant.control_basis);
+  return JSON.stringify({
+    delivery_key_fingerprint: String(draft.delivery_key_fingerprint ?? ""),
+    demand_cluster_ids: Array.isArray(draft.demand_cluster_ids) ? draft.demand_cluster_ids.map(String).sort() : [],
+    capability_profile_id: draft.capability_profile_id,
+    capability_profile_version: draft.capability_profile_version,
+    direct_capability_snapshot_id: draft.direct_capability_snapshot_id ?? null,
+    variant: variant.kind === "CONTROL"
+      ? { kind: "CONTROL", control_basis: String(controlBasis.kind ?? "") }
+      : {
+          kind: String(variant.kind ?? ""),
+          changed_family: String(treatment.changed_family ?? ""),
+          expected_changed_fields: Array.isArray(treatment.expected_changed_fields)
+            ? treatment.expected_changed_fields.map(String).sort()
+            : [],
+        },
+  });
+}
+
+function recommendationRecalculationChanges(
+  previousSet: CampaignRecommendationSet,
+  currentSet: CampaignRecommendationSet,
+) {
+  const previous = previousSet.drafts;
+  const current = currentSet.drafts;
+  const previousBySemanticKey = new Map<string, typeof previous>();
+  const currentBySemanticKey = new Map<string, typeof current>();
+  for (const draft of previous) {
+    const key = draftReplacementSemanticKey(draft);
+    previousBySemanticKey.set(key, [...(previousBySemanticKey.get(key) ?? []), draft]);
+  }
+  for (const draft of current) {
+    const key = draftReplacementSemanticKey(draft);
+    currentBySemanticKey.set(key, [...(currentBySemanticKey.get(key) ?? []), draft]);
+  }
+  const matchedPreviousIds = new Set<string>();
+  const matchedCurrentIds = new Set<string>();
+  const changes: Array<Record<string, unknown>> = [];
+  for (const [key, previousMatches] of previousBySemanticKey) {
+    const currentMatches = currentBySemanticKey.get(key) ?? [];
+    if (previousMatches.length !== 1 || currentMatches.length !== 1) continue;
+    const previousDraft = previousMatches[0];
+    const currentDraft = currentMatches[0];
+    matchedPreviousIds.add(previousDraft.draft_id);
+    matchedCurrentIds.add(currentDraft.draft_id);
+    changes.push({
+      change_type: "REPLACED",
+      previous_draft_id: previousDraft.draft_id,
+      current_draft_id: currentDraft.draft_id,
+      previous_draft_revision_id: previousDraft.draft_revision_id,
+      current_draft_revision_id: currentDraft.draft_revision_id,
+      previous_publish_fingerprint: previousDraft.publish_fingerprint,
+      current_publish_fingerprint: currentDraft.publish_fingerprint,
+      previous_score: previousDraft.viability_score?.score ?? null,
+      current_score: currentDraft.viability_score?.score ?? null,
+      previous_rank: previousDraft.viability_score?.rank ?? null,
+      current_rank: currentDraft.viability_score?.rank ?? null,
+      fields: directProjectionMaterialDelta(previousDraft.publish_projection, currentDraft.publish_projection),
+      policy_reason: {
+        code: "ACTIVE_PLAYBOOK_DRAFT_REPLACED",
+        message: "Active curated playbook lineage changed; a Draft with the same delivery, capability and variant semantics was regenerated.",
+      },
+    });
+  }
+  for (const previousDraft of previous.filter((draft) => !matchedPreviousIds.has(draft.draft_id))) {
+    changes.push({
+      change_type: "REMOVED",
+      previous_draft_id: previousDraft.draft_id,
+      current_draft_id: null,
+      previous_draft_revision_id: previousDraft.draft_revision_id,
+      current_draft_revision_id: null,
+      previous_publish_fingerprint: previousDraft.publish_fingerprint,
+      current_publish_fingerprint: null,
+      previous_score: previousDraft.viability_score?.score ?? null,
+      current_score: null,
+      previous_rank: previousDraft.viability_score?.rank ?? null,
+      current_rank: null,
+      fields: [],
+      policy_reason: {
+        code: "ACTIVE_PLAYBOOK_DRAFT_REMOVED",
+        message: "The previous Draft has no corresponding delivery, capability and variant semantics in the active release.",
+      },
+    });
+  }
+  for (const currentDraft of current.filter((draft) => !matchedCurrentIds.has(draft.draft_id))) {
+    changes.push({
+      change_type: "ADDED",
+      previous_draft_id: null,
+      current_draft_id: currentDraft.draft_id,
+      previous_draft_revision_id: null,
+      current_draft_revision_id: currentDraft.draft_revision_id,
+      previous_publish_fingerprint: null,
+      current_publish_fingerprint: currentDraft.publish_fingerprint,
+      previous_score: null,
+      current_score: currentDraft.viability_score?.score ?? null,
+      previous_rank: null,
+      current_rank: currentDraft.viability_score?.rank ?? null,
+      fields: [],
+      policy_reason: {
+        code: "ACTIVE_PLAYBOOK_DRAFT_ADDED",
+        message: "The active release introduced a Draft with new delivery, capability or variant semantics.",
+      },
+    });
+  }
+  return changes.sort((left, right) => `${left.previous_draft_id ?? ""}:${left.current_draft_id ?? ""}`
+    .localeCompare(`${right.previous_draft_id ?? ""}:${right.current_draft_id ?? ""}`));
+}
+
+function correspondingDraft(
+  previousDraft: Record<string, unknown> | null,
+  currentSet: CampaignRecommendationSet,
+) {
+  if (!previousDraft) return null;
+  const semanticKey = draftReplacementSemanticKey(previousDraft as CampaignRecommendationSet["drafts"][number]);
+  const matches = currentSet.drafts.filter((draft) => draftReplacementSemanticKey(draft) === semanticKey);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function requiredInput(value: unknown, label: string, maximum: number) {
@@ -1153,11 +1300,11 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
   }
 
   if (state.recommendation_set) {
-    if (!state.recommendation_set.field_registry) {
+    if (!Object.hasOwn(state.recommendation_set, "field_registry")) {
       state.recommendation_set.field_registry = DIRECT_V501_DRAFT_FIELD_REGISTRY;
       changed = true;
-    } else if (state.recommendation_set.field_registry.schema_version !== DIRECT_V501_DRAFT_FIELD_REGISTRY.schema_version) {
-      lineageError("Recommendation Set использует неподдерживаемый Direct field registry.");
+    } else if (!isCanonicalDirectV501DraftFieldRegistry(state.recommendation_set.field_registry)) {
+      lineageError("Recommendation Set field registry не совпадает с canonical Direct v501 registry.");
     }
   }
 
@@ -1806,55 +1953,33 @@ export class P0Application {
       }
       const recalculatedAt = this.adapters.now();
       const previousSet = state.recommendation_set;
-      const currentSet = await buildCampaignRecommendationSet({
-        model: state.business_model as unknown as Record<string, unknown>,
-        strategy: state.strategy as unknown as Record<string, unknown>,
-        analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
-        playbookReleases: await this.playbookReleases(),
-        directCapabilitySnapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
-        generatedAt: recalculatedAt,
-      });
-      const changes = previousSet.drafts.flatMap((previousDraft) => {
-        if (previousDraft.visibility !== "VISIBLE") return [];
-        const replacement = currentSet.drafts.find((candidate) => candidate.generation_order === previousDraft.generation_order);
-        if (!replacement || replacement.publish_fingerprint === previousDraft.publish_fingerprint) return [];
-        const fields = directProjectionMaterialDelta(previousDraft.publish_projection, replacement.publish_projection);
-        return fields.length ? [{
-          previous_draft_id: previousDraft.draft_id,
-          current_draft_id: replacement.draft_id,
-          previous_draft_revision_id: previousDraft.draft_revision_id,
-          current_draft_revision_id: replacement.draft_revision_id,
-          previous_publish_fingerprint: previousDraft.publish_fingerprint,
-          current_publish_fingerprint: replacement.publish_fingerprint,
-          previous_score: previousDraft.viability_score?.score ?? null,
-          current_score: replacement.viability_score?.score ?? null,
-          previous_rank: previousDraft.viability_score?.rank ?? null,
-          current_rank: replacement.viability_score?.rank ?? null,
-          fields,
-          policy_reason: {
-            code: "ACTIVE_PLAYBOOK_PROJECTION_REGENERATED",
-            message: "Active curated playbook lineage changed; the fixed Recommendation Set was regenerated and fully rescored.",
-          },
-        }] : [];
-      });
-      const releaseChanged = previousSet.playbook_release.content_digest !== currentSet.playbook_release.content_digest
-        || previousSet.playbook_release.status !== currentSet.playbook_release.status;
-      if (releaseChanged || previousSet.recommendation_set_id !== currentSet.recommendation_set_id) {
-        const selectedGenerationOrder = state.draft?.generation_order;
+      const playbookReleases = await this.playbookReleases();
+      const releaseChanged = JSON.stringify(activePlaybookReleaseIdentity(previousSet))
+        !== JSON.stringify(await resolveActivePlaybookReleaseIdentity(playbookReleases));
+      let changes: Array<Record<string, unknown>> = [];
+      if (releaseChanged) {
+        const currentSet = await buildCampaignRecommendationSet({
+          model: state.business_model as unknown as Record<string, unknown>,
+          strategy: state.strategy as unknown as Record<string, unknown>,
+          analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
+          playbookReleases,
+          directCapabilitySnapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
+          generatedAt: recalculatedAt,
+        });
+        changes = recommendationRecalculationChanges(previousSet, currentSet);
+        const replacement = correspondingDraft(state.draft, currentSet);
         state.recommendation_set = currentSet;
-        state.draft = selectedGenerationOrder === undefined
-          ? null
-          : currentSet.drafts.find((candidate) => candidate.generation_order === selectedGenerationOrder) ?? null;
+        state.draft = replacement;
         state.shortlist = null;
         state.external_write_intent = null;
       }
       state.recommendation_recalculation = {
         schema_version: "p0-recommendation-recalculation-v1",
-        material_change: changes.length > 0,
-        message: changes.length
-          ? "Активный curated playbook изменился или был откачен; видимые неподтверждённые Drafts регенерированы с material projection delta."
-          : "Active playbook check завершён без material изменения видимой Direct projection.",
-        reason_code: changes.length ? "ACTIVE_PLAYBOOK_RELEASE_CHANGED_OR_ROLLED_BACK" : "NO_ACTIVE_PLAYBOOK_MATERIAL_CHANGE",
+        material_change: releaseChanged,
+        message: releaseChanged
+          ? "Активный curated playbook изменился или был откачен; Recommendation Set регенерирован по exact release lineage."
+          : "Active playbook check завершён без material изменения active release lineage.",
+        reason_code: releaseChanged ? "ACTIVE_PLAYBOOK_RELEASE_CHANGED_OR_ROLLED_BACK" : "NO_ACTIVE_PLAYBOOK_MATERIAL_CHANGE",
         recalculated_at: recalculatedAt,
         previous_recommendation_set_id: previousSet.recommendation_set_id,
         current_recommendation_set_id: state.recommendation_set.recommendation_set_id,
@@ -1868,7 +1993,9 @@ export class P0Application {
       if (!state.strategy || !state.business_model) {
         fail("P0_PREREQUISITE_MISSING", "Сначала подтвердите модель и Strategy.");
       }
-      const allowedDraftInputs = new Set(["draft_id", ...editableDraftFieldNames()]);
+      const editableRegistryFields = DIRECT_V501_DRAFT_FIELD_REGISTRY.fields
+        .filter((field) => field.editable && field.input_name);
+      const allowedDraftInputs = new Set(["draft_id", ...editableRegistryFields.map((field) => String(field.input_name))]);
       const unsupportedDraftInput = Object.keys(value).find((field) => !allowedDraftInputs.has(field));
       if (unsupportedDraftInput) {
         fail("P0_DRAFT_FIELD_UNSUPPORTED", `Campaign Draft field ${unsupportedDraftInput} is not editable in the current exact projection contract and was not applied.`);
@@ -1879,24 +2006,9 @@ export class P0Application {
       if (!recommendationSet || !generated) {
         fail("P0_DRAFT_INVALID", "Выбранный Campaign Draft не принадлежит текущей Strategy revision.");
       }
-      const normalizedFields = Object.fromEntries(editableDraftFieldNames().map((fieldName) => {
-        const fieldLabels: Record<string, string> = {
-          campaign_name: "Название кампании",
-          group_name: "Название группы",
-          negative_keywords: "Минус-фразы",
-          keyword: "Ключевая фраза",
-          ad_title: "Заголовок объявления",
-          ad_text: "Текст объявления",
-        };
-        const maximums: Record<string, number> = {
-          campaign_name: 255,
-          group_name: 255,
-          negative_keywords: 1_000,
-          keyword: 4_096,
-          ad_title: 56,
-          ad_text: 81,
-        };
-        return [fieldName, requiredInput(value[fieldName], fieldLabels[fieldName], maximums[fieldName])];
+      const normalizedFields = Object.fromEntries(editableRegistryFields.map((registryField) => {
+        const fieldName = String(registryField.input_name);
+        return [fieldName, requiredInput(value[fieldName], registryField.label, Number(registryField.maximum_length))];
       }));
       const lineage = {
         draft_id: draftId,

@@ -451,6 +451,7 @@ test("filters curated releases and rule states fail closed while pinning exact a
   assert.equal(value.playbook_release.release_id, "test-curated-release");
   assert.match(value.playbook_release.content_digest, /^sha256:[a-f0-9]{64}$/u);
   assert.deepEqual(value.playbook_release.applied_rule_ids, ["active-rule"]);
+  assert.deepEqual(value.playbook_release.applied_rule_identities, [{ rule_id: "active-rule", rule_version: "1.0.0" }]);
   assert.deepEqual(value.drafts.map((draft) => draft.playbook_rule_id).filter(Boolean), ["active-rule"]);
   for (const reason of [
     "HIDDEN:PLAYBOOK_RULE_QUARANTINED",

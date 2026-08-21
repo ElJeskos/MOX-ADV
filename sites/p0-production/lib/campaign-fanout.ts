@@ -29,6 +29,21 @@ const PROVIDER_UNORDERED_ARRAY_PATHS = new Set([
 ]);
 const FORBIDDEN_PUBLISH_FINGERPRINT_FIELD = /(?:landing.*advisory|advisory.*landing|post.*launch|launch.*outcome|campaign.*outcome|moderation.*outcome|outcome.*learning|calibrat)/iu;
 
+export async function resolveActivePlaybookReleaseIdentity(releases: CuratedPlaybookRelease[]) {
+  const playbook = await resolveCuratedPlaybookReleases(releases);
+  const activeRules = playbook.rules.slice(0, MAX_IMPROVEMENTS_PER_DELIVERY_BUCKET);
+  return {
+    status: playbook.release ? "ACTIVE_APPROVED" : "BLOCKED_FAIL_CLOSED",
+    release_id: playbook.release?.release_id ?? null,
+    release_version: playbook.release?.release_version ?? null,
+    content_digest: playbook.release?.content_digest ?? null,
+    applied_governed_rule_identities: activeRules.map((rule) => ({
+      rule_id: rule.rule_id,
+      rule_version: rule.rule_version,
+    })),
+  };
+}
+
 export const CORE_DIRECT_CAPABILITY_PROFILE = Object.freeze({
   profile_id: "direct-v501-unified-search-explicit-text",
   profile_version: "1.0.0",
@@ -913,6 +928,7 @@ export async function buildCampaignRecommendationSet({
       release_version: playbook.release?.release_version ?? null,
       content_digest: playbook.release?.content_digest ?? null,
       applied_rule_ids: activeRules.map((rule) => rule.rule_id),
+      applied_rule_identities: activeRules.map((rule) => ({ rule_id: rule.rule_id, rule_version: rule.rule_version })),
       excluded_audit_ids: playbook.audits.map((audit) => audit.audit_id),
       mutable_default_read_at_query_time: false,
     },

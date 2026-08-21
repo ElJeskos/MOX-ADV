@@ -77,6 +77,22 @@ export const DIRECT_V501_DRAFT_FIELD_REGISTRY = Object.freeze({
   ] satisfies DraftFieldRegistryEntry[]),
 });
 
+function canonicalRegistryValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalRegistryValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonicalRegistryValue(item)]),
+  );
+}
+
+const canonicalRegistryJson = JSON.stringify(canonicalRegistryValue(DIRECT_V501_DRAFT_FIELD_REGISTRY));
+
+export function isCanonicalDirectV501DraftFieldRegistry(value: unknown) {
+  return JSON.stringify(canonicalRegistryValue(value)) === canonicalRegistryJson;
+}
+
 const editableFields = DIRECT_V501_DRAFT_FIELD_REGISTRY.fields.filter((item) => item.editable && item.input_name);
 
 export function editableDraftFieldNames() {

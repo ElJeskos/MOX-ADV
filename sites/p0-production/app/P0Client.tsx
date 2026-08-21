@@ -546,15 +546,30 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
+    const registryFields = Array.isArray(recommendationSet.field_registry?.fields)
+      ? recommendationSet.field_registry.fields as Array<Record<string, unknown>>
+      : [];
+    const editableInputNames = registryFields
+      .filter((field) => field.editable === true && typeof field.input_name === "string" && field.input_name.length > 0)
+      .map((field) => String(field.input_name));
     const value = {
       draft_id: String(selected.draft_id || ""),
-      ...Object.fromEntries(["campaign_name", "group_name", "negative_keywords", "keyword", "ad_title", "ad_text"].map((name) => [name, fieldValue(form, name)])),
+      ...Object.fromEntries(editableInputNames.map((name) => [name, fieldValue(form, name)])),
     };
     void apply("save_draft", value);
   }
   return <>
     <ArtifactHead eyebrow="Шаг 4 · Campaign Drafts" title="Campaign Canvas" copy="Ranked cards показывают сравнительный приоритет без predictive claims. Правый drawer редактирует только exact server-supported Direct projection; blocked и hidden Drafts остаются reviewable." />
-    {payload.state.recommendation_recalculation?.material_change === true && <section className="recommendation-recalculated" role="status"><strong>Рекомендация пересчитана</strong><p>{payload.state.recommendation_recalculation.message}</p><ul>{payload.state.recommendation_recalculation.changes?.flatMap((change: Record<string, any>) => change.fields?.map((field: Record<string, any>) => <li key={`${change.previous_draft_id}-${change.current_draft_id}-${field.pointer}`}><code>{field.pointer}</code><span>{evidenceValue(field.previous_normalized_value)} → {evidenceValue(field.current_normalized_value)}</span><small>score {change.previous_score ?? "—"} → {change.current_score ?? "—"} · rank {change.previous_rank ?? "—"} → {change.current_rank ?? "—"}</small></li>))}</ul></section>}
+    {payload.state.recommendation_recalculation?.material_change === true && <section className="recommendation-recalculated" role="status">
+      <strong>Рекомендация пересчитана</strong><p>{payload.state.recommendation_recalculation.message}</p>
+      <ul>{payload.state.recommendation_recalculation.changes?.map((change: Record<string, any>) => <li key={`${change.change_type}-${change.previous_draft_id}-${change.current_draft_id}`}>
+        <strong>{change.change_type} · {change.previous_draft_id || "—"} → {change.current_draft_id || "—"}</strong>
+        <small>score {change.previous_score ?? "—"} → {change.current_score ?? "—"} · rank {change.previous_rank ?? "—"} → {change.current_rank ?? "—"}</small>
+        {(change.fields || []).length > 0
+          ? <ul>{change.fields.map((field: Record<string, any>) => <li key={field.pointer}><code>{field.pointer}</code><span>{evidenceValue(field.previous_normalized_value)} → {evidenceValue(field.current_normalized_value)}</span></li>)}</ul>
+          : <span>Без соответствующего material Direct projection delta.</span>}
+      </li>)}</ul>
+    </section>}
     <RecommendationSetDisclosure recommendationSet={recommendationSet} />
     <section className="canvas-controls" aria-label="Фильтры и сортировка Campaign Canvas">
       <label><span>Variant</span><select aria-label="Фильтр variant" value={variantFilter} onChange={(event) => setVariantFilter(event.target.value as typeof variantFilter)}><option value="ALL">Все variants</option><option value="CONTROL">Comparator / control</option><option value="IMPROVEMENT">Improvements</option></select></label>

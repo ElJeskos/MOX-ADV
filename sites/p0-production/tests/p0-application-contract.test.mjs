@@ -1434,6 +1434,48 @@ async function approvedDraftFixture(t) {
   return { ...value, result };
 }
 
+test("restart rejects every same-schema persisted field registry mutation before query or UI use", async (t) => {
+  const { store, result } = await approvedDraftFixture(t);
+  const row = await store.load("owner");
+  const cases = [
+    ["editable", (registry) => { registry.fields[1].editable = true; }],
+    ["classification", (registry) => { registry.fields[1].classification = "EDITABLE"; }],
+    ["input_name", (registry) => { registry.fields[0].input_name = "same_schema_rogue_field"; }],
+    ["pointer", (registry) => { registry.fields[0].pointer = "/direct/campaign/Unsupported"; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const corrupted = JSON.parse(row.value_json);
+    assert.equal(corrupted.recommendation_set.field_registry.schema_version, result.state.recommendation_set.field_registry.schema_version);
+    mutate(corrupted.recommendation_set.field_registry);
+    await store.seed("owner", { ...row, value_json: JSON.stringify(corrupted) });
+    const restarted = new P0Application({ store, adapters: adapters() });
+    await assert.rejects(
+      restarted.query("owner"),
+      (error) => error instanceof P0ApplicationError
+        && error.code === "P0_MIGRATION_LINEAGE_INVALID"
+        && /field registry/u.test(error.message),
+      name,
+    );
+    assert.equal((await store.load("owner")).value_json, JSON.stringify(corrupted));
+  }
+  const explicitNull = JSON.parse(row.value_json);
+  explicitNull.recommendation_set.field_registry = null;
+  await store.seed("owner", { ...row, value_json: JSON.stringify(explicitNull) });
+  await assert.rejects(
+    new P0Application({ store, adapters: adapters() }).query("owner"),
+    (error) => error instanceof P0ApplicationError
+      && error.code === "P0_MIGRATION_LINEAGE_INVALID"
+      && /field registry/u.test(error.message),
+  );
+
+  const genuinelyMissing = JSON.parse(row.value_json);
+  delete genuinelyMissing.recommendation_set.field_registry;
+  await store.seed("owner", { ...row, value_json: JSON.stringify(genuinelyMissing) });
+  const migrated = await new P0Application({ store, adapters: adapters() }).query("owner");
+  assert.deepEqual(migrated.state.recommendation_set.field_registry, result.state.recommendation_set.field_registry);
+  assert.equal(migrated.revision, row.revision + 1);
+});
+
 test("normalization-only Draft save reports a no-op without inventing a Draft or Recommendation Set revision", async (t) => {
   const { application, result: approved } = await approvedDraftFixture(t);
   const generated = approved.state.recommendation_set.drafts.find((draft) => draft.visibility === "VISIBLE");
@@ -1501,7 +1543,65 @@ async function governedPlaybookRelease({ releaseId, releaseVersion, family, deci
   });
 }
 
-test("active playbook rollback persists a visible recalculation notice and material Direct delta without evaluator traces", async (t) => {
+test("same exact active playbook release preserves a material owner Draft revision and every downstream decision", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mox-p0-playbook-no-change-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new JsonDurableStore(join(directory, "state.json"));
+  const releases = [await governedPlaybookRelease({ releaseId: "fixture-release-stable", releaseVersion: "2.0.0", family: "QUALIFIED_ACTION", decisionId: "decision-stable" })];
+  const application = new P0Application({ store, adapters: adapters({ async readPlaybookReleases() { return releases; } }) });
+  let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/" });
+  result = await application.command("owner", { action: "confirm_context_goal", expected_revision: result.revision, confirmation: "CONFIRM_CONTEXT_GOAL", goal: result.state.context_state.provisional_business_goal.value });
+  result = await application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
+  result = await approveStrategy(application, result);
+  const improvement = result.state.recommendation_set.drafts.find((draft) => draft.variant.kind === "IMPROVEMENT" && draft.visibility === "VISIBLE");
+  assert.ok(improvement);
+  result = await application.command("owner", {
+    action: "save_draft",
+    expected_revision: result.revision,
+    value: editableDraftValue(improvement, { campaign_name: `${improvement.campaign_name} · owner material edit` }),
+  });
+  assert.equal(result.state.draft.draft_save_result.material_change, true);
+  const preserved = {
+    recommendation_set: JSON.stringify(result.state.recommendation_set),
+    draft: JSON.stringify(result.state.draft),
+    shortlist: JSON.stringify(result.state.shortlist),
+    external_write_intent: JSON.stringify(result.state.external_write_intent),
+    candidate_audit: JSON.stringify(result.state.recommendation_set.candidate_audit),
+    recommendation_set_id: result.state.recommendation_set.recommendation_set_id,
+    draft_revision_id: result.state.draft.draft_revision_id,
+    publish_fingerprint: result.state.draft.publish_fingerprint,
+    score: result.state.draft.viability_score.score,
+    rank: result.state.draft.viability_score.rank,
+  };
+
+  result = await application.command("owner", { action: "recalculate_recommendations", expected_revision: result.revision });
+
+  assert.equal(JSON.stringify(result.state.recommendation_set), preserved.recommendation_set);
+  assert.equal(JSON.stringify(result.state.draft), preserved.draft);
+  assert.equal(JSON.stringify(result.state.shortlist), preserved.shortlist);
+  assert.equal(JSON.stringify(result.state.external_write_intent), preserved.external_write_intent);
+  assert.equal(JSON.stringify(result.state.recommendation_set.candidate_audit), preserved.candidate_audit);
+  assert.equal(result.state.recommendation_set.recommendation_set_id, preserved.recommendation_set_id);
+  assert.equal(result.state.draft.draft_revision_id, preserved.draft_revision_id);
+  assert.equal(result.state.draft.publish_fingerprint, preserved.publish_fingerprint);
+  assert.equal(result.state.draft.viability_score.score, preserved.score);
+  assert.equal(result.state.draft.viability_score.rank, preserved.rank);
+  assert.deepEqual(result.state.recommendation_recalculation, {
+    schema_version: "p0-recommendation-recalculation-v1",
+    material_change: false,
+    message: "Active playbook check завершён без material изменения active release lineage.",
+    reason_code: "NO_ACTIVE_PLAYBOOK_MATERIAL_CHANGE",
+    recalculated_at: result.state.recommendation_recalculation.recalculated_at,
+    previous_recommendation_set_id: preserved.recommendation_set_id,
+    current_recommendation_set_id: preserved.recommendation_set_id,
+    previous_playbook_release_id: "fixture-release-stable",
+    current_playbook_release_id: "fixture-release-stable",
+    changes: [],
+    evaluator_traces_exposed: false,
+  });
+});
+
+test("active playbook rollback persists a visible exact-lineage notice with truthful bounded candidate changes", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "mox-p0-playbook-recalculation-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new JsonDurableStore(join(directory, "state.json"));
@@ -1514,7 +1614,8 @@ test("active playbook rollback persists a visible recalculation notice and mater
   const improvement = result.state.recommendation_set.drafts.find((draft) => draft.variant.kind === "IMPROVEMENT" && draft.visibility === "VISIBLE");
   assert.ok(improvement);
   result = await application.command("owner", { action: "save_draft", expected_revision: result.revision, value: editableDraftValue(improvement) });
-  const previous = { draft_id: result.state.draft.draft_id, fingerprint: result.state.draft.publish_fingerprint, generation_order: result.state.draft.generation_order };
+  const previous = { draft_id: result.state.draft.draft_id };
+  const previousDraftIds = result.state.recommendation_set.drafts.map((draft) => draft.draft_id);
 
   releases = [await governedPlaybookRelease({ releaseId: "fixture-release-rollback", releaseVersion: "1.0.0", family: "MESSAGE_OFFER", decisionId: "decision-rollback" })];
   result = await application.command("owner", { action: "recalculate_recommendations", expected_revision: result.revision });
@@ -1527,10 +1628,16 @@ test("active playbook rollback persists a visible recalculation notice and mater
   assert.equal(notice.evaluator_traces_exposed, false);
   assert.equal(Object.hasOwn(notice, "evaluator_trace"), false);
   assert.equal(notice.changes.length > 0, true);
-  assert.equal(notice.changes.every((change) => change.fields.length > 0), true);
-  assert.equal(result.state.draft.generation_order, previous.generation_order);
-  assert.notEqual(result.state.draft.draft_id, previous.draft_id);
-  assert.notEqual(result.state.draft.publish_fingerprint, previous.fingerprint);
+  assert.equal(notice.changes.every((change) => ["REPLACED", "REMOVED", "ADDED"].includes(change.change_type)), true);
+  assert.equal(notice.changes.some((change) => change.change_type === "REMOVED" && change.previous_draft_id === previous.draft_id && change.current_draft_id === null), true);
+  const added = notice.changes.find((change) => change.change_type === "ADDED");
+  assert.ok(added);
+  assert.equal(added.previous_draft_id, null);
+  assert.equal(result.state.recommendation_set.drafts.some((draft) => draft.draft_id === added.current_draft_id && draft.variant.hypothesis?.changed_family === "MESSAGE_OFFER"), true);
+  assert.equal(notice.changes.every((change) => !Object.hasOwn(change, "evaluator_trace") && !Object.hasOwn(change, "publish_projection")), true);
+  assert.equal(previousDraftIds.every((draftId) => notice.changes.some((change) => change.previous_draft_id === draftId)), true);
+  assert.equal(result.state.recommendation_set.drafts.every((draft) => notice.changes.some((change) => change.current_draft_id === draft.draft_id)), true);
+  assert.equal(result.state.draft, null);
   assert.equal(result.state.shortlist, null);
   assert.equal(result.state.recommendation_set.playbook_release.release_id, "fixture-release-rollback");
 });
