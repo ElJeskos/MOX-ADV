@@ -724,6 +724,23 @@ function persistedContextFacts(site: SiteAnalysis, context: P0Context): P0Contex
   };
 }
 
+function directCapabilityMaterialFacts(value: unknown) {
+  const snapshot = sanitizeDirectCapabilitySnapshot(value);
+  return {
+    schema_version: snapshot.schema_version,
+    source: snapshot.source,
+    account: snapshot.account,
+    api_version: snapshot.api_version,
+    currency: snapshot.currency,
+    available_campaign_types: snapshot.available_campaign_types,
+    edit_campaigns_grant: snapshot.edit_campaigns_grant,
+    archived: snapshot.archived,
+    restrictions: snapshot.restrictions,
+    conditional_capabilities: [...snapshot.conditional_capabilities]
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+  } satisfies Omit<DirectCapabilitySnapshot, "snapshot_id" | "observed_at">;
+}
+
 function providerMaterialFacts(context: P0Context) {
   const direct = record(context.direct);
   const metrika = record(context.metrika);
@@ -733,7 +750,7 @@ function providerMaterialFacts(context: P0Context) {
       client_id: String(direct.client_id ?? ""),
       campaigns_total: Number(direct.campaigns_total ?? 0),
       minimum_weekly_budget_rub: Number(direct.minimum_weekly_budget_rub),
-      capability_snapshot: sanitizeDirectCapabilitySnapshot(direct.capability_snapshot),
+      capability_snapshot: directCapabilityMaterialFacts(direct.capability_snapshot),
     },
     metrika: {
       counter_id: String(metrika.counter_id ?? ""),
@@ -749,7 +766,7 @@ function persistedProviderMaterialFacts(facts: P0ContextState["facts"]) {
       client_id: facts.direct.client_id,
       campaigns_total: facts.direct.campaigns_total,
       minimum_weekly_budget_rub: facts.direct.minimum_weekly_budget_rub,
-      capability_snapshot: facts.direct.capability_snapshot,
+      capability_snapshot: directCapabilityMaterialFacts(facts.direct.capability_snapshot),
     },
     metrika: {
       counter_id: facts.metrika.counter_id,

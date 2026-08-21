@@ -1084,6 +1084,112 @@ test("the owner explicitly corrects the one provisional goal and the decision su
   assert.equal(result.workflow.current_step, 1);
 });
 
+test("fresh Direct capability observation identity stays normalization-only across confirm, save and reanalysis", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mox-p0-capability-refresh-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new JsonDurableStore(join(directory, "state.json"));
+  const observedSnapshots = [];
+  const application = new P0Application({ store, adapters: adapters({
+    async readContext() {
+      const value = context();
+      const sequence = observedSnapshots.length + 1;
+      const observedAt = `2026-08-21T10:00:${String(sequence).padStart(2, "0")}.000Z`;
+      value.direct.observed_at = observedAt;
+      value.direct.capability_snapshot.observed_at = observedAt;
+      value.direct.capability_snapshot.snapshot_id = `direct-capability:fresh-observation-${sequence}`;
+      observedSnapshots.push(structuredClone(value.direct.capability_snapshot));
+      return value;
+    },
+  }) });
+
+  let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/" });
+  assert.equal(result.state.context_state.facts.direct.capability_snapshot.snapshot_id, observedSnapshots[0].snapshot_id);
+  result = await application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: result.state.context_state.provisional_business_goal.value,
+  });
+  const persistedCapabilitySnapshot = structuredClone(result.state.context_state.facts.direct.capability_snapshot);
+  assert.equal(observedSnapshots.some((snapshot) => snapshot.snapshot_id === persistedCapabilitySnapshot.snapshot_id), true);
+  assert.notEqual(persistedCapabilitySnapshot.snapshot_id, observedSnapshots[0].snapshot_id);
+
+  result = await application.command("owner", {
+    action: "save_business_model",
+    expected_revision: result.revision,
+    value: ownerModel(result.state),
+  });
+  result = await approveStrategy(application, result);
+  const lineage = {
+    context_revision_id: result.state.context_state.context_revision_id,
+    material_fingerprint: result.state.context_state.material_fingerprint,
+    strategy_revision_id: result.state.strategy.strategy_revision_id,
+    recommendation_set_id: result.state.recommendation_set.recommendation_set_id,
+  };
+  assert.equal(result.state.recommendation_set.direct_capability_snapshot_id, persistedCapabilitySnapshot.snapshot_id);
+
+  result = await application.command("owner", {
+    action: "analyze_site",
+    expected_revision: result.revision,
+    url: "owner.example",
+  });
+  assert.deepEqual(result.state.context_state.facts.direct.capability_snapshot, persistedCapabilitySnapshot);
+  assert.equal(result.state.context_state.context_revision_id, lineage.context_revision_id);
+  assert.equal(result.state.context_state.material_fingerprint, lineage.material_fingerprint);
+  assert.equal(result.state.context_state.last_material_change, null);
+  assert.equal(result.state.strategy.strategy_revision_id, lineage.strategy_revision_id);
+  assert.equal(result.state.recommendation_set.recommendation_set_id, lineage.recommendation_set_id);
+});
+
+test("substantive Direct capability changes fail closed and reanalysis invalidates downstream lineage", async (t) => {
+  const { directory, store, application } = await fixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/" });
+  result = await application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: result.state.context_state.provisional_business_goal.value,
+  });
+  result = await application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
+  result = await approveStrategy(application, result);
+  const original = {
+    revision: result.revision,
+    strategy_revision_id: result.state.strategy.strategy_revision_id,
+    recommendation_set_id: result.state.recommendation_set.recommendation_set_id,
+  };
+  const changedContext = context();
+  changedContext.direct.capability_snapshot.snapshot_id = "direct-capability:changed-restriction";
+  changedContext.direct.capability_snapshot.observed_at = "2026-08-21T10:00:10.000Z";
+  changedContext.direct.capability_snapshot.restrictions[0].value = 2_999;
+  const changedApplication = new P0Application({ store, adapters: adapters({ readContext: async () => changedContext }) });
+
+  await assert.rejects(
+    changedApplication.command("owner", {
+      action: "save_business_model",
+      expected_revision: result.revision,
+      value: ownerModel(result.state),
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_CONTEXT_PREFLIGHT_CHANGED",
+  );
+  assert.equal((await store.load("owner")).revision, original.revision);
+
+  result = await changedApplication.command("owner", {
+    action: "analyze_site",
+    expected_revision: original.revision,
+    url: "https://owner.example/",
+  });
+  assert.equal(result.workflow.current_step, 0);
+  assert.equal(result.state.strategy, null);
+  assert.equal(result.state.recommendation_set, null);
+  assert.equal(result.state.context_state.facts.direct.capability_snapshot.snapshot_id, "direct-capability:changed-restriction");
+  assert.equal(result.state.context_state.facts.direct.capability_snapshot.restrictions[0].value, 2_999);
+  assert.equal(result.state.context_state.last_material_change.previous_lineage.strategy_revision_id, original.strategy_revision_id);
+  assert.equal(result.state.context_state.last_material_change.previous_lineage.recommendation_set_id, original.recommendation_set_id);
+  assert.equal(result.state.last_cascade.trigger, "CONTEXT");
+  assert.equal(result.state.last_cascade.recomputation_status, "REQUIRED");
+});
+
 test("a material Context change names and invalidates downstream lineage while normalization-only input does not", async (t) => {
   const { directory, store, application } = await fixture();
   t.after(() => rm(directory, { recursive: true, force: true }));
