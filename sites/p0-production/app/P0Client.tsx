@@ -6,37 +6,27 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { weeklyBudgetValidationMessage } from "../lib/direct-limits";
 
 type Payload = {
+  contract: { name: string; version: string; document_schema: string };
   revision: number;
   updated_at: string;
   state: Record<string, any>;
+  workflow: {
+    steps: Array<{ id: string; label: string; detail: string }>;
+    current_step: number;
+    maximum_reachable_step: number;
+    allowed_commands: string[];
+  };
   context: Record<string, any>;
   analysis_evidence?: Record<string, any> | null;
   revision_history?: Array<Record<string, any>>;
   write_readiness: { ready: boolean; blockers: string[] };
 };
 
-const steps = [
-  ["Контекст", "Реальные подключения"],
-  ["Модель", "Агентное исследование"],
-  ["Strategy", "Критические решения"],
-  ["Draft", "Точная проекция"],
-  ["Подтверждение", "Guarded write"],
-];
-
 async function request(path: string, init?: RequestInit) {
   const response = await fetch(path, init);
   const value = (await response.json()) as Record<string, any>;
   if (!response.ok) throw new Error(String(value.error || `HTTP ${response.status}`));
   return value;
-}
-
-function currentStep(payload: Payload) {
-  const state = payload.state;
-  if (state.draft?.publish_projection) return 4;
-  if (state.strategy) return 3;
-  if (state.business_model?.source === "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION") return 2;
-  if (state.site_analysis) return 1;
-  return 0;
 }
 
 function fieldValue(form: HTMLFormElement, name: string) {
@@ -63,13 +53,16 @@ export default function P0Client() {
       .then((value) => {
         const next = value as Payload;
         setPayload(next);
-        setStep(currentStep(next));
+        setStep(next.workflow.current_step);
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
       .finally(() => setBusy(""));
   }, []);
 
-  const maxStep = useMemo(() => (payload ? Math.max(step, currentStep(payload)) : 0), [payload, step]);
+  const maxStep = useMemo(
+    () => (payload ? Math.max(step, payload.workflow.maximum_reachable_step) : 0),
+    [payload, step],
+  );
 
   async function apply(action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) {
     if (!payload) return;
@@ -91,7 +84,7 @@ export default function P0Client() {
         : payload.analysis_evidence;
       const next = { ...payload, ...result, analysis_evidence: refreshedEvidence } as Payload;
       setPayload(next);
-      setStep(currentStep(next));
+      setStep(next.workflow.current_step);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -119,6 +112,7 @@ export default function P0Client() {
   }
 
   const context = payload.context || {};
+  const steps = payload.workflow.steps;
   const direct = context.direct || {};
   const metrika = context.metrika || {};
   const performance = context.performance || null;
@@ -138,10 +132,10 @@ export default function P0Client() {
         </section>
 
         <ol className="steps" aria-label="Путь создания кампании">
-          {steps.map(([title, detail], index) => (
-            <li key={title}>
-              <button disabled={index > maxStep} className={index === step ? "current" : index < currentStep(payload) ? "done" : ""} onClick={() => setStep(index)}>
-                <span>{index < currentStep(payload) ? "✓" : index + 1}</span><div><strong>{title}</strong><small>{detail}</small></div>
+          {steps.map(({ id, label, detail }, index) => (
+            <li key={id}>
+              <button disabled={index > maxStep} className={index === step ? "current" : index < payload.workflow.current_step ? "done" : ""} onClick={() => setStep(index)}>
+                <span>{index < payload.workflow.current_step ? "✓" : index + 1}</span><div><strong>{label}</strong><small>{detail}</small></div>
               </button>
             </li>
           ))}
@@ -150,7 +144,7 @@ export default function P0Client() {
         <div className="workspace">
           <aside className="agent-pane">
             <div className="agent-head"><span>AI</span><div><strong>Агент кампании</strong><small>GPT Sites · production-only</small></div></div>
-            <section className="agent-message"><strong>{steps[step][0]}</strong><p>{[
+            <section className="agent-message"><strong>{steps[step]?.label}</strong><p>{[
               "Проверяю реальные API и сам исследую сайт.",
               "Показываю готовую модель с доказательствами и уверенностью.",
               "Готовлю Strategy; владелец задаёт только денежные и временные границы.",
