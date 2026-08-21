@@ -12,6 +12,8 @@ import {
   verifyLandingAdvisoryRun,
 } from "../lib/landing-advisory.ts";
 
+const PUBLIC_ADDRESSES = ["93.184.216.34"];
+
 function strategy(overrides = {}) {
   return {
     strategy_revision_id: "campaign-strategy-r7",
@@ -86,13 +88,16 @@ function adapter(overrides = {}) {
   return {
     calls,
     availability: { available: true, reason: null },
-    async resolveHostname() {
-      return ["93.184.216.34"];
+    async resolveHostname(_hostname, signal) {
+      assert.equal(signal instanceof AbortSignal, true);
+      return PUBLIC_ADDRESSES;
     },
-    async versions() {
+    async versions(signal) {
+      assert.equal(signal instanceof AbortSignal, true);
       return { ...PINNED_LANDING_TOOL_VERSIONS };
     },
     async inspect(input) {
+      assert.equal(input.signal instanceof AbortSignal, true);
       calls.push(`inspect:${input.url}`);
       input.policy.authorizeRequest({
         url: input.url,
@@ -100,6 +105,7 @@ function adapter(overrides = {}) {
         resource_type: "document",
         headers: {},
         body_present: false,
+        resolved_addresses: PUBLIC_ADDRESSES,
       });
       input.policy.authorizeRequest({
         url: "https://owner.example/assets/app.js",
@@ -107,14 +113,15 @@ function adapter(overrides = {}) {
         resource_type: "script",
         headers: {},
         body_present: false,
+        resolved_addresses: PUBLIC_ADDRESSES,
       });
       return {
         requested_url: input.url,
         final_url: input.url,
         redirect_chain: [input.url],
         network_requests: [
-          { url: input.url, method: "GET", resource_type: "document", headers: {}, body_present: false },
-          { url: "https://owner.example/assets/app.js", method: "GET", resource_type: "script", headers: {}, body_present: false },
+          { url: input.url, method: "GET", resource_type: "document", headers: {}, body_present: false, resolved_addresses: PUBLIC_ADDRESSES },
+          { url: "https://owner.example/assets/app.js", method: "GET", resource_type: "script", headers: {}, body_present: false, resolved_addresses: PUBLIC_ADDRESSES },
         ],
         response_bytes: 32_000,
         page: {
@@ -135,6 +142,7 @@ function adapter(overrides = {}) {
       };
     },
     async runLighthouse(input) {
+      assert.equal(input.signal instanceof AbortSignal, true);
       assert.equal(activeLighthouse, 0, "Lighthouse runs must never overlap");
       activeLighthouse += 1;
       calls.push(`lighthouse:${input.sequence}:start`);
@@ -144,6 +152,7 @@ function adapter(overrides = {}) {
       return lighthouseResult(input.sequence);
     },
     async runAxe(input) {
+      assert.equal(input.signal instanceof AbortSignal, true);
       calls.push(`axe:${input.url}`);
       return {
         violations: { count: 1, items: [{ id: "color-contrast", impact: "serious", nodes: 2, help: "Elements must meet contrast" }] },
@@ -165,6 +174,19 @@ async function runWith(auditAdapter, evidence = analyticsEvidence()) {
     adapter: auditAdapter,
     now: () => `2026-08-21T12:00:${String(tick++).padStart(2, "0")}.000Z`,
   });
+}
+
+function canonicalizeForTest(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeForTest);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, canonicalizeForTest(item)]));
+}
+
+async function rehashRun(run) {
+  const withoutRunId = Object.fromEntries(Object.entries(run).filter(([key]) => key !== "run_id"));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(canonicalizeForTest(withoutRunId))));
+  run.run_id = `landing-advisory:sha256:${[...new Uint8Array(digest)].map((item) => item.toString(16).padStart(2, "0")).join("")}`;
+  return run;
 }
 
 test("LandingAdvisoryRun is versioned to exact Strategy/final URL and preserves typed coverage and tool evidence", async () => {
@@ -240,6 +262,7 @@ test("axe-core preserves bounded raw category counts and incomplete remains expl
 
 test("browser policy denies cross-party egress, credentials, restricted paths and every write interaction before an adapter can use them", () => {
   const policy = createLandingBrowserPolicy("https://owner.example/participate", "https://owner.example/");
+  policy.bindHostResolution("owner.example", PUBLIC_ADDRESSES);
   assert.equal(policy.profile.allow_form_submission, false);
   assert.equal(policy.profile.allow_clicks, false);
   assert.equal(policy.profile.allow_uploads, false);
@@ -256,9 +279,13 @@ test("browser policy denies cross-party egress, credentials, restricted paths an
     { url: "https://user:secret@owner.example/participate", method: "GET", resource_type: "document", headers: {}, body_present: false },
     { url: "https://owner.example/participate?email=owner@example.com", method: "GET", resource_type: "document", headers: {}, body_present: false },
   ]) {
-    assert.throws(() => policy.authorizeRequest(request), /LANDING_(?:EGRESS|RESTRICTED_PATH|WRITE|CREDENTIAL)_DENIED/u);
+    assert.throws(() => policy.authorizeRequest({ ...request, resolved_addresses: PUBLIC_ADDRESSES }), /LANDING_(?:DNS_IP|EGRESS|RESTRICTED_PATH|WRITE|CREDENTIAL)_DENIED/u);
   }
-  assert.doesNotThrow(() => policy.authorizeRequest({ url: "https://owner.example/assets/app.css", method: "GET", resource_type: "stylesheet", headers: {}, body_present: false }));
+  assert.throws(
+    () => policy.authorizeRequest({ url: "https://owner.example/assets/app.css", method: "GET", resource_type: "stylesheet", headers: {}, body_present: false, resolved_addresses: ["127.0.0.1"] }),
+    /LANDING_DNS_IP_DENIED/u,
+  );
+  assert.doesNotThrow(() => policy.authorizeRequest({ url: "https://owner.example/assets/app.css", method: "GET", resource_type: "stylesheet", headers: {}, body_present: false, resolved_addresses: PUBLIC_ADDRESSES }));
 });
 
 test("unsafe adapter trace fails closed and never persists cross-party URLs or raw secrets", async () => {
@@ -268,7 +295,7 @@ test("unsafe adapter trace fails closed and never persists cross-party URLs or r
         requested_url: input.url,
         final_url: input.url,
         redirect_chain: [input.url],
-        network_requests: [{ url: "https://tracker.example/pixel?email=owner@example.com", method: "GET", resource_type: "image", headers: {}, body_present: false }],
+        network_requests: [{ url: "https://tracker.example/pixel?email=owner@example.com", method: "GET", resource_type: "image", headers: {}, body_present: false, resolved_addresses: PUBLIC_ADDRESSES }],
         response_bytes: 1,
         page: { title: "Bearer secret", headings: [], text_excerpt: "owner@example.com", ctas: [], forms: [], metrika_tag_detected: false, http_status: 200, content_type: "text/html" },
         hypotheses: [],
@@ -292,7 +319,7 @@ test("artifacts are bounded and redact secrets and PII", async () => {
         requested_url: input.url,
         final_url: input.url,
         redirect_chain: [input.url],
-        network_requests: [{ url: input.url, method: "GET", resource_type: "document", headers: {}, body_present: false }],
+        network_requests: [{ url: input.url, method: "GET", resource_type: "document", headers: {}, body_present: false, resolved_addresses: PUBLIC_ADDRESSES }],
         response_bytes: 20,
         page: {
           title: "Authorization: Bearer page-secret",
@@ -318,9 +345,10 @@ test("artifacts are bounded and redact secrets and PII", async () => {
 
 test("missing or partial exact Metrika observations stay insufficient rather than zero or success", async () => {
   const partial = await runWith(adapter(), analyticsEvidence({ partial: true, visits: "0", goalVisits: "0" }));
+  const missingGoalMetric = await runWith(adapter(), analyticsEvidence({ visits: "10", goalVisits: null }));
   const missing = await runWith(adapter(), { claims: [] });
 
-  for (const run of [partial, missing]) {
+  for (const run of [partial, missingGoalMetric, missing]) {
     const finding = run.findings.find((item) => item.dimension === "OBSERVED_METRIKA_BEHAVIOR");
     assert.equal(finding.type, "OBSERVED_FACT");
     assert.equal(finding.evidence_status, "INSUFFICIENT_EVIDENCE");
@@ -372,12 +400,21 @@ test("run hash verification rejects malformed persisted artifacts and finding en
   const run = await runWith(adapter());
   const malformedFinding = structuredClone(run);
   malformedFinding.findings[0].type = "PROMOTED_GUESS";
+  const malformedArtifact = structuredClone(run);
+  malformedArtifact.artifacts[0].kind = "COOKIE_JAR";
+  const mismatchedArtifact = structuredClone(run);
+  mismatchedArtifact.artifacts[1].value.expected_runs = 4;
   const oversized = structuredClone(run);
   oversized.artifacts.push({ artifact_id: "huge", kind: "PAGE_OBSERVATION", value: "x".repeat(LANDING_ARTIFACT_MAX_BYTES) });
+  const unredacted = structuredClone(run);
+  unredacted.findings[0].detail = "Authorization: Bearer persisted-secret owner@example.com";
   const forged = structuredClone(run);
   forged.findings[0].title = "forged without rehash";
 
-  assert.equal(await verifyLandingAdvisoryRun(malformedFinding), false);
-  assert.equal(await verifyLandingAdvisoryRun(oversized), false);
+  assert.equal(await verifyLandingAdvisoryRun(await rehashRun(malformedFinding)), false);
+  assert.equal(await verifyLandingAdvisoryRun(await rehashRun(malformedArtifact)), false);
+  assert.equal(await verifyLandingAdvisoryRun(await rehashRun(mismatchedArtifact)), false);
+  assert.equal(await verifyLandingAdvisoryRun(await rehashRun(oversized)), false);
+  assert.equal(await verifyLandingAdvisoryRun(await rehashRun(unredacted)), false);
   assert.equal(await verifyLandingAdvisoryRun(forged), false);
 });

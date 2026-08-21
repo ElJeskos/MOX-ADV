@@ -9,6 +9,7 @@ export const LANDING_ADVISORY_HARNESS_VERSION = "p0-landing-advisory-harness-v1"
 export const LANDING_BROWSER_POLICY_VERSION = "first-party-public-advisory-browser-v1";
 export const LANDING_ARTIFACT_MAX_BYTES = 64_000;
 const LANDING_RESPONSE_MAX_BYTES = 5_000_000;
+const LANDING_RUN_MAX_BYTES = 160_000;
 const LANDING_OPERATION_TIMEOUT_MS = 30_000;
 const LANDING_DETAIL_MAX = 2_000;
 const AXE_ITEMS_PER_CATEGORY_MAX = 10;
@@ -42,6 +43,7 @@ type LandingNetworkRequest = {
   resource_type: string;
   headers?: Record<string, unknown>;
   body_present?: boolean;
+  resolved_addresses: string[];
 };
 
 export type LandingBrowserPolicy = {
@@ -62,6 +64,8 @@ export type LandingBrowserPolicy = {
     maximum_response_bytes: number;
     operation_timeout_ms: number;
   };
+  bindHostResolution(hostname: string, addresses: string[]): void;
+  boundAddresses(hostname: string): string[];
   authorizeRequest(request: LandingNetworkRequest): void;
 };
 
@@ -110,11 +114,11 @@ export type AxeAdapterResult = {
 
 export interface LandingAdvisoryAdapter {
   availability: { available: boolean; reason: string | null };
-  resolveHostname(hostname: string): Promise<string[]>;
-  versions(): Promise<Record<keyof typeof PINNED_LANDING_TOOL_VERSIONS, string>>;
-  inspect(input: { url: string; viewport: typeof DESKTOP_VIEWPORT; policy: LandingBrowserPolicy }): Promise<LandingPageInspection>;
-  runLighthouse(input: { url: string; sequence: number; viewport: typeof DESKTOP_VIEWPORT; policy: LandingBrowserPolicy }): Promise<LighthouseAdapterResult>;
-  runAxe(input: { url: string; viewport: typeof DESKTOP_VIEWPORT; policy: LandingBrowserPolicy }): Promise<AxeAdapterResult>;
+  resolveHostname(hostname: string, signal: AbortSignal): Promise<string[]>;
+  versions(signal: AbortSignal): Promise<Record<keyof typeof PINNED_LANDING_TOOL_VERSIONS, string>>;
+  inspect(input: { url: string; viewport: typeof DESKTOP_VIEWPORT; policy: LandingBrowserPolicy; signal: AbortSignal }): Promise<LandingPageInspection>;
+  runLighthouse(input: { url: string; sequence: number; viewport: typeof DESKTOP_VIEWPORT; policy: LandingBrowserPolicy; signal: AbortSignal }): Promise<LighthouseAdapterResult>;
+  runAxe(input: { url: string; viewport: typeof DESKTOP_VIEWPORT; policy: LandingBrowserPolicy; signal: AbortSignal }): Promise<AxeAdapterResult>;
 }
 
 export type LandingFinding = {
@@ -301,6 +305,7 @@ export function createLandingBrowserPolicy(requestedUrl: string, contextSiteUrl:
   }
   if (RESTRICTED_PATH.test(requested.pathname)) throw new LandingSafetyError("LANDING_RESTRICTED_PATH_DENIED");
   const allowedHosts = [...new Set([requested.hostname.toLowerCase(), context.hostname.toLowerCase()])].sort();
+  const boundResolutions = new Map<string, string[]>();
   const profile = {
     public_https_only: true,
     dns_ip_preflight_required: true,
@@ -320,6 +325,16 @@ export function createLandingBrowserPolicy(requestedUrl: string, contextSiteUrl:
     version: LANDING_BROWSER_POLICY_VERSION,
     allowed_hosts: allowedHosts,
     profile,
+    bindHostResolution(hostname, addresses) {
+      const host = hostname.trim().toLowerCase();
+      if (!allowedHosts.includes(host) || !addresses.length || addresses.some((address) => !resolvedAddressIsPublic(address))) {
+        throw new LandingSafetyError("LANDING_DNS_IP_DENIED");
+      }
+      boundResolutions.set(host, [...new Set(addresses.map((address) => address.trim().toLowerCase()))].sort());
+    },
+    boundAddresses(hostname) {
+      return [...(boundResolutions.get(hostname.trim().toLowerCase()) ?? [])];
+    },
     authorizeRequest(request) {
       let url: URL;
       try {
@@ -327,7 +342,15 @@ export function createLandingBrowserPolicy(requestedUrl: string, contextSiteUrl:
       } catch {
         throw new LandingSafetyError("LANDING_CREDENTIAL_DENIED");
       }
-      if (!allowedHosts.includes(url.hostname.toLowerCase())) throw new LandingSafetyError("LANDING_EGRESS_DENIED");
+      const host = url.hostname.toLowerCase();
+      if (!allowedHosts.includes(host)) throw new LandingSafetyError("LANDING_EGRESS_DENIED");
+      const bound = boundResolutions.get(host) ?? [];
+      const connected = list(request.resolved_addresses).map(String).map((address) => address.trim().toLowerCase());
+      if (
+        !bound.length
+        || !connected.length
+        || connected.some((address) => !resolvedAddressIsPublic(address) || !bound.includes(address))
+      ) throw new LandingSafetyError("LANDING_DNS_IP_DENIED");
       if (RESTRICTED_PATH.test(url.pathname)) throw new LandingSafetyError("LANDING_RESTRICTED_PATH_DENIED");
       const method = String(request.method ?? "GET").toUpperCase();
       if (!["GET", "HEAD"].includes(method) || request.body_present === true) throw new LandingSafetyError("LANDING_WRITE_DENIED");
@@ -433,14 +456,18 @@ function unavailableFindings(reason: string): LandingFinding[] {
   }));
 }
 
-function withTimeout<T>(promise: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  return Promise.race([
-    promise,
-    new Promise<T>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error("LANDING_OPERATION_TIMEOUT")), LANDING_OPERATION_TIMEOUT_MS);
-    }),
-  ]).finally(() => clearTimeout(timer!));
+async function withTimeout<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort("LANDING_OPERATION_TIMEOUT"), LANDING_OPERATION_TIMEOUT_MS);
+  try {
+    // Await the adapter promise even after abort: a timed-out operation must terminate before
+    // the next sequential browser/tool operation can begin.
+    const result = await operation(controller.signal);
+    if (controller.signal.aborted) throw new Error("LANDING_OPERATION_TIMEOUT");
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function exactPinnedVersions(observed: Record<string, string>) {
@@ -456,10 +483,24 @@ function sanitizeInspection(raw: LandingPageInspection, policy: LandingBrowserPo
   const redirects = list(raw.redirect_chain).map(String);
   if (redirects.length === 0 || redirects.length > 5) throw new LandingSafetyError("LANDING_REDIRECT_DENIED");
   for (const redirect of redirects) {
-    policy.authorizeRequest({ url: redirect, method: "GET", resource_type: "document", headers: {}, body_present: false });
+    policy.authorizeRequest({
+      url: redirect,
+      method: "GET",
+      resource_type: "document",
+      headers: {},
+      body_present: false,
+      resolved_addresses: policy.boundAddresses(new URL(redirect).hostname),
+    });
   }
   const finalUrl = safeUrl(String(raw.final_url ?? ""));
-  policy.authorizeRequest({ url: finalUrl.toString(), method: "GET", resource_type: "document", headers: {}, body_present: false });
+  policy.authorizeRequest({
+    url: finalUrl.toString(),
+    method: "GET",
+    resource_type: "document",
+    headers: {},
+    body_present: false,
+    resolved_addresses: policy.boundAddresses(finalUrl.hostname),
+  });
   if (normalizePublicHttpsUrl(String(raw.requested_url ?? "")).toString() !== requestedUrl) {
     throw new LandingSafetyError("LANDING_REQUEST_MISMATCH_DENIED");
   }
@@ -585,14 +626,17 @@ function extractMetrika(
   const normalized = record(record(claim?.normalized).value);
   const report = record(normalized.report);
   const exactBinding = counterId && goalId && normalized.counter_id === counterId && normalized.goal_id === goalId;
+  const validMetric = (value: unknown) => typeof value === "string" && /^\d+(?:\.\d+)?$/u.test(value) && Number.isFinite(Number(value));
+  const metricsComplete = validMetric(normalized.visits) && validMetric(normalized.goal_visits);
   const complete = exactBinding
+    && metricsComplete
     && report.metadata_complete === true
     && report.sampled === false
     && report.contains_sensitive_data === false
     && Number(report.data_lag ?? 0) === 0
     && record(claim?.confidence).coverage === "complete_for_scope";
-  const visits = exactBinding ? boundedArtifactText(normalized.visits, 100) || null : null;
-  const goalVisits = exactBinding ? boundedArtifactText(normalized.goal_visits, 100) || null : null;
+  const visits = exactBinding && validMetric(normalized.visits) ? boundedArtifactText(normalized.visits, 100) : null;
+  const goalVisits = exactBinding && validMetric(normalized.goal_visits) ? boundedArtifactText(normalized.goal_visits, 100) : null;
   const hasPositiveVisits = visits !== null && Number(visits) > 0;
   return {
     source: "PERSISTED_ANALYTICS_EVIDENCE_ONLY",
@@ -853,12 +897,10 @@ export async function runLandingAdvisory({
   let observedVersions: Record<keyof typeof PINNED_LANDING_TOOL_VERSIONS, string>;
   try {
     for (const hostname of policy.allowed_hosts) {
-      const addresses = await withTimeout(adapter.resolveHostname(hostname));
-      if (!addresses.length || addresses.some((address) => !resolvedAddressIsPublic(address))) {
-        throw new LandingSafetyError("LANDING_DNS_IP_DENIED");
-      }
+      const addresses = await withTimeout((signal) => adapter.resolveHostname(hostname, signal));
+      policy.bindHostResolution(hostname, addresses);
     }
-    observedVersions = await withTimeout(adapter.versions());
+    observedVersions = await withTimeout((signal) => adapter.versions(signal));
   } catch (error) {
     if (error instanceof LandingSafetyError) {
       draft.status = "SAFETY_BLOCKED";
@@ -887,7 +929,7 @@ export async function runLandingAdvisory({
   let inspection: ReturnType<typeof sanitizeInspection>;
   try {
     inspection = sanitizeInspection(
-      await withTimeout(adapter.inspect({ url: requestedUrl, viewport: DESKTOP_VIEWPORT, policy })),
+      await withTimeout((signal) => adapter.inspect({ url: requestedUrl, viewport: DESKTOP_VIEWPORT, policy, signal })),
       policy,
       requestedUrl,
     );
@@ -903,12 +945,21 @@ export async function runLandingAdvisory({
 
   for (let sequence = 1; sequence <= 5; sequence += 1) {
     try {
-      policy.authorizeRequest({ url: inspection.final_url, method: "GET", resource_type: "document", headers: {}, body_present: false });
-      const result = sanitizeLighthouse(await withTimeout(adapter.runLighthouse({
+      const finalHost = new URL(inspection.final_url).hostname;
+      policy.authorizeRequest({
+        url: inspection.final_url,
+        method: "GET",
+        resource_type: "document",
+        headers: {},
+        body_present: false,
+        resolved_addresses: policy.boundAddresses(finalHost),
+      });
+      const result = sanitizeLighthouse(await withTimeout((signal) => adapter.runLighthouse({
         url: inspection.final_url,
         sequence,
         viewport: DESKTOP_VIEWPORT,
         policy,
+        signal,
       })));
       draft.lighthouse.runs.push({ sequence, status: "SUCCEEDED", result, error_code: null });
     } catch {
@@ -918,11 +969,20 @@ export async function runLandingAdvisory({
   draft.lighthouse.median = medianLighthouse(draft.lighthouse.runs);
 
   try {
-    policy.authorizeRequest({ url: inspection.final_url, method: "GET", resource_type: "document", headers: {}, body_present: false });
-    draft.axe = sanitizeAxe(await withTimeout(adapter.runAxe({
+    const finalHost = new URL(inspection.final_url).hostname;
+    policy.authorizeRequest({
+      url: inspection.final_url,
+      method: "GET",
+      resource_type: "document",
+      headers: {},
+      body_present: false,
+      resolved_addresses: policy.boundAddresses(finalHost),
+    });
+    draft.axe = sanitizeAxe(await withTimeout((signal) => adapter.runAxe({
       url: inspection.final_url,
       viewport: DESKTOP_VIEWPORT,
       policy,
+      signal,
     })));
   } catch {
     draft.axe = {
@@ -949,6 +1009,43 @@ export function landingAdvisoryPriorities(value: unknown): LandingFinding[] {
     .slice(0, 3);
 }
 
+function persistedArtifactValueIsSafe(value: unknown, depth = 0): boolean {
+  if (depth > 8) return false;
+  if (typeof value === "string") {
+    return value.length <= 8_020 && boundedArtifactText(value, 8_000) === value;
+  }
+  if (value === null || typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.length <= 100 && value.every((item) => persistedArtifactValueIsSafe(item, depth + 1));
+  if (!value || typeof value !== "object") return false;
+  const entries = Object.entries(value as Record<string, unknown>);
+  return entries.length <= 100 && entries.every(([key, item]) => key.length <= 100 && persistedArtifactValueIsSafe(item, depth + 1));
+}
+
+function persistedAxeCategoryIsValid(value: unknown) {
+  const category = record(value);
+  const items = list(category.items).map(record);
+  return Number.isSafeInteger(category.count)
+    && Number(category.count) >= 0
+    && Number(category.count) <= 100_000
+    && typeof category.items_truncated === "boolean"
+    && items.length <= AXE_ITEMS_PER_CATEGORY_MAX
+    && items.every((item) => (
+      typeof item.id === "string" && item.id.length <= 120
+      && (item.impact === null || (typeof item.impact === "string" && item.impact.length <= 70))
+      && Number.isSafeInteger(item.nodes) && Number(item.nodes) >= 0 && Number(item.nodes) <= 100_000
+      && typeof item.help === "string" && item.help.length <= 520
+    ));
+}
+
+function persistedLighthouseResultIsValid(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  try {
+    return JSON.stringify(sanitizeLighthouse(value as LighthouseAdapterResult)) === JSON.stringify(value);
+  } catch {
+    return false;
+  }
+}
+
 export async function verifyLandingAdvisoryRun(value: unknown): Promise<boolean> {
   const run = record(value);
   if (
@@ -961,6 +1058,7 @@ export async function verifyLandingAdvisoryRun(value: unknown): Promise<boolean>
     || !Array.isArray(run.coverage)
     || !Array.isArray(run.findings)
     || !Array.isArray(run.artifacts)
+    || new TextEncoder().encode(JSON.stringify(run)).byteLength > LANDING_RUN_MAX_BYTES
   ) return false;
   try {
     normalizePublicHttpsUrl(run.requested_url).toString();
@@ -984,24 +1082,51 @@ export async function verifyLandingAdvisoryRun(value: unknown): Promise<boolean>
     || browserSafety.cookies_credentials_and_client_storage_disabled !== true
     || browserSafety.bounded_response_bytes !== LANDING_RESPONSE_MAX_BYTES
     || browserSafety.bounded_artifact_bytes !== LANDING_ARTIFACT_MAX_BYTES
+    || !Array.isArray(browserSafety.allowed_hosts)
+    || browserSafety.allowed_hosts.length > 2
+    || browserSafety.allowed_hosts.some((host) => typeof host !== "string" || host.length > 255)
   ) return false;
   const coverage = run.coverage.map(record);
   if (
     coverage.length !== LANDING_ADVISORY_DIMENSIONS.length
     || coverage.some((item, index) => item.dimension !== LANDING_ADVISORY_DIMENSIONS[index] || !EVIDENCE_STATUSES.has(String(item.evidence_status) as LandingEvidenceStatus))
   ) return false;
+  if (run.findings.length > 50) return false;
+  const findingIds = new Set<string>();
   for (const rawFinding of run.findings) {
     const item = record(rawFinding);
+    const evidenceRefs = list(item.evidence_refs);
     if (
-      !LANDING_ADVISORY_DIMENSIONS.includes(String(item.dimension) as LandingAdvisoryDimension)
+      typeof item.finding_id !== "string" || !item.finding_id || item.finding_id.length > 255 || findingIds.has(item.finding_id)
+      || !LANDING_ADVISORY_DIMENSIONS.includes(String(item.dimension) as LandingAdvisoryDimension)
       || !FINDING_TYPES.has(String(item.type) as LandingFindingType)
       || !EVIDENCE_STATUSES.has(String(item.evidence_status) as LandingEvidenceStatus)
       || (item.type === "LLM_HYPOTHESIS" && item.evidence_status !== "INSUFFICIENT_EVIDENCE")
-      || typeof item.title !== "string"
-      || typeof item.detail !== "string"
+      || !Number.isSafeInteger(item.priority) || Number(item.priority) < 0 || Number(item.priority) > 100
+      || typeof item.title !== "string" || item.title.length > 520 || boundedArtifactText(item.title, 500) !== item.title
+      || typeof item.detail !== "string" || item.detail.length > LANDING_DETAIL_MAX + 20 || boundedArtifactText(item.detail, LANDING_DETAIL_MAX) !== item.detail
+      || evidenceRefs.length > 20
+      || evidenceRefs.some((reference) => typeof reference !== "string" || reference.length > 275 || boundedArtifactText(reference, 255) !== reference)
     ) return false;
+    findingIds.add(item.finding_id);
   }
-  if (new TextEncoder().encode(JSON.stringify(run.artifacts)).byteLength > LANDING_ARTIFACT_MAX_BYTES) return false;
+  if (JSON.stringify(coverageFromFindings(run.findings as LandingFinding[])) !== JSON.stringify(run.coverage)) return false;
+  const artifacts = run.artifacts.map(record);
+  const expectedArtifacts = [
+    ["artifact:page-observation", "PAGE_OBSERVATION"],
+    ["artifact:lighthouse-summary", "LIGHTHOUSE_SUMMARY"],
+    ["artifact:axe-summary", "AXE_SUMMARY"],
+    ["artifact:metrika-summary", "METRIKA_SUMMARY"],
+  ];
+  if (
+    new TextEncoder().encode(JSON.stringify(run.artifacts)).byteLength > LANDING_ARTIFACT_MAX_BYTES
+    || ![0, 4].includes(artifacts.length)
+    || (artifacts.length === 4 && artifacts.some((artifact, index) => (
+      artifact.artifact_id !== expectedArtifacts[index][0]
+      || artifact.kind !== expectedArtifacts[index][1]
+      || !persistedArtifactValueIsSafe(artifact.value)
+    )))
+  ) return false;
   const lighthouse = record(run.lighthouse);
   const lighthouseRuns = list(lighthouse.runs).map(record);
   if (
@@ -1009,26 +1134,68 @@ export async function verifyLandingAdvisoryRun(value: unknown): Promise<boolean>
     || lighthouse.sequential !== true
     || lighthouse.aggregation !== "COMPONENT_MEDIAN_OF_EXACTLY_FIVE_NO_AVERAGING"
     || lighthouseRuns.length > 5
-    || lighthouseRuns.some((item, index) => item.sequence !== index + 1 || !["SUCCEEDED", "FAILED"].includes(String(item.status)))
+    || lighthouseRuns.some((item, index) => (
+      item.sequence !== index + 1
+      || !["SUCCEEDED", "FAILED"].includes(String(item.status))
+      || (item.status === "SUCCEEDED" && (item.error_code !== null || !persistedLighthouseResultIsValid(item.result)))
+      || (item.status === "FAILED" && (item.error_code !== "LIGHTHOUSE_RUN_FAILED" || item.result !== null))
+    ))
+    || (lighthouse.median !== null && !persistedLighthouseResultIsValid(lighthouse.median))
   ) return false;
+  const reconstructedMedian = medianLighthouse(lighthouseRuns as unknown as LighthouseRun[]);
+  if (JSON.stringify(reconstructedMedian) !== JSON.stringify(lighthouse.median)) return false;
   const tools = record(run.tools);
+  const observedTools = record(tools.observed);
   if (
     JSON.stringify(tools.required) !== JSON.stringify(PINNED_LANDING_TOOL_VERSIONS)
+    || Object.keys(PINNED_LANDING_TOOL_VERSIONS).some((name) => observedTools[name] !== null && (typeof observedTools[name] !== "string" || String(observedTools[name]).length > 100))
     || !["PINNED_MATCH", "PINNED_MISMATCH", "UNAVAILABLE"].includes(String(tools.version_status))
     || (tools.version_status === "PINNED_MATCH" && !exactPinnedVersions(record(tools.observed) as Record<string, string>))
   ) return false;
   const axe = record(run.axe);
+  const axeCategories = record(axe.categories);
+  const manualReview = record(axe.manual_review);
   const metrika = record(run.metrika);
   if (
     !["COLLECTED", "UNAVAILABLE"].includes(String(axe.status))
+    || !["violations", "passes", "incomplete", "inapplicable"].every((name) => persistedAxeCategoryIsValid(axeCategories[name]))
+    || typeof manualReview.required !== "boolean"
+    || typeof manualReview.disclosure !== "string"
+    || manualReview.disclosure.length > 520
+    || boundedArtifactText(manualReview.disclosure, 500) !== manualReview.disclosure
+    || manualReview.required !== (Number(record(axeCategories.incomplete).count) > 0 || axe.status === "UNAVAILABLE")
     || metrika.source !== "PERSISTED_ANALYTICS_EVIDENCE_ONLY"
     || metrika.browser_cabinet_used !== false
+    || typeof metrika.counter_id !== "string" || metrika.counter_id.length > 120
+    || typeof metrika.goal_id !== "string" || metrika.goal_id.length > 120
+    || !["OBSERVED", "PARTIAL", "UNAVAILABLE"].includes(String(metrika.status))
+    || !Array.isArray(metrika.evidence_ids) || metrika.evidence_ids.length > 20
+    || metrika.evidence_ids.some((item) => typeof item !== "string" || item.length > 275 || boundedArtifactText(item, 255) !== item)
+    || typeof metrika.sampling_disclosure !== "string" || metrika.sampling_disclosure.length > 520
+    || boundedArtifactText(metrika.sampling_disclosure, 500) !== metrika.sampling_disclosure
   ) return false;
+  if (artifacts.length === 4) {
+    const page = record(artifacts[0].value);
+    if (
+      typeof page.title !== "string"
+      || !Array.isArray(page.headings) || page.headings.length > 20
+      || typeof page.text_excerpt !== "string"
+      || !Array.isArray(page.ctas) || page.ctas.length > 20
+      || !Array.isArray(page.forms) || page.forms.length > 20
+      || ![true, false, null].includes(page.metrika_tag_detected as never)
+      || !Number.isSafeInteger(page.http_status)
+      || typeof page.content_type !== "string"
+      || JSON.stringify(artifacts[1].value) !== JSON.stringify(run.lighthouse)
+      || JSON.stringify(artifacts[2].value) !== JSON.stringify(run.axe)
+      || JSON.stringify(artifacts[3].value) !== JSON.stringify(run.metrika)
+    ) return false;
+  }
   if (["COMPLETE", "COMPLETE_WITH_GAPS"].includes(String(run.status)) && (
     !run.final_url
     || browserSafety.safety_result !== "PASSED"
     || tools.version_status !== "PINNED_MATCH"
     || lighthouseRuns.length !== 5
+    || artifacts.length !== 4
   )) return false;
   if (run.status === "COMPLETE" && (lighthouse.median === null || axe.status !== "COLLECTED")) return false;
   const expectedAdvisoryKey = `landing-advisory-key:${await sha256({

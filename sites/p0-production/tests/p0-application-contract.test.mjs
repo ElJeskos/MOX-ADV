@@ -149,12 +149,12 @@ function landingAdvisoryAdapter({ performanceScore = 0.8, ctaLabel = "Остав
       };
     },
     async inspect(input) {
-      input.policy.authorizeRequest({ url: input.url, method: "GET", resource_type: "document", headers: {}, body_present: false });
+      input.policy.authorizeRequest({ url: input.url, method: "GET", resource_type: "document", headers: {}, body_present: false, resolved_addresses: ["93.184.216.34"] });
       return {
         requested_url: input.url,
         final_url: input.url,
         redirect_chain: [input.url],
-        network_requests: [{ url: input.url, method: "GET", resource_type: "document", headers: {}, body_present: false }],
+        network_requests: [{ url: input.url, method: "GET", resource_type: "document", headers: {}, body_present: false, resolved_addresses: ["93.184.216.34"] }],
         response_bytes: 100,
         page: {
           title: "Промышленная выставка",
