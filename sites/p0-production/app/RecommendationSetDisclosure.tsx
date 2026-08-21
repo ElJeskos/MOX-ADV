@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- Recommendation Set is validated by the application contract. */
+import { projectionFieldValue } from "../lib/campaign-draft-fields.ts";
 
 export function RecommendationSetDisclosure({ recommendationSet }: { recommendationSet: Record<string, any> }) {
   const candidateAudit = Array.isArray(recommendationSet.candidate_audit) ? recommendationSet.candidate_audit : [];
@@ -32,6 +33,74 @@ export function DraftVariantLabel({ draft }: { draft: Record<string, any> }) {
 export function DraftTreatmentDelta({ draft }: { draft: Record<string, any> }) {
   if (!draft.treatment_delta) return null;
   return <small>One-factor delta: {draft.treatment_delta.changed_fields?.join(" · ")}</small>;
+}
+
+function displayValue(value: unknown) {
+  if (value === undefined) return "NOT_PRESENT";
+  if (value === null) return "null";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+export function CampaignDraftCard({ draft, selected = false }: { draft: Record<string, any>; selected?: boolean }) {
+  const score = draft.viability_score || {};
+  const frequency = score.scopes?.frequency || {};
+  const cost = score.scopes?.cost || {};
+  const blockers = Array.isArray(draft.publication_blockers) ? draft.publication_blockers : [];
+  const evidenceQuality = score.dimensions?.evidence_quality?.value ?? score.visibility?.gates?.evidence_quality ?? "unknown";
+  const tied = Array.isArray(score.tied_draft_ids) && score.tied_draft_ids.length > 1;
+  const costRange = cost.range?.low !== null && cost.range?.low !== undefined
+    ? `${cost.range.low}–${cost.range.high} ${cost.currency || ""}`.trim() : "range unavailable";
+  return <div className={`campaign-draft-card ${selected ? "selected" : ""} ${draft.visibility === "HIDDEN" ? "hidden" : ""}`} data-draft-id={draft.draft_id}>
+    <header><DraftVariantLabel draft={draft} /><em>Comparative {score.score ?? "—"}/100</em></header>
+    <strong>{draft.dimensions?.keyword_cluster || draft.campaign_name}</strong>
+    <p>{draft.dimensions?.offer || draft.ad_text}</p>
+    <dl>
+      <div><dt>Rank</dt><dd>{score.rank ? `Semantic rank ${score.rank}${tied ? " · tie" : ""}` : "Not ranked"}</dd></div>
+      <div><dt>Sensitivity</dt><dd>{score.score_lower !== null && score.score_lower !== undefined ? `Sensitivity ${score.score_lower}–${score.score_upper}` : "Blocked before score"}</dd></div>
+      <div><dt>Evidence</dt><dd>Evidence {draft.market_evidence_status || "UNAVAILABLE"} · quality {evidenceQuality}</dd></div>
+      <div><dt>Frequency</dt><dd>Frequency {frequency.observed_unique_count ?? "unknown"} · {frequency.source || "source unavailable"}<small>{[frequency.method, frequency.snapshot_batch_id, frequency.declared_window].filter(Boolean).join(" · ")}</small></dd></div>
+      <div><dt>Cost</dt><dd>Cost {cost.status || "UNAVAILABLE"} · {cost.source || "source unavailable"}<small>{costRange} · {[cost.scenario, cost.as_of, cost.vat_treatment].filter(Boolean).join(" · ")}</small></dd></div>
+    </dl>
+    <footer><span>Review: доступен</span><strong>Publish: {draft.publish_eligibility || "BLOCKED"}</strong><b>Publish blockers · {blockers.length}</b></footer>
+    {blockers.length > 0 && <small>{blockers.map((item: Record<string, any>) => item.code).join(" · ")}</small>}
+    {draft.visibility === "HIDDEN" && <small>Suppression: {draft.suppression_reason || "Persisted suppression reason missing · FAIL CLOSED"}</small>}
+  </div>;
+}
+
+export function DraftFieldRegistryDisclosure({ registry, draft }: { registry: Record<string, any>; draft: Record<string, any> }) {
+  const fields = Array.isArray(registry?.fields) ? registry.fields : [];
+  return <section className="draft-field-registry" aria-labelledby="draft-field-registry-title">
+    <header><div><p className="eyebrow">EXACT DIRECT v501 PROJECTION</p><h3 id="draft-field-registry-title">Поддерживаемые publishable fields</h3></div><code>{registry?.profile_id}@{registry?.profile_version}</code></header>
+    <p>Editable controls round-trip server-side. Strategy/capability fixed and conditionally absent fields are review-only and are never silently dropped.</p>
+    <div>{fields.map((field: Record<string, any>) => {
+      const projectionValue = projectionFieldValue(draft.publish_projection, field.pointer);
+      const editableValue = field.input_name ? draft[field.input_name] : projectionValue;
+      return <label key={field.pointer} data-direct-field={field.pointer} data-editable={String(field.editable === true)}>
+        <span><strong>{field.label}</strong><code>{field.pointer}</code></span>
+        <small>{field.classification}{field.presence === "NOT_PRESENT" ? " · NOT_PRESENT" : ""}</small>
+        {field.editable === true
+          ? field.input_name === "ad_text"
+            ? <textarea name={field.input_name} required maxLength={field.maximum_length || undefined} defaultValue={displayValue(editableValue)} />
+            : <input name={field.input_name} required maxLength={field.maximum_length || undefined} defaultValue={displayValue(editableValue)} />
+          : <output>{displayValue(projectionValue)}</output>}
+        <em>{field.reason}</em>
+      </label>;
+    })}</div>
+  </section>;
+}
+
+export function DraftEditFeedback({ draft }: { draft: Record<string, any> }) {
+  const save = draft.draft_save_result;
+  if (!save) return null;
+  if (save.material_change !== true) return <section className="draft-edit-feedback no-change" role="status"><strong>{save.message}</strong></section>;
+  const material = draft.material_delta || {};
+  const score = draft.score_delta || {};
+  return <section className="draft-edit-feedback material" role="status">
+    <header><strong>{save.message}</strong><span>Score {score.score?.previous ?? "—"} → {score.score?.current ?? "—"} · rank {score.rank?.previous ?? "—"} → {score.rank?.current ?? "—"}</span></header>
+    <p><b>{material.policy_reason?.code}</b> · {material.policy_reason?.message}</p>
+    <ul>{(material.fields || []).map((field: Record<string, any>) => <li key={field.pointer}><code>{field.pointer}</code><span>{displayValue(field.previous_normalized_value)} → {displayValue(field.current_normalized_value)}</span></li>)}</ul>
+    <details><summary>Dimension contribution deltas</summary><ul>{Object.entries(score.dimensions || {}).map(([name, value]) => <li key={name}><b>{name}</b><span>{String((value as Record<string, any>).delta ?? "blocked")}</span></li>)}</ul></details>
+  </section>;
 }
 
 export function DraftPublicationBlockers({ draft }: { draft: Record<string, any> }) {

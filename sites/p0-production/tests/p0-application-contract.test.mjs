@@ -10,6 +10,7 @@ import {
   P0Application,
   P0ApplicationError,
 } from "../lib/p0-application.ts";
+import { sealCuratedPlaybookRelease } from "../lib/campaign-playbook.ts";
 import { collectOfficialWordstatBatch } from "../lib/market-evidence.ts";
 
 class JsonDurableStore {
@@ -1403,4 +1404,177 @@ test("legacy state with an outcome but no Draft lineage is rejected explicitly",
     (error) => error instanceof P0ApplicationError && error.code === "P0_MIGRATION_LINEAGE_INVALID",
   );
   assert.equal((await store.load("owner")).revision, 3);
+});
+
+function editableDraftValue(draft, overrides = {}) {
+  return {
+    draft_id: draft.draft_id,
+    campaign_name: draft.campaign_name,
+    group_name: draft.group_name,
+    negative_keywords: draft.negative_keywords,
+    keyword: draft.keyword,
+    ad_title: draft.ad_title,
+    ad_text: draft.ad_text,
+    ...overrides,
+  };
+}
+
+async function approvedDraftFixture(t) {
+  const value = await fixture();
+  t.after(() => rm(value.directory, { recursive: true, force: true }));
+  let result = await value.application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/" });
+  result = await value.application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: result.state.context_state.provisional_business_goal.value,
+  });
+  result = await value.application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
+  result = await approveStrategy(value.application, result);
+  return { ...value, result };
+}
+
+test("normalization-only Draft save reports a no-op without inventing a Draft or Recommendation Set revision", async (t) => {
+  const { application, result: approved } = await approvedDraftFixture(t);
+  const generated = approved.state.recommendation_set.drafts.find((draft) => draft.visibility === "VISIBLE");
+  const before = {
+    draft_revision_id: generated.draft_revision_id,
+    publish_fingerprint: generated.publish_fingerprint,
+    recommendation_set_id: approved.state.recommendation_set.recommendation_set_id,
+    score: generated.viability_score,
+  };
+  const reversedNegatives = generated.negative_keywords.split(",").map((item) => item.trim()).reverse().join(", ");
+  const result = await application.command("owner", {
+    action: "save_draft",
+    expected_revision: approved.revision,
+    value: editableDraftValue(generated, {
+      campaign_name: `  ${generated.campaign_name.replaceAll(" ", "   ")}  `,
+      negative_keywords: reversedNegatives,
+    }),
+  });
+  assert.equal(result.state.draft.draft_revision_id, before.draft_revision_id);
+  assert.equal(result.state.draft.publish_fingerprint, before.publish_fingerprint);
+  assert.equal(result.state.recommendation_set.recommendation_set_id, before.recommendation_set_id);
+  assert.deepEqual(result.state.draft.viability_score, before.score);
+  assert.deepEqual(result.state.draft.draft_save_result, {
+    schema_version: "p0-draft-save-result-v1",
+    material_change: false,
+    message: "Нет material changes: нормализация не создала Draft revision.",
+    previous_draft_revision_id: before.draft_revision_id,
+    current_draft_revision_id: before.draft_revision_id,
+    previous_publish_fingerprint: before.publish_fingerprint,
+    current_publish_fingerprint: before.publish_fingerprint,
+    changed_fields: [],
+  });
+  assert.equal(result.state.shortlist, null);
+});
+
+async function governedPlaybookRelease({ releaseId, releaseVersion, family, decisionId }) {
+  const changedFields = ["/direct/keyword/Keyword", "/direct/ad/TextAd/Text"];
+  return sealCuratedPlaybookRelease({
+    schema_version: "p0-curated-playbook-release-v1",
+    contract_version: "1.0.0",
+    release_id: releaseId,
+    release_version: releaseVersion,
+    status: "ACTIVE",
+    approval_status: "APPROVED",
+    promotion_policy: { policy_id: "fixture-promotion-policy", policy_version: "1.0.0", content_digest: `sha256:${"b".repeat(64)}` },
+    approval_attestation: { decision_id: decisionId, actor_id: "fixture-steward", actor_role: "KNOWLEDGE_STEWARD", approved_at: "2026-08-21T09:00:00.000Z" },
+    superseded_by_release_id: null,
+    competitive_sample_rules: [],
+    rules: [{
+      rule_id: `fixture-${family.toLowerCase()}`,
+      rule_version: "1.0.0",
+      contract_version: "1.0.0",
+      state: "ACTIVE",
+      approval_status: "APPROVED",
+      changed_family: family,
+      mechanism: "Deterministic governed fixture treatment.",
+      changed_fields: changedFields,
+      required_capabilities: [],
+      evidence_quality: 80,
+      priority: 10,
+      promotion_policy_id: "fixture-promotion-policy",
+      qualified_evidence_refs: [`fixture-evidence:${family}`],
+      applicability: { campaign_fanout_contract: "campaign-fanout-v1" },
+    }],
+  });
+}
+
+test("active playbook rollback persists a visible recalculation notice and material Direct delta without evaluator traces", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mox-p0-playbook-recalculation-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new JsonDurableStore(join(directory, "state.json"));
+  let releases = [await governedPlaybookRelease({ releaseId: "fixture-release-new", releaseVersion: "2.0.0", family: "QUALIFIED_ACTION", decisionId: "decision-new" })];
+  const application = new P0Application({ store, adapters: adapters({ async readPlaybookReleases() { return releases; } }) });
+  let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/" });
+  result = await application.command("owner", { action: "confirm_context_goal", expected_revision: result.revision, confirmation: "CONFIRM_CONTEXT_GOAL", goal: result.state.context_state.provisional_business_goal.value });
+  result = await application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
+  result = await approveStrategy(application, result);
+  const improvement = result.state.recommendation_set.drafts.find((draft) => draft.variant.kind === "IMPROVEMENT" && draft.visibility === "VISIBLE");
+  assert.ok(improvement);
+  result = await application.command("owner", { action: "save_draft", expected_revision: result.revision, value: editableDraftValue(improvement) });
+  const previous = { draft_id: result.state.draft.draft_id, fingerprint: result.state.draft.publish_fingerprint, generation_order: result.state.draft.generation_order };
+
+  releases = [await governedPlaybookRelease({ releaseId: "fixture-release-rollback", releaseVersion: "1.0.0", family: "MESSAGE_OFFER", decisionId: "decision-rollback" })];
+  result = await application.command("owner", { action: "recalculate_recommendations", expected_revision: result.revision });
+  const notice = result.state.recommendation_recalculation;
+  assert.equal(notice.material_change, true);
+  assert.equal(notice.reason_code, "ACTIVE_PLAYBOOK_RELEASE_CHANGED_OR_ROLLED_BACK");
+  assert.match(notice.message, /изменился или был откачен/u);
+  assert.equal(notice.previous_playbook_release_id, "fixture-release-new");
+  assert.equal(notice.current_playbook_release_id, "fixture-release-rollback");
+  assert.equal(notice.evaluator_traces_exposed, false);
+  assert.equal(Object.hasOwn(notice, "evaluator_trace"), false);
+  assert.equal(notice.changes.length > 0, true);
+  assert.equal(notice.changes.every((change) => change.fields.length > 0), true);
+  assert.equal(result.state.draft.generation_order, previous.generation_order);
+  assert.notEqual(result.state.draft.draft_id, previous.draft_id);
+  assert.notEqual(result.state.draft.publish_fingerprint, previous.fingerprint);
+  assert.equal(result.state.shortlist, null);
+  assert.equal(result.state.recommendation_set.playbook_release.release_id, "fixture-release-rollback");
+});
+
+test("every editable Direct field round-trips into a material immutable Draft revision with full fixed-membership rescore", async (t) => {
+  const { application, result: approved } = await approvedDraftFixture(t);
+  let result = approved;
+  let current = result.state.recommendation_set.drafts.find((draft) => draft.visibility === "VISIBLE");
+  const cases = [
+    ["campaign_name", `${current.campaign_name} · owner`, "/direct/campaign/Name"],
+    ["group_name", `${current.group_name} · owner`, "/direct/ad_group/Name"],
+    ["negative_keywords", `${current.negative_keywords}, реферат`, "/direct/ad_group/NegativeKeywords/Items"],
+    ["keyword", `${current.keyword} цена`, "/direct/keyword/Keyword"],
+    ["ad_title", "Заявка на выставку", "/direct/ad/TextAd/Title"],
+    ["ad_text", "Оставьте заявку на участие в выставке прямо сейчас", "/direct/ad/TextAd/Text"],
+  ];
+  let expectedRevision = 1;
+  for (const [inputName, nextValue, expectedPointer] of cases) {
+    const previousRecommendationSetId = result.state.recommendation_set.recommendation_set_id;
+    const previousFingerprint = current.publish_fingerprint;
+    const previousScores = Object.fromEntries(result.state.recommendation_set.drafts.map((draft) => [draft.draft_id, draft.viability_score.fingerprints.input]));
+    result = await application.command("owner", {
+      action: "save_draft",
+      expected_revision: result.revision,
+      value: editableDraftValue(current, { [inputName]: nextValue }),
+    });
+    current = result.state.draft;
+    expectedRevision += 1;
+    assert.equal(current.draft_revision_id, `${current.draft_id}-r${expectedRevision}`);
+    assert.notEqual(current.publish_fingerprint, previousFingerprint);
+    assert.notEqual(result.state.recommendation_set.recommendation_set_id, previousRecommendationSetId);
+    assert.deepEqual(current.material_delta.fields.map((field) => field.pointer), [expectedPointer]);
+    assert.equal(current.material_delta.fields[0].reason_code, "SUPPORTED_PUBLISHABLE_FIELD_CHANGED");
+    assert.equal(current.draft_save_result.material_change, true);
+    assert.equal(current.score_delta.changed_pointers.includes(expectedPointer), true);
+    assert.equal(typeof current.score_delta.comparative_priority_reason.message, "string");
+    assert.equal(current.score_delta.comparative_priority_reason.message.length > 0, true);
+    assert.equal(result.state.recommendation_set.drafts.length, Object.keys(previousScores).length);
+    for (const draft of result.state.recommendation_set.drafts) {
+      assert.notEqual(draft.viability_score.fingerprints.input, previousScores[draft.draft_id]);
+      assert.equal(draft.viability_score.ranking.recommendation_set_id, result.state.recommendation_set.recommendation_set_id);
+    }
+    assert.equal(result.state.recommendation_set.coverage.generated_count, result.state.recommendation_set.coverage.visible_count + result.state.recommendation_set.coverage.hidden_count);
+    assert.equal(result.state.recommendation_set.coverage.generated_count, result.state.recommendation_set.candidate_audit.length);
+    assert.equal(result.state.shortlist, null);
+  }
 });

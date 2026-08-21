@@ -140,6 +140,83 @@ test("score disclosure names comparative-not-predictive semantics, contributions
   assert.match(html, /landing=false · post-launch=false · calibration=false/);
 });
 
+test("Campaign Canvas card separately discloses variant, comparative rank, evidence, scoped frequency/cost and publish blockers", async (t) => {
+  const { CampaignDraftCard } = await loadComponents(t);
+  const draft = {
+    draft_id: "draft-a",
+    visibility: "VISIBLE",
+    variant: { kind: "IMPROVEMENT", hypothesis: { changed_family: "QUALIFIED_ACTION" } },
+    treatment_delta: { changed_family: "QUALIFIED_ACTION", changed_fields: ["/direct/keyword/Keyword"] },
+    dimensions: { keyword_cluster: "Demand pack: cluster-a", offer: "Целевое действие" },
+    market_evidence_status: "PARTIAL",
+    publish_eligibility: "BLOCKED_EVIDENCE_GAP",
+    publication_blockers: [{ code: "DEMAND_EVIDENCE_GAP", message: "Demand unavailable, not zero" }],
+    viability_score: scoreFixture(),
+  };
+  const html = renderToStaticMarkup(React.createElement(CampaignDraftCard, { draft, selected: true }));
+  assert.match(html, /IMPROVEMENT · QUALIFIED_ACTION/);
+  assert.match(html, /Comparative 72\/100/);
+  assert.match(html, /Semantic rank 1 · tie/);
+  assert.match(html, /Sensitivity 62–82/);
+  assert.match(html, /Evidence PARTIAL · quality 80/);
+  assert.match(html, /Frequency 67 · YANDEX_WORDSTAT_V1/);
+  assert.match(html, /Cost UNAVAILABLE · source unavailable/);
+  assert.match(html, /Review: доступен/);
+  assert.match(html, /Publish: BLOCKED_EVIDENCE_GAP/);
+  assert.match(html, /Publish blockers · 1/);
+});
+
+test("drawer registry renders every accepted Direct field while only the six round-tripped fields are editable", async (t) => {
+  const { DraftFieldRegistryDisclosure } = await loadComponents(t);
+  const { DIRECT_V501_DRAFT_FIELD_REGISTRY } = await import("../lib/campaign-draft-fields.ts");
+  const draft = {
+    campaign_name: "Кампания",
+    group_name: "Группа",
+    negative_keywords: "вакансии, бесплатно",
+    keyword: "участие в выставке",
+    ad_title: "Участие в выставке",
+    ad_text: "Оставьте заявку",
+    publish_projection: {
+      direct: {
+        campaign: { Name: "Кампания", StartDate: "2026-09-01", EndDate: "2026-09-30", UnifiedCampaign: { BiddingStrategy: { Search: { BiddingStrategyType: "WB_MAXIMUM_CLICKS", PlacementTypes: { SearchResults: "YES", ProductGallery: "NO" }, WbMaximumClicks: { WeeklySpendLimit: 50000000000, BidCeiling: 500000000 } }, Network: { BiddingStrategyType: "SERVING_OFF" } } } },
+        ad_group: { Name: "Группа", RegionIds: [213], NegativeKeywords: { Items: ["вакансии", "бесплатно"] }, UnifiedAdGroup: { OfferRetargeting: "NO" } },
+        keyword: { Keyword: "участие в выставке" },
+        ad: { TextAd: { Title: "Участие в выставке", Text: "Оставьте заявку", Href: "https://owner.example/", Mobile: "NO" } },
+      },
+    },
+  };
+  const html = renderToStaticMarkup(React.createElement(DraftFieldRegistryDisclosure, { registry: DIRECT_V501_DRAFT_FIELD_REGISTRY, draft }));
+  assert.equal((html.match(/data-direct-field=/gu) || []).length, 21);
+  assert.equal((html.match(/data-editable="true"/gu) || []).length, 6);
+  assert.match(html, /Название кампании/);
+  assert.match(html, /FIXED_BY_STRATEGY/);
+  assert.match(html, /FIXED_BY_CAPABILITY/);
+  assert.match(html, /AutotargetingSettings/);
+  assert.match(html, /CONDITIONALLY_ELIGIBLE · NOT_PRESENT/);
+  assert.match(html, /Наборы быстрых ссылок/);
+  assert.match(html, /Поле отсутствует/);
+});
+
+test("material and normalization-only drawer feedback exposes field deltas and concise policy reasons without evaluator traces", async (t) => {
+  const { DraftEditFeedback } = await loadComponents(t);
+  const noOp = renderToStaticMarkup(React.createElement(DraftEditFeedback, { draft: { draft_save_result: { material_change: false, message: "Нет material changes: нормализация не создала Draft revision." } } }));
+  assert.match(noOp, /Нет material changes/);
+  const material = renderToStaticMarkup(React.createElement(DraftEditFeedback, { draft: {
+    draft_save_result: { material_change: true, message: "Создана новая immutable Draft revision" },
+    material_delta: {
+      fields: [{ pointer: "/direct/ad/TextAd/Text", previous_normalized_value: "Старый текст", current_normalized_value: "Новый текст" }],
+      policy_reason: { code: "WEIGHTED_SCORE_CHANGED_AFTER_FULL_RESCORE", message: "Comparative score changed through disclosed weighted dimensions." },
+    },
+    score_delta: { score: { previous: 70, current: 72, delta: 2 }, rank: { previous: 2, current: 1 }, dimensions: { demand: { delta: 1.2 } } },
+  } }));
+  assert.match(material, /\/direct\/ad\/TextAd\/Text/);
+  assert.match(material, /Старый текст/);
+  assert.match(material, /Новый текст/);
+  assert.match(material, /WEIGHTED_SCORE_CHANGED_AFTER_FULL_RESCORE/);
+  assert.match(material, /Score 70 → 72/);
+  assert.doesNotMatch(material, /trace|chain.of.thought/iu);
+});
+
 test("blocked score disclosure keeps hard blockers and unresolved gaps separate and has no rank", async (t) => {
   const { ViabilityScoreDisclosure } = await loadComponents(t);
   const score = scoreFixture({

@@ -11,6 +11,7 @@ import {
   isUnprocessedAudience,
   isUnprocessedOffer,
 } from "./business-model.ts";
+import type { CuratedPlaybookRelease } from "./campaign-playbook.ts";
 import {
   buildCampaignNames,
   buildPublishProjection,
@@ -18,8 +19,14 @@ import {
   isLegacySearchName,
 } from "./campaign-draft.ts";
 import {
+  DIRECT_V501_DRAFT_FIELD_REGISTRY,
+  editableDraftFieldNames,
+  nextDraftRevisionId,
+} from "./campaign-draft-fields.ts";
+import {
   buildCampaignRecommendationSet,
   campaignDraftPublishBlockers,
+  directProjectionMaterialDelta,
   fingerprintDirectProjection,
   preserveSelectedConditionalProjection,
   type CampaignRecommendationSet,
@@ -59,7 +66,7 @@ import {
 } from "./landing-advisory.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.6.0";
+export const P0_APPLICATION_CONTRACT_VERSION = "1.7.0";
 export const P0_DOCUMENT_SCHEMA = "p0-application-document-v4";
 const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3"]);
 export const P0_CONTEXT_SCHEMA = "p0-context-v2";
@@ -147,6 +154,19 @@ export type P0Document = {
     confirmed_at: string;
   } | null;
   campaign: Record<string, unknown> | null;
+  recommendation_recalculation: {
+    schema_version: "p0-recommendation-recalculation-v1";
+    material_change: boolean;
+    message: string;
+    reason_code: "ACTIVE_PLAYBOOK_RELEASE_CHANGED_OR_ROLLED_BACK" | "NO_ACTIVE_PLAYBOOK_MATERIAL_CHANGE";
+    recalculated_at: string;
+    previous_recommendation_set_id: string;
+    current_recommendation_set_id: string;
+    previous_playbook_release_id: string | null;
+    current_playbook_release_id: string | null;
+    changes: Array<Record<string, unknown>>;
+    evaluator_traces_exposed: false;
+  } | null;
   last_cascade: {
     schema_version: "p0-recomputation-cascade-v1";
     trigger: "CONTEXT" | "MODEL" | "STRATEGY";
@@ -198,6 +218,7 @@ export interface P0ApplicationAdapters {
     generatedAt: string;
   }): Promise<MarketEvidenceInput>;
   landingAdvisory?: LandingAdvisoryAdapter;
+  readPlaybookReleases?(): Promise<CuratedPlaybookRelease[]>;
   externalWriteConfiguration(): P0ExternalWriteConfiguration;
   createExternalOutcome(input: {
     key: string;
@@ -293,6 +314,9 @@ export const P0_COMMAND_TRUTH_TABLE = {
   run_landing_advisory: (state: P0Document) => Boolean(
     state.strategy && !state.campaign && !state.external_write_intent,
   ),
+  recalculate_recommendations: (state: P0Document) => Boolean(
+    state.strategy && state.recommendation_set && !state.campaign && !state.external_write_intent,
+  ),
   save_draft: (state: P0Document) => Boolean(
     state.strategy && state.recommendation_set && !state.campaign && !state.external_write_intent,
   ),
@@ -333,6 +357,7 @@ function emptyDocument(): P0Document {
     shortlist: null,
     external_write_intent: null,
     campaign: null,
+    recommendation_recalculation: null,
     last_cascade: null,
   };
 }
@@ -865,6 +890,7 @@ function invalidateContextDownstream(state: P0Document) {
   state.draft = null;
   state.shortlist = null;
   state.external_write_intent = null;
+  state.recommendation_recalculation = null;
 }
 
 function invalidateStrategyDownstream(state: P0Document) {
@@ -874,6 +900,7 @@ function invalidateStrategyDownstream(state: P0Document) {
   state.draft = null;
   state.shortlist = null;
   state.external_write_intent = null;
+  state.recommendation_recalculation = null;
 }
 
 async function inferModel(site: SiteAnalysis, context: P0Context): Promise<BusinessModel> {
@@ -1033,7 +1060,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     lineageError("Campaign Strategy не связана с моделью бизнеса.");
   }
 
-  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "landing_advisory_run", "recommendation_set", "draft", "shortlist", "external_write_intent", "campaign", "last_cascade"] as const) {
+  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "landing_advisory_run", "recommendation_set", "draft", "shortlist", "external_write_intent", "campaign", "recommendation_recalculation", "last_cascade"] as const) {
     if (!(key in state)) {
       state[key] = null as never;
       changed = true;
@@ -1122,6 +1149,15 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     });
     if (JSON.stringify(rebuiltQuestionnaire) !== JSON.stringify(state.strategy_questionnaire)) {
       lineageError("Strategy questionnaire contract, field order, metadata или lineage не прошли проверку.");
+    }
+  }
+
+  if (state.recommendation_set) {
+    if (!state.recommendation_set.field_registry) {
+      state.recommendation_set.field_registry = DIRECT_V501_DRAFT_FIELD_REGISTRY;
+      changed = true;
+    } else if (state.recommendation_set.field_registry.schema_version !== DIRECT_V501_DRAFT_FIELD_REGISTRY.schema_version) {
+      lineageError("Recommendation Set использует неподдерживаемый Direct field registry.");
     }
   }
 
@@ -1427,6 +1463,10 @@ export class P0Application {
       adapter: this.adapters.landingAdvisory ?? unavailableLandingAdvisoryAdapter,
       now: () => this.adapters.now(),
     });
+  }
+
+  private async playbookReleases() {
+    return this.adapters.readPlaybookReleases ? await this.adapters.readPlaybookReleases() : [];
   }
 
   private assertContextPreflight(context: P0Context, timestamp: string) {
@@ -1735,7 +1775,7 @@ export class P0Application {
             model: state.business_model as unknown as Record<string, unknown>,
             strategy: state.strategy as unknown as Record<string, unknown>,
             analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
-            playbookReleases: [],
+            playbookReleases: await this.playbookReleases(),
             directCapabilitySnapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
             generatedAt: approvedAt,
           });
@@ -1743,6 +1783,7 @@ export class P0Application {
           state.draft = null;
           state.shortlist = null;
           state.external_write_intent = null;
+          state.recommendation_recalculation = null;
           state.last_cascade.recomputation_status = "COMPLETE";
         } catch (error) {
           const rollbackAt = this.adapters.now();
@@ -1759,12 +1800,75 @@ export class P0Application {
       }
     } else if (action === "run_landing_advisory") {
       state.landing_advisory_run = await this.buildLandingAdvisory(state);
+    } else if (action === "recalculate_recommendations") {
+      if (!state.strategy || !state.business_model || !state.analytics_evidence_snapshot || !state.recommendation_set) {
+        fail("P0_PREREQUISITE_MISSING", "Recommendation recalculation требует exact Strategy, Model, Evidence Snapshot и текущий Recommendation Set.");
+      }
+      const recalculatedAt = this.adapters.now();
+      const previousSet = state.recommendation_set;
+      const currentSet = await buildCampaignRecommendationSet({
+        model: state.business_model as unknown as Record<string, unknown>,
+        strategy: state.strategy as unknown as Record<string, unknown>,
+        analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
+        playbookReleases: await this.playbookReleases(),
+        directCapabilitySnapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
+        generatedAt: recalculatedAt,
+      });
+      const changes = previousSet.drafts.flatMap((previousDraft) => {
+        if (previousDraft.visibility !== "VISIBLE") return [];
+        const replacement = currentSet.drafts.find((candidate) => candidate.generation_order === previousDraft.generation_order);
+        if (!replacement || replacement.publish_fingerprint === previousDraft.publish_fingerprint) return [];
+        const fields = directProjectionMaterialDelta(previousDraft.publish_projection, replacement.publish_projection);
+        return fields.length ? [{
+          previous_draft_id: previousDraft.draft_id,
+          current_draft_id: replacement.draft_id,
+          previous_draft_revision_id: previousDraft.draft_revision_id,
+          current_draft_revision_id: replacement.draft_revision_id,
+          previous_publish_fingerprint: previousDraft.publish_fingerprint,
+          current_publish_fingerprint: replacement.publish_fingerprint,
+          previous_score: previousDraft.viability_score?.score ?? null,
+          current_score: replacement.viability_score?.score ?? null,
+          previous_rank: previousDraft.viability_score?.rank ?? null,
+          current_rank: replacement.viability_score?.rank ?? null,
+          fields,
+          policy_reason: {
+            code: "ACTIVE_PLAYBOOK_PROJECTION_REGENERATED",
+            message: "Active curated playbook lineage changed; the fixed Recommendation Set was regenerated and fully rescored.",
+          },
+        }] : [];
+      });
+      const releaseChanged = previousSet.playbook_release.content_digest !== currentSet.playbook_release.content_digest
+        || previousSet.playbook_release.status !== currentSet.playbook_release.status;
+      if (releaseChanged || previousSet.recommendation_set_id !== currentSet.recommendation_set_id) {
+        const selectedGenerationOrder = state.draft?.generation_order;
+        state.recommendation_set = currentSet;
+        state.draft = selectedGenerationOrder === undefined
+          ? null
+          : currentSet.drafts.find((candidate) => candidate.generation_order === selectedGenerationOrder) ?? null;
+        state.shortlist = null;
+        state.external_write_intent = null;
+      }
+      state.recommendation_recalculation = {
+        schema_version: "p0-recommendation-recalculation-v1",
+        material_change: changes.length > 0,
+        message: changes.length
+          ? "Активный curated playbook изменился или был откачен; видимые неподтверждённые Drafts регенерированы с material projection delta."
+          : "Active playbook check завершён без material изменения видимой Direct projection.",
+        reason_code: changes.length ? "ACTIVE_PLAYBOOK_RELEASE_CHANGED_OR_ROLLED_BACK" : "NO_ACTIVE_PLAYBOOK_MATERIAL_CHANGE",
+        recalculated_at: recalculatedAt,
+        previous_recommendation_set_id: previousSet.recommendation_set_id,
+        current_recommendation_set_id: state.recommendation_set.recommendation_set_id,
+        previous_playbook_release_id: String(previousSet.playbook_release.release_id ?? "") || null,
+        current_playbook_release_id: String(state.recommendation_set.playbook_release.release_id ?? "") || null,
+        changes,
+        evaluator_traces_exposed: false,
+      };
     } else if (action === "save_draft") {
       const value = record(payload.value);
       if (!state.strategy || !state.business_model) {
         fail("P0_PREREQUISITE_MISSING", "Сначала подтвердите модель и Strategy.");
       }
-      const allowedDraftInputs = new Set(["draft_id", "campaign_name", "group_name", "keyword", "negative_keywords", "ad_title", "ad_text"]);
+      const allowedDraftInputs = new Set(["draft_id", ...editableDraftFieldNames()]);
       const unsupportedDraftInput = Object.keys(value).find((field) => !allowedDraftInputs.has(field));
       if (unsupportedDraftInput) {
         fail("P0_DRAFT_FIELD_UNSUPPORTED", `Campaign Draft field ${unsupportedDraftInput} is not editable in the current exact projection contract and was not applied.`);
@@ -1772,18 +1876,31 @@ export class P0Application {
       const draftId = requiredInput(value.draft_id, "Campaign Draft", 255);
       const recommendationSet = state.recommendation_set;
       const generated = recommendationSet?.drafts.find((item) => item.draft_id === draftId);
-      if (!recommendationSet || !generated || generated.visibility !== "VISIBLE") {
+      if (!recommendationSet || !generated) {
         fail("P0_DRAFT_INVALID", "Выбранный Campaign Draft не принадлежит текущей Strategy revision.");
       }
-      const normalized: Record<string, unknown> = {
-        campaign_name: requiredInput(value.campaign_name, "Название кампании", 255),
-        group_name: requiredInput(value.group_name, "Название группы", 255),
-        keyword: requiredInput(value.keyword, "Ключевая фраза", 4_096),
-        negative_keywords: requiredInput(value.negative_keywords, "Минус-фразы", 1_000),
-        ad_title: requiredInput(value.ad_title, "Заголовок объявления", 56),
-        ad_text: requiredInput(value.ad_text, "Текст объявления", 81),
+      const normalizedFields = Object.fromEntries(editableDraftFieldNames().map((fieldName) => {
+        const fieldLabels: Record<string, string> = {
+          campaign_name: "Название кампании",
+          group_name: "Название группы",
+          negative_keywords: "Минус-фразы",
+          keyword: "Ключевая фраза",
+          ad_title: "Заголовок объявления",
+          ad_text: "Текст объявления",
+        };
+        const maximums: Record<string, number> = {
+          campaign_name: 255,
+          group_name: 255,
+          negative_keywords: 1_000,
+          keyword: 4_096,
+          ad_title: 56,
+          ad_text: 81,
+        };
+        return [fieldName, requiredInput(value[fieldName], fieldLabels[fieldName], maximums[fieldName])];
+      }));
+      const lineage = {
         draft_id: draftId,
-        draft_revision_id: `${draftId}-r${current.revision + 1}`,
+        draft_revision_id: generated.draft_revision_id,
         strategy_revision_id: state.strategy.strategy_revision_id,
         capability_profile_id: recommendationSet.capability_profile.profile_id,
         capability_profile_version: recommendationSet.capability_profile.profile_version,
@@ -1792,88 +1909,150 @@ export class P0Application {
         playbook_rule_id: generated.playbook_rule_id,
         playbook_rule_version: generated.playbook_rule_version,
       };
-      const basicProjection = buildPublishProjection(
+      const normalized = { ...normalizedFields, ...lineage };
+      const normalizedProjection = buildPublishProjection(
         state.business_model as unknown as Record<string, unknown>,
         state.strategy,
         normalized,
       ) as unknown as Record<string, unknown>;
-      const preservedCapability = preserveSelectedConditionalProjection({
+      const normalizedCapability = preserveSelectedConditionalProjection({
         generatedDraft: generated,
-        editedProjection: basicProjection,
+        editedProjection: normalizedProjection,
         snapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
       });
-      const projection = preservedCapability.projection;
-      const editableFields = ["campaign_name", "group_name", "keyword", "negative_keywords", "ad_title", "ad_text"] as const;
-      const changedPointers = editableFields
-        .filter((field) => String(generated[field] ?? "") !== String(normalized[field] ?? ""))
-        .map((field) => `/draft/${field}`);
-      const scoreEvidence = state.analytics_evidence_snapshot;
-      if (!scoreEvidence) {
-        fail("P0_EVIDENCE_LINEAGE_INVALID", "Scoring требует persisted Analytics Evidence Snapshot из Model revision.");
-      }
+      const normalizedFingerprint = await fingerprintDirectProjection(normalizedCapability.projection);
       const editedAt = this.adapters.now();
-      const capabilityBlockerCodes = new Set([
-        "UNSUPPORTED_SELECTED_FIELD",
-        "CONDITIONAL_CAPABILITY_EVIDENCE_MISSING",
-        "CONDITIONAL_CAPABILITY_ACCOUNT_INELIGIBLE",
-      ]);
-      const publicationBlockers = (Array.isArray(generated.publication_blockers) ? generated.publication_blockers : [])
-        .filter((blocker) => !capabilityBlockerCodes.has(String((blocker as Record<string, unknown>).code ?? "")));
-      publicationBlockers.push(...preservedCapability.capability_selection.blockers.map((blocker) => ({
-        code: blocker.code,
-        message: blocker.message,
-        field_path: blocker.field_path,
-      })));
-      const publishEligibility = publicationBlockers.some((blocker) => String((blocker as Record<string, unknown>).code ?? "") === "DEMAND_EVIDENCE_GAP")
-        ? "BLOCKED_EVIDENCE_GAP" : publicationBlockers.length === 0 ? "ELIGIBLE" : "BLOCKED_HARD";
-      const editedDraft = {
-        ...generated,
-        ...normalized,
-        source: "OWNER_REVIEWED_PUBLISH_PROJECTION",
-        edited_at: editedAt,
-        capability_selection: preservedCapability.capability_selection,
-        unsupported_fields: preservedCapability.capability_selection.unsupported_fields,
-        publication_blockers: publicationBlockers,
-        shortlist_eligible: publishEligibility === "ELIGIBLE",
-        publish_eligibility: publishEligibility,
-        publish_projection: projection,
-        publish_fingerprint: await fingerprintDirectProjection(projection),
-      } as typeof generated;
-      const exactDraftRevision = recommendationSet.drafts.map((item) => item.draft_id === draftId ? editedDraft : item);
-      const rescoredRecommendationSetId = await recommendationSetRevisionId(recommendationSet.recommendation_set_id, exactDraftRevision);
-      const rescored = await scoreCampaignDrafts({
-        recommendationSetId: rescoredRecommendationSetId,
-        drafts: exactDraftRevision,
-        model: state.business_model as unknown as Record<string, unknown>,
-        strategy: state.strategy,
-        analyticsEvidence: scoreEvidence as unknown as Record<string, unknown>,
-        scoredAt: editedAt,
-      });
-      const currentDraft = rescored.find((item) => item.draft_id === draftId);
-      if (!currentDraft) fail("P0_DRAFT_INVALID", "Пересчёт Campaign Draft не вернул выбранную ревизию.");
-      state.draft = {
-        ...currentDraft,
-        score_delta: explainScoreDelta(generated.viability_score, currentDraft.viability_score, changedPointers),
-      };
-      recommendationSet.recommendation_set_id = rescoredRecommendationSetId;
-      recommendationSet.drafts = rescored.map((item) => item.draft_id === draftId ? state.draft as typeof item : item);
-      recommendationSet.candidate_audit = recommendationSet.candidate_audit.map((candidate) => {
-        if (candidate.candidate_type !== "DRAFT" || !candidate.draft_id) return candidate;
-        const rescoredDraft = recommendationSet.drafts.find((item) => item.draft_id === candidate.draft_id);
-        return rescoredDraft ? {
-          ...candidate,
-          visibility: rescoredDraft.visibility,
-          reason_code: rescoredDraft.visibility === "VISIBLE"
-            ? "VISIBLE:GENERATED_DRAFT"
-            : String(rescoredDraft.suppression_reason || "HIDDEN:STRUCTURAL"),
-        } : candidate;
-      });
-      recommendationSet.coverage.visible_count = recommendationSet.candidate_audit.filter((candidate) => candidate.visibility === "VISIBLE").length;
-      recommendationSet.coverage.hidden_count = recommendationSet.candidate_audit.length - Number(recommendationSet.coverage.visible_count);
-      recommendationSet.coverage.visible_drafts = recommendationSet.drafts.filter((item) => item.visibility === "VISIBLE").length;
-      recommendationSet.coverage.hidden_drafts = recommendationSet.drafts.length - Number(recommendationSet.coverage.visible_drafts);
-      const currentScore = record(state.draft.viability_score);
-      state.shortlist = state.draft.shortlist_eligible === true
+      const noMaterialChange = normalizedFingerprint === generated.publish_fingerprint;
+      if (noMaterialChange) {
+        const draftSaveResult = {
+          schema_version: "p0-draft-save-result-v1",
+          material_change: false,
+          message: "Нет material changes: нормализация не создала Draft revision.",
+          previous_draft_revision_id: generated.draft_revision_id,
+          current_draft_revision_id: generated.draft_revision_id,
+          previous_publish_fingerprint: generated.publish_fingerprint,
+          current_publish_fingerprint: generated.publish_fingerprint,
+          changed_fields: [] as Array<Record<string, unknown>>,
+        };
+        state.draft = {
+          ...generated,
+          material_delta: null,
+          score_delta: null,
+          draft_save_result: draftSaveResult,
+        };
+        recommendationSet.drafts = recommendationSet.drafts.map((item) => item.draft_id === draftId
+          ? state.draft as typeof item : item);
+      } else {
+        const nextDraftRevision = nextDraftRevisionId(draftId, generated.draft_revision_id);
+        const materialLineage = { ...normalized, draft_revision_id: nextDraftRevision };
+        const basicProjection = buildPublishProjection(
+          state.business_model as unknown as Record<string, unknown>,
+          state.strategy,
+          materialLineage,
+        ) as unknown as Record<string, unknown>;
+        const preservedCapability = preserveSelectedConditionalProjection({
+          generatedDraft: generated,
+          editedProjection: basicProjection,
+          snapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
+        });
+        const projection = preservedCapability.projection;
+        const materialFields = directProjectionMaterialDelta(generated.publish_projection, projection);
+        if (!materialFields.length) {
+          fail("P0_DRAFT_MATERIALITY_INVALID", "Publish fingerprint changed without a supported Direct field delta.");
+        }
+        const scoreEvidence = state.analytics_evidence_snapshot;
+        if (!scoreEvidence) {
+          fail("P0_EVIDENCE_LINEAGE_INVALID", "Scoring требует persisted Analytics Evidence Snapshot из Model revision.");
+        }
+        const capabilityBlockerCodes = new Set([
+          "UNSUPPORTED_SELECTED_FIELD",
+          "CONDITIONAL_CAPABILITY_EVIDENCE_MISSING",
+          "CONDITIONAL_CAPABILITY_ACCOUNT_INELIGIBLE",
+        ]);
+        const publicationBlockers = (Array.isArray(generated.publication_blockers) ? generated.publication_blockers : [])
+          .filter((blocker) => !capabilityBlockerCodes.has(String((blocker as Record<string, unknown>).code ?? "")));
+        publicationBlockers.push(...preservedCapability.capability_selection.blockers.map((blocker) => ({
+          code: blocker.code,
+          message: blocker.message,
+          field_path: blocker.field_path,
+        })));
+        const publishEligibility = publicationBlockers.some((blocker) => String((blocker as Record<string, unknown>).code ?? "") === "DEMAND_EVIDENCE_GAP")
+          ? "BLOCKED_EVIDENCE_GAP" : publicationBlockers.length === 0 ? "ELIGIBLE" : "BLOCKED_HARD";
+        const editedDraft = {
+          ...generated,
+          ...materialLineage,
+          source: "OWNER_REVIEWED_PUBLISH_PROJECTION",
+          edited_at: editedAt,
+          capability_selection: preservedCapability.capability_selection,
+          unsupported_fields: preservedCapability.capability_selection.unsupported_fields,
+          publication_blockers: publicationBlockers,
+          shortlist_eligible: publishEligibility === "ELIGIBLE",
+          publish_eligibility: publishEligibility,
+          publish_projection: projection,
+          publish_fingerprint: await fingerprintDirectProjection(projection),
+        } as typeof generated;
+        const exactDraftRevision = recommendationSet.drafts.map((item) => item.draft_id === draftId ? editedDraft : item);
+        const rescoredRecommendationSetId = await recommendationSetRevisionId(recommendationSet.recommendation_set_id, exactDraftRevision);
+        const rescored = await scoreCampaignDrafts({
+          recommendationSetId: rescoredRecommendationSetId,
+          drafts: exactDraftRevision,
+          model: state.business_model as unknown as Record<string, unknown>,
+          strategy: state.strategy,
+          analyticsEvidence: scoreEvidence as unknown as Record<string, unknown>,
+          scoredAt: editedAt,
+        });
+        const currentDraft = rescored.find((item) => item.draft_id === draftId);
+        if (!currentDraft) fail("P0_DRAFT_INVALID", "Пересчёт Campaign Draft не вернул выбранную ревизию.");
+        const scoreDelta = explainScoreDelta(
+          generated.viability_score,
+          currentDraft.viability_score,
+          materialFields.map((field) => field.pointer),
+        );
+        const draftSaveResult = {
+          schema_version: "p0-draft-save-result-v1",
+          material_change: true,
+          message: "Создана новая immutable Draft revision; полный Recommendation Set пересчитан.",
+          previous_draft_revision_id: generated.draft_revision_id,
+          current_draft_revision_id: currentDraft.draft_revision_id,
+          previous_publish_fingerprint: generated.publish_fingerprint,
+          current_publish_fingerprint: currentDraft.publish_fingerprint,
+          changed_fields: materialFields,
+        };
+        state.draft = {
+          ...currentDraft,
+          material_delta: {
+            schema_version: "p0-draft-material-delta-v1",
+            changed_at: editedAt,
+            previous_draft_revision_id: generated.draft_revision_id,
+            current_draft_revision_id: currentDraft.draft_revision_id,
+            previous_publish_fingerprint: generated.publish_fingerprint,
+            current_publish_fingerprint: currentDraft.publish_fingerprint,
+            fields: materialFields,
+            policy_reason: scoreDelta.comparative_priority_reason,
+          },
+          score_delta: scoreDelta,
+          draft_save_result: draftSaveResult,
+        };
+        recommendationSet.recommendation_set_id = rescoredRecommendationSetId;
+        recommendationSet.drafts = rescored.map((item) => item.draft_id === draftId ? state.draft as typeof item : item);
+        recommendationSet.candidate_audit = recommendationSet.candidate_audit.map((candidate) => {
+          if (candidate.candidate_type !== "DRAFT" || !candidate.draft_id) return candidate;
+          const rescoredDraft = recommendationSet.drafts.find((item) => item.draft_id === candidate.draft_id);
+          return rescoredDraft ? {
+            ...candidate,
+            visibility: rescoredDraft.visibility,
+            reason_code: rescoredDraft.visibility === "VISIBLE"
+              ? "VISIBLE:GENERATED_DRAFT"
+              : String(rescoredDraft.suppression_reason || "HIDDEN:STRUCTURAL"),
+          } : candidate;
+        });
+        recommendationSet.coverage.visible_count = recommendationSet.candidate_audit.filter((candidate) => candidate.visibility === "VISIBLE").length;
+        recommendationSet.coverage.hidden_count = recommendationSet.candidate_audit.length - Number(recommendationSet.coverage.visible_count);
+        recommendationSet.coverage.visible_drafts = recommendationSet.drafts.filter((item) => item.visibility === "VISIBLE").length;
+        recommendationSet.coverage.hidden_drafts = recommendationSet.drafts.length - Number(recommendationSet.coverage.visible_drafts);
+      }
+      const currentScore = record(state.draft?.viability_score);
+      state.shortlist = state.draft?.shortlist_eligible === true
         && record(currentScore.eligibility).status === "ELIGIBLE"
         && record(currentScore.evidence_gaps).status === "RESOLVED"
         && state.draft.visibility === "VISIBLE"
@@ -1886,6 +2065,7 @@ export class P0Application {
           }
         : null;
     } else if (action === "confirm_creation") {
+
       if (payload.confirmation !== "CREATE_NON_SERVING_CAMPAIGN") {
         fail("P0_CONFIRMATION_REQUIRED", "Нужно точное подтверждение создания реальной кампании с выключенными показами.");
       }

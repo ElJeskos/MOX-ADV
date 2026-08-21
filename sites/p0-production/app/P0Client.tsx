@@ -2,11 +2,23 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- API payloads are validated server-side and intentionally revisioned. */
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  filterAndSortCampaignDrafts,
+  type CampaignCanvasFilters,
+  type CampaignEvidenceStatus,
+} from "../lib/campaign-canvas";
 import { weeklyBudgetValidationMessage } from "../lib/direct-limits";
 import { landingAdvisoryPriorities } from "../lib/landing-advisory";
 import { MarketEvidenceDisclosure } from "./MarketEvidenceDisclosure";
-import { DraftPublicationBlockers, DraftTreatmentDelta, DraftVariantLabel, RecommendationSetDisclosure, ViabilityScoreDisclosure } from "./RecommendationSetDisclosure";
+import {
+  CampaignDraftCard,
+  DraftEditFeedback,
+  DraftFieldRegistryDisclosure,
+  DraftPublicationBlockers,
+  RecommendationSetDisclosure,
+  ViabilityScoreDisclosure,
+} from "./RecommendationSetDisclosure";
 
 type Payload = {
   contract: { name: string; version: string; document_schema: string };
@@ -95,7 +107,7 @@ export default function P0Client() {
       });
       const next = { ...payload, ...result } as Payload;
       setPayload(next);
-      setStep(next.workflow.current_step);
+      setStep(action === "recalculate_recommendations" ? 3 : next.workflow.current_step);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -468,59 +480,114 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   const existing = payload.state.draft || {};
   const recommendationSet = payload.state.recommendation_set || {};
   const drafts = Array.isArray(recommendationSet.drafts) ? recommendationSet.drafts : [];
-  const visibleDrafts = drafts
-    .filter((item: Record<string, any>) => item.visibility === "VISIBLE")
-    .sort((left: Record<string, any>, right: Record<string, any>) =>
-      Number(left.viability_score?.rank || 999) - Number(right.viability_score?.rank || 999)
-      || String(left.draft_id).localeCompare(String(right.draft_id))
-    );
   const revisionHistory = (Array.isArray(payload.revision_history) ? payload.revision_history : [])
     .filter((item: Record<string, any>) => item.strategy_revision_id || item.draft_revision_id);
-  const [selectedDraftId, setSelectedDraftId] = useState(String(existing.draft_id || visibleDrafts[0]?.draft_id || ""));
-  const generated = visibleDrafts.find((item: Record<string, any>) => item.draft_id === selectedDraftId) || visibleDrafts[0] || existing;
-  const selected = existing.draft_id === generated.draft_id ? { ...generated, ...existing } : generated;
+  const initialDraft = drafts.find((item: Record<string, any>) => item.visibility === "VISIBLE") || drafts[0] || existing;
+  const [selectedDraftId, setSelectedDraftId] = useState(String(existing.draft_id || initialDraft?.draft_id || ""));
+  const [variantFilter, setVariantFilter] = useState<"ALL" | "CONTROL" | "IMPROVEMENT">("ALL");
+  const [evidenceFilter, setEvidenceFilter] = useState<CampaignCanvasFilters["evidence"]>("ALL");
+  const [sort, setSort] = useState<"RANK" | "SCORE">("RANK");
+  const [includeHidden, setIncludeHidden] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+  const lastTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const filteredDrafts = filterAndSortCampaignDrafts(drafts, {
+    variant: variantFilter,
+    evidence: evidenceFilter,
+    sort,
+    includeHidden,
+  });
+  const generated = drafts.find((item: Record<string, any>) => item.draft_id === selectedDraftId) || initialDraft;
+  const selected = existing.draft_id === generated?.draft_id ? { ...generated, ...existing } : generated;
   const selectedShortlistEligible = selected?.shortlist_eligible === true
     && selected?.viability_score?.eligibility?.status === "ELIGIBLE"
-    && selected?.viability_score?.evidence_gaps?.status === "RESOLVED";
+    && selected?.viability_score?.evidence_gaps?.status === "RESOLVED"
+    && selected?.visibility === "VISIBLE";
+  const evidenceStatuses = [...new Set<CampaignEvidenceStatus>(drafts.map((item: Record<string, any>) => String(item.market_evidence_status || "UNAVAILABLE") as CampaignEvidenceStatus))].sort();
+
+  function closeDrawer() {
+    setDrawerOpen(false);
+    queueMicrotask(() => lastTriggerRef.current?.focus());
+  }
+
+  function openDrawer(draftId: string, trigger: HTMLButtonElement) {
+    lastTriggerRef.current = trigger;
+    setSelectedDraftId(draftId);
+    setDrawerOpen(true);
+  }
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    closeButtonRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDrawer();
+        return;
+      }
+      if (event.key !== "Tab" || !drawerRef.current) return;
+      const focusable = [...drawerRef.current.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), summary, [tabindex]:not([tabindex='-1'])")];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [drawerOpen, selectedDraftId]);
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
     const value = {
       draft_id: String(selected.draft_id || ""),
-      ...Object.fromEntries(["campaign_name", "group_name", "keyword", "negative_keywords", "ad_title", "ad_text"].map((name) => [name, fieldValue(form, name)])),
+      ...Object.fromEntries(["campaign_name", "group_name", "negative_keywords", "keyword", "ad_title", "ad_text"].map((name) => [name, fieldValue(form, name)])),
     };
     void apply("save_draft", value);
   }
   return <>
-    <ArtifactHead eyebrow="Шаг 4 · Campaign Drafts" title="Детерминированный fan-out Strategy" copy="Одна immutable Strategy revision дала несколько существенно различающихся полных проекций. Варианты с EVIDENCE_GAP доступны для review, но не входят в shortlist и не могут быть опубликованы." />
+    <ArtifactHead eyebrow="Шаг 4 · Campaign Drafts" title="Campaign Canvas" copy="Ranked cards показывают сравнительный приоритет без predictive claims. Правый drawer редактирует только exact server-supported Direct projection; blocked и hidden Drafts остаются reviewable." />
+    {payload.state.recommendation_recalculation?.material_change === true && <section className="recommendation-recalculated" role="status"><strong>Рекомендация пересчитана</strong><p>{payload.state.recommendation_recalculation.message}</p><ul>{payload.state.recommendation_recalculation.changes?.flatMap((change: Record<string, any>) => change.fields?.map((field: Record<string, any>) => <li key={`${change.previous_draft_id}-${change.current_draft_id}-${field.pointer}`}><code>{field.pointer}</code><span>{evidenceValue(field.previous_normalized_value)} → {evidenceValue(field.current_normalized_value)}</span><small>score {change.previous_score ?? "—"} → {change.current_score ?? "—"} · rank {change.previous_rank ?? "—"} → {change.current_rank ?? "—"}</small></li>))}</ul></section>}
     <RecommendationSetDisclosure recommendationSet={recommendationSet} />
-    <section className="draft-canvas" aria-label="Варианты Campaign Draft">
-      {visibleDrafts.map((item: Record<string, any>) => <button type="button" key={item.draft_id} className={item.draft_id === selected.draft_id ? "selected" : ""} aria-pressed={item.draft_id === selected.draft_id} onClick={() => setSelectedDraftId(item.draft_id)}>
-        <span className="draft-card-head"><DraftVariantLabel draft={item} /><em>{item.viability_score?.score ?? "—"}<small>/100</small></em></span>
-        <strong>{item.dimensions?.keyword_cluster}</strong>
-        <p>{item.dimensions?.offer}</p>
-        <small>COMPARATIVE PRELAUNCH PRIORITY · NOT A PREDICTION</small>
-        <small>{item.viability_score?.rank ? `Rank ${item.viability_score.rank}${item.viability_score?.tied_draft_ids?.length > 1 ? " · semantic tie" : ""} · sensitivity ${item.viability_score.score_lower}–${item.viability_score.score_upper}` : "Score и rank заблокированы до eligibility/evidence"}</small>
-        <small>{item.viability_score?.ranking?.cohort_id || "capability cohort unavailable"}</small>
-        <small>{item.market_evidence_status === "EVIDENCE_GAP" ? "REVIEW ONLY · demand evidence отсутствует" : item.market_evidence_status}</small>
-        <DraftTreatmentDelta draft={item} />
-      </button>)}
+    <section className="canvas-controls" aria-label="Фильтры и сортировка Campaign Canvas">
+      <label><span>Variant</span><select aria-label="Фильтр variant" value={variantFilter} onChange={(event) => setVariantFilter(event.target.value as typeof variantFilter)}><option value="ALL">Все variants</option><option value="CONTROL">Comparator / control</option><option value="IMPROVEMENT">Improvements</option></select></label>
+      <label><span>Evidence</span><select aria-label="Фильтр evidence status" value={evidenceFilter} onChange={(event) => setEvidenceFilter(event.target.value as CampaignCanvasFilters["evidence"])}><option value="ALL">Все evidence statuses</option>{evidenceStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
+      <label><span>Sort</span><select aria-label="Сортировка Drafts" value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="RANK">Semantic rank</option><option value="SCORE">Comparative score</option></select></label>
+      <label className="show-hidden"><input type="checkbox" checked={includeHidden} onChange={(event) => setIncludeHidden(event.target.checked)} /><span>Показать hidden Drafts с suppression reasons</span></label>
+    </section>
+    <section className="draft-canvas" aria-label="Ranked Campaign Draft cards">
+      {filteredDrafts.map((item: Record<string, any>) => <article key={item.draft_id} className={`draft-card-shell ${item.draft_id === selected?.draft_id ? "selected" : ""}`}>
+        <CampaignDraftCard draft={item} selected={item.draft_id === selected?.draft_id} />
+        <button type="button" aria-label={`Открыть Draft ${item.draft_id}`} onClick={(event) => openDrawer(item.draft_id, event.currentTarget)}>Открыть точную Direct projection</button>
+      </article>)}
+      {filteredDrafts.length === 0 && <p className="canvas-empty">Нет Drafts для выбранных deterministic filters. Измените variant/evidence filter; кандидаты остаются в audit.</p>}
     </section>
     {revisionHistory.length > 0 && <details className="hidden-drafts revision-history"><summary>История Strategy и Draft · {revisionHistory.length}</summary><ul>{revisionHistory.map((item: Record<string, any>) => <li key={item.revision}><strong>Ревизия {item.revision} · {item.status}</strong><span>{item.strategy_revision_id}{item.draft_revision_id ? ` · ${item.draft_revision_id}` : " · Draft ещё не зафиксирован"}{item.publish_fingerprint ? ` · ${String(item.publish_fingerprint).slice(0, 12)}…` : ""}</span></li>)}</ul></details>}
-    {selected?.draft_id && <form key={selected.draft_id} className="form two" onSubmit={submit}>
-      <div className="wide draft-lineage"><strong>{selected.variant?.kind === "CONTROL" ? selected.variant?.control_basis?.kind : selected.variant?.hypothesis?.changed_family}</strong><span>{selected.strategy_revision_id} · {selected.draft_revision_id} · {String(selected.publish_fingerprint || "").slice(0, 18)}…</span><small>{selected.playbook_release_id}@{selected.playbook_release_version} · {selected.capability_profile_id}@{selected.capability_profile_version}</small></div>
-      <DraftPublicationBlockers draft={selected} />
-      {selected.market_evidence && <div className="wide"><MarketEvidenceDisclosure evidence={selected.market_evidence} context="draft" /></div>}
-      <ViabilityScoreDisclosure score={selected.viability_score} delta={selected.score_delta} />
-      <label><span>Название кампании</span><input name="campaign_name" required defaultValue={selected.campaign_name} /></label>
-      <label><span>Название группы объявлений</span><input name="group_name" required defaultValue={selected.group_name} /></label>
-      <label className="wide"><span>Ключевая фраза</span><input name="keyword" required defaultValue={selected.keyword} /></label>
-      <label className="wide"><span>Минус-фразы</span><input name="negative_keywords" required defaultValue={selected.negative_keywords} /></label>
-      <label className="wide"><span>Заголовок объявления</span><input name="ad_title" maxLength={56} required defaultValue={selected.ad_title} /><small>До 56 символов.</small></label>
-      <Field wide label="Текст объявления" name="ad_text" maxLength={81} value={selected.ad_text}><small>До 81 символа; слова не обрезаются.</small></Field>
-      {!selectedShortlistEligible && <div className="wide preflight-blocked"><strong>Review only</strong><p>Hard blocker или unresolved EVIDENCE_GAP нельзя обойти score, редактированием или добавлением в shortlist.</p></div>}
-      <div className="wide"><Actions revision={payload.revision} label={selectedShortlistEligible ? "Выбрать и зафиксировать проекцию" : "Сохранить review-правки без shortlist"} back={back} submit /></div>
-    </form>}
+    <footer className="actions"><span>{filteredDrafts.length} Drafts в canvas · {drafts.length} persisted Draft candidates</span><button type="button" className="secondary" onClick={() => void apply("recalculate_recommendations")}>Проверить active playbook</button><button type="button" className="secondary" onClick={back}>Назад</button></footer>
+    {drawerOpen && selected?.draft_id && <div className="drawer-layer">
+      <aside ref={drawerRef} className="campaign-drawer" role="dialog" aria-modal="true" aria-labelledby="campaign-drawer-title">
+        <header className="drawer-head"><div><p className="eyebrow">CAMPAIGN DRAFT · REVIEW</p><h2 id="campaign-drawer-title">Точная будущая Direct projection</h2><span>{selected.draft_revision_id} · {String(selected.publish_fingerprint || "")}</span></div><button ref={closeButtonRef} type="button" aria-label="Закрыть drawer" onClick={closeDrawer}>×</button></header>
+        <div className="drawer-scroll">
+          <div className="draft-lineage"><strong>{selected.variant?.kind === "CONTROL" ? selected.variant?.control_basis?.kind : selected.variant?.hypothesis?.changed_family}</strong><span>{selected.strategy_revision_id} · {selected.draft_revision_id}</span><small>{selected.playbook_release_id || "FAIL_CLOSED"}@{selected.playbook_release_version || "—"} · {selected.capability_profile_id}@{selected.capability_profile_version}</small></div>
+          <DraftPublicationBlockers draft={selected} />
+          {!selectedShortlistEligible && <div className="preflight-blocked"><strong>Review доступен · Publish readiness заблокирована</strong><p>Hard blocker, hidden disposition или unresolved EVIDENCE_GAP нельзя обойти score, edit или provisional shortlist.</p></div>}
+          <DraftEditFeedback draft={selected} />
+          <ViabilityScoreDisclosure score={selected.viability_score} delta={selected.score_delta} />
+          {selected.market_evidence && <MarketEvidenceDisclosure evidence={selected.market_evidence} context="draft" />}
+          <form key={`${selected.draft_id}-${selected.draft_revision_id}-${payload.revision}`} className="drawer-form" onSubmit={submit}>
+            <DraftFieldRegistryDisclosure registry={recommendationSet.field_registry} draft={selected} />
+            <Actions revision={payload.revision} label={selectedShortlistEligible ? "Сохранить material revision" : "Сохранить review-правки без publish readiness"} submit />
+          </form>
+        </div>
+      </aside>
+    </div>}
   </>;
 }
 

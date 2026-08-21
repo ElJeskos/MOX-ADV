@@ -1,5 +1,6 @@
 import { buildAdText, buildAdTitle } from "./ad-copy.ts";
 import { buildPublishProjection } from "./campaign-draft.ts";
+import { DIRECT_V501_DRAFT_FIELD_REGISTRY } from "./campaign-draft-fields.ts";
 import {
   resolveCuratedPlaybookReleases,
   type CompetitiveSampleRule,
@@ -273,8 +274,8 @@ function treatmentProjection(projection: Record<string, unknown>) {
 }
 
 function changedPointers(left: unknown, right: unknown, path = "/direct"): string[] {
-  const leftCanonical = canonicalizeProviderProjection(left);
-  const rightCanonical = canonicalizeProviderProjection(right);
+  const leftCanonical = canonicalizeProviderProjection(left, path === "/direct" ? "" : path.replace(/^\/direct/u, ""));
+  const rightCanonical = canonicalizeProviderProjection(right, path === "/direct" ? "" : path.replace(/^\/direct/u, ""));
   if (JSON.stringify(leftCanonical) === JSON.stringify(rightCanonical)) return [];
   if (!leftCanonical || !rightCanonical || typeof leftCanonical !== "object" || typeof rightCanonical !== "object"
     || Array.isArray(leftCanonical) || Array.isArray(rightCanonical)) return [path];
@@ -284,6 +285,30 @@ function changedPointers(left: unknown, right: unknown, path = "/direct"): strin
     (rightCanonical as Record<string, unknown>)[key],
     `${path}/${key}`,
   ));
+}
+
+function pointerValue(value: unknown, pointer: string) {
+  return pointer.replace(/^\/direct\/?/u, "").split("/").filter(Boolean).reduce<unknown>((current, segment) => {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    return (current as Record<string, unknown>)[segment];
+  }, value);
+}
+
+function safeDeltaValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.slice(0, 64).map(safeDeltaValue);
+  if (!value || typeof value !== "object") return typeof value === "string" ? text(value).slice(0, 4_096) : value ?? null;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 64).map(([key, item]) => [key, safeDeltaValue(item)]));
+}
+
+export function directProjectionMaterialDelta(previousProjection: Record<string, unknown>, currentProjection: Record<string, unknown>) {
+  const previousDirect = previousProjection.direct && typeof previousProjection.direct === "object" ? previousProjection.direct : {};
+  const currentDirect = currentProjection.direct && typeof currentProjection.direct === "object" ? currentProjection.direct : {};
+  return changedPointers(previousDirect, currentDirect).map((pointer) => ({
+    pointer,
+    previous_normalized_value: safeDeltaValue(pointerValue(previousDirect, pointer)),
+    current_normalized_value: safeDeltaValue(pointerValue(currentDirect, pointer)),
+    reason_code: "SUPPORTED_PUBLISHABLE_FIELD_CHANGED",
+  }));
 }
 
 function withoutForbiddenFingerprintFields(value: unknown): unknown {
@@ -486,6 +511,7 @@ export type CampaignRecommendationSet = {
   analytics_evidence_snapshot_id: string | null;
   generated_at: string;
   capability_profile: Record<string, unknown>;
+  field_registry: typeof DIRECT_V501_DRAFT_FIELD_REGISTRY;
   direct_capability_snapshot_id: string | null;
   playbook_release: Record<string, unknown>;
   coverage: Record<string, unknown>;
@@ -879,6 +905,7 @@ export async function buildCampaignRecommendationSet({
       ...CORE_DIRECT_CAPABILITY_PROFILE,
       eligibility: coreCapability,
     },
+    field_registry: DIRECT_V501_DRAFT_FIELD_REGISTRY,
     direct_capability_snapshot_id: directCapabilitySnapshot?.snapshot_id ?? null,
     playbook_release: {
       status: playbook.release ? "ACTIVE_APPROVED" : "BLOCKED_FAIL_CLOSED",

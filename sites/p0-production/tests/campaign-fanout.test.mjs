@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   buildCampaignRecommendationSet,
   campaignDraftPublishBlockers,
+  directProjectionMaterialDelta,
   evaluateDirectCapabilitySelection,
   fingerprintDirectProjection,
   preserveSelectedConditionalProjection,
@@ -65,6 +66,9 @@ test("deterministically fans one approved Strategy revision out into multiple co
   const visible = first.drafts.filter((draft) => draft.visibility === "VISIBLE");
   assert.equal(visible.length, 3);
   assert.equal(first.schema_version, "campaign-recommendation-set-v3");
+  assert.equal(first.field_registry.schema_version, "direct-v501-draft-field-registry-v1");
+  assert.equal(first.field_registry.profile_id, first.capability_profile.profile_id);
+  assert.equal(first.field_registry.fields.filter((field) => field.editable).length, 6);
   assert.equal(first.termination.contract, "FINITE_NON_RECURSIVE_ONE_PASS");
   assert.equal(first.termination.recursion_allowed, false);
   assert.equal(first.coverage.generated_count, first.coverage.visible_count + first.coverage.hidden_count);
@@ -102,7 +106,26 @@ test("canonicalizes only provider-declared unordered arrays before fingerprintin
     await fingerprintDirectProjection(projection),
     await fingerprintDirectProjection(reordered),
   );
+  assert.deepEqual(directProjectionMaterialDelta(projection, reordered), []);
   assert.match(await fingerprintDirectProjection(projection), /^sha256:[a-f0-9]{64}$/u);
+
+  const changed = structuredClone(projection);
+  changed.direct.campaign.Name = "Материально новое имя";
+  changed.direct.ad.TextAd.Text = "Материально новый текст";
+  assert.deepEqual(directProjectionMaterialDelta(projection, changed), [
+    {
+      pointer: "/direct/ad/TextAd/Text",
+      previous_normalized_value: projection.direct.ad.TextAd.Text,
+      current_normalized_value: "Материально новый текст",
+      reason_code: "SUPPORTED_PUBLISHABLE_FIELD_CHANGED",
+    },
+    {
+      pointer: "/direct/campaign/Name",
+      previous_normalized_value: projection.direct.campaign.Name,
+      current_normalized_value: "Материально новое имя",
+      reason_code: "SUPPORTED_PUBLISHABLE_FIELD_CHANGED",
+    },
+  ]);
 
   const ordered = structuredClone(projection);
   ordered.direct.campaign.UnifiedCampaign.Settings = [{ Option: "A" }, { Option: "B" }];

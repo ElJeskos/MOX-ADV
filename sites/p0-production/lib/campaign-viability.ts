@@ -1150,17 +1150,45 @@ export async function scoreCampaignDrafts<T extends DraftCandidate>({
 
 export function explainScoreDelta(previous: ViabilityScoreResult | undefined, current: ViabilityScoreResult | undefined, changedPointers: string[]) {
   const names = Object.keys(WEIGHTS) as DimensionName[];
+  const previousScore = previous?.score ?? null;
+  const currentScore = current?.score ?? null;
+  const previousRank = previous?.rank ?? null;
+  const currentRank = current?.rank ?? null;
+  const priorityReason = previous?.eligibility.status !== current?.eligibility.status
+    ? {
+        code: "HARD_ELIGIBILITY_CHANGED_BEFORE_SCORE",
+        message: "Comparative priority changed because hard eligibility is evaluated before every score and rank.",
+      }
+    : previous?.evidence_gaps.status !== current?.evidence_gaps.status
+      ? {
+          code: "REQUIRED_EVIDENCE_GAP_CHANGED_BEFORE_SCORE",
+          message: "Comparative priority changed because required evidence gaps are evaluated before every score and rank.",
+        }
+      : previousRank !== currentRank
+        ? {
+            code: "RANK_CHANGED_AFTER_FULL_COHORT_RESCORE",
+            message: "Semantic rank changed after deterministic rescoring of the full fixed Recommendation Set cohort.",
+          }
+        : previousScore !== currentScore
+          ? {
+              code: "WEIGHTED_SCORE_CHANGED_AFTER_FULL_RESCORE",
+              message: "Comparative score changed through disclosed weighted dimensions; it is not a performance prediction.",
+            }
+          : {
+              code: "MATERIAL_PROJECTION_CHANGED_PRIORITY_STABLE",
+              message: "The Direct projection changed materially, while deterministic comparative score and semantic rank stayed the same.",
+            };
   return {
     schema_version: "viability-score-delta-v1",
     contract_version: SCORE_CONTRACT_VERSION,
     changed_pointers: [...changedPointers].sort(),
     score: {
-      previous: previous?.score ?? null,
-      current: current?.score ?? null,
-      delta: previous?.score !== null && previous?.score !== undefined && current?.score !== null && current?.score !== undefined
-        ? current.score - previous.score : null,
+      previous: previousScore,
+      current: currentScore,
+      delta: previousScore !== null && currentScore !== null ? currentScore - previousScore : null,
     },
-    rank: { previous: previous?.rank ?? null, current: current?.rank ?? null },
+    rank: { previous: previousRank, current: currentRank },
+    comparative_priority_reason: priorityReason,
     eligibility: { previous: previous?.eligibility.status ?? null, current: current?.eligibility.status ?? null },
     dimensions: Object.fromEntries(names.map((name) => {
       const before = previous?.dimensions?.[name]?.weighted_contribution ?? null;
