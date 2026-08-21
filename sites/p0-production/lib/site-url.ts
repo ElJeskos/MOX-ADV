@@ -61,7 +61,7 @@ function validatePublicHttpsUrl(url: URL) {
   ) {
     throw new Error("Нужен публичный HTTPS-адрес без credentials, нестандартного порта и fragment.");
   }
-  if ([...url.searchParams.keys()].some((key) => /^(?:access[_-]?token|oauth|api[_-]?key|auth|authorization|password|passwd|secret|signature|sig)$/iu.test(key))) {
+  if ([...url.searchParams.keys()].some((key) => /^(?:access[_-]?token|bearer|credential|id[_-]?token|jwt|oauth|api[_-]?key|auth|authorization|password|passwd|private[_-]?key|secret|session|session[_-]?id|signature|sig)$/iu.test(key))) {
     throw new Error("Credential-bearing URL запрещён.");
   }
   const host = url.hostname.toLowerCase();

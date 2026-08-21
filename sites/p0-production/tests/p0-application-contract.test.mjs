@@ -134,6 +134,64 @@ function context() {
   };
 }
 
+function landingAdvisoryAdapter({ performanceScore = 0.8, ctaLabel = "Оставить заявку" } = {}) {
+  return {
+    availability: { available: true, reason: null },
+    async resolveHostname() {
+      return ["93.184.216.34"];
+    },
+    async versions() {
+      return {
+        lighthouse: "12.8.2",
+        chrome: "136.0.7103.113",
+        lighthouse_config: "p0-lighthouse-desktop-1920x1080-v1",
+        axe_core: "4.10.3",
+      };
+    },
+    async inspect(input) {
+      input.policy.authorizeRequest({ url: input.url, method: "GET", resource_type: "document", headers: {}, body_present: false });
+      return {
+        requested_url: input.url,
+        final_url: input.url,
+        redirect_chain: [input.url],
+        network_requests: [{ url: input.url, method: "GET", resource_type: "document", headers: {}, body_present: false }],
+        response_bytes: 100,
+        page: {
+          title: "Промышленная выставка",
+          headings: ["Найдите новых покупателей"],
+          text_excerpt: "Оставьте заявку на участие в промышленной выставке.",
+          ctas: [{ label: ctaLabel, kind: "link" }],
+          forms: [{ method: "POST", action_kind: "same_page", fields_count: 4 }],
+          metrika_tag_detected: true,
+          http_status: 200,
+          content_type: "text/html",
+        },
+        hypotheses: [],
+      };
+    },
+    async runLighthouse() {
+      return {
+        performance_score: performanceScore,
+        metrics: {
+          first_contentful_paint_ms: 1000,
+          largest_contentful_paint_ms: 2000,
+          cumulative_layout_shift: 0.05,
+          total_blocking_time_ms: 150,
+          speed_index_ms: 2400,
+        },
+      };
+    },
+    async runAxe() {
+      return {
+        violations: { count: 0, items: [] },
+        passes: { count: 10, items: [] },
+        incomplete: { count: 1, items: [{ id: "manual", impact: null, nodes: 1, help: "manual review" }] },
+        inapplicable: { count: 2, items: [] },
+      };
+    },
+  };
+}
+
 function adapters(overrides = {}) {
   let tick = 0;
   return {
@@ -313,6 +371,96 @@ test("authoritative application collects market evidence only for a Model revisi
   assert.equal(result.state.recommendation_set.delivery_packing.delivery_buckets.length, 1);
   assert.equal(result.state.recommendation_set.delivery_packing.delivery_buckets[0].disposition, "PACKED");
   assert.equal(result.state.recommendation_set.drafts.every((draft) => draft.market_evidence.frequency.snapshot_batch_id === result.state.analytics_evidence_snapshot.market_evidence.snapshot_batch_id), true);
+});
+
+test("authoritative application persists LandingAdvisoryRun while every publish decision surface remains byte-identical", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mox-p0-landing-isolation-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  async function approvedApplication(name, landingAdvisory) {
+    const store = new JsonDurableStore(join(directory, `${name}.json`));
+    const application = new P0Application({ store, adapters: adapters({ landingAdvisory }) });
+    let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/participate" });
+    result = await application.command("owner", { action: "confirm_context_goal", expected_revision: result.revision, confirmation: "CONFIRM_CONTEXT_GOAL", goal: result.state.context_state.provisional_business_goal.value });
+    result = await application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
+    result = await approveStrategy(application, result, { landing_page: "https://owner.example/participate" });
+    return { application, result };
+  }
+
+  const left = await approvedApplication("left", landingAdvisoryAdapter({ performanceScore: 0.2, ctaLabel: "Подробнее" }));
+  const right = await approvedApplication("right", landingAdvisoryAdapter({ performanceScore: 0.98, ctaLabel: "Оставить заявку" }));
+  assert.notEqual(JSON.stringify(left.result.state.landing_advisory_run.findings), JSON.stringify(right.result.state.landing_advisory_run.findings));
+  assert.equal(left.result.state.landing_advisory_run.strategy_revision_id, left.result.state.strategy.strategy_revision_id);
+  assert.equal(left.result.state.landing_advisory_run.final_url, "https://owner.example/participate");
+
+  function decisionSurface(result) {
+    return JSON.stringify({
+      recommendation_set: result.state.recommendation_set,
+      write_readiness: result.write_readiness,
+      shortlist: result.state.shortlist,
+      external_write_intent: result.state.external_write_intent,
+    });
+  }
+  assert.equal(decisionSurface(left.result), decisionSurface(right.result));
+
+  for (const item of [left, right]) {
+    const visible = item.result.state.recommendation_set.drafts.find((candidate) => candidate.visibility === "VISIBLE");
+    item.result = await item.application.command("owner", {
+      action: "save_draft",
+      expected_revision: item.result.revision,
+      value: {
+        draft_id: visible.draft_id,
+        campaign_name: visible.campaign_name,
+        group_name: visible.group_name,
+        keyword: visible.keyword,
+        negative_keywords: visible.negative_keywords,
+        ad_title: visible.ad_title,
+        ad_text: visible.ad_text,
+      },
+    });
+  }
+  const publishDecision = (result) => JSON.stringify({
+    hard_eligibility: result.state.draft.viability_score.eligibility,
+    publish_readiness: result.state.draft.publish_eligibility,
+    score: result.state.draft.viability_score.score,
+    rank: result.state.draft.viability_score.rank,
+    threshold: result.state.draft.viability_score.visibility,
+    calibration: {
+      status: result.state.draft.viability_score.policy_status,
+      contract_version: result.state.draft.viability_score.contract_version,
+      policy_fingerprint: result.state.draft.viability_score.fingerprints.policy,
+      cohort_fingerprint: result.state.draft.viability_score.fingerprints.cohort,
+    },
+    publish_fingerprint: result.state.draft.publish_fingerprint,
+    canonical_projection: result.state.draft.publish_projection,
+    write_readiness: result.write_readiness,
+  });
+  assert.equal(publishDecision(left.result), publishDecision(right.result));
+
+  const beforeRerun = publishDecision(left.result);
+  left.result = await left.application.command("owner", { action: "run_landing_advisory", expected_revision: left.result.revision });
+  assert.equal(publishDecision(left.result), beforeRerun);
+});
+
+test("rejects malformed persisted LandingAdvisoryRun before it can be queried or used downstream", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mox-p0-landing-corrupt-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new JsonDurableStore(join(directory, "state.json"));
+  const application = new P0Application({ store, adapters: adapters({ landingAdvisory: landingAdvisoryAdapter() }) });
+  let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/participate" });
+  result = await application.command("owner", { action: "confirm_context_goal", expected_revision: result.revision, confirmation: "CONFIRM_CONTEXT_GOAL", goal: result.state.context_state.provisional_business_goal.value });
+  result = await application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
+  await approveStrategy(application, result, { landing_page: "https://owner.example/participate" });
+  const row = await store.load("owner");
+  const corrupted = JSON.parse(row.value_json);
+  corrupted.landing_advisory_run.findings[0].type = "PROMOTED_GUESS";
+  await store.seed("owner", { ...row, value_json: JSON.stringify(corrupted) });
+
+  await assert.rejects(
+    application.query("owner"),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_MIGRATION_LINEAGE_INVALID" && /LandingAdvisoryRun/u.test(error.message),
+  );
+  assert.equal((await store.load("owner")).revision, row.revision);
 });
 
 test("the authoritative contract persists the fixed Strategy questionnaire and freezes one linked immutable revision", async (t) => {

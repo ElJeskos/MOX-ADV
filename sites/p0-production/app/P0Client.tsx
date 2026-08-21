@@ -4,6 +4,7 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { weeklyBudgetValidationMessage } from "../lib/direct-limits";
+import { landingAdvisoryPriorities } from "../lib/landing-advisory";
 import { MarketEvidenceDisclosure } from "./MarketEvidenceDisclosure";
 
 type Payload = {
@@ -314,6 +315,34 @@ function BusinessModelSummary({ model }: { model: Record<string, any> }) {
   return <section className="business-model-summary" aria-labelledby="business-model-summary-title"><header><p className="eyebrow">Business model</p><h3 id="business-model-summary-title">Краткая модель бизнеса</h3></header><div><Metric label="Предложение" value={model.product || "Missing evidence"} copy={model.value || "Ценность не подтверждена"} /><Metric label="Аудитория" value={model.audience || "Missing evidence"} copy={model.exclusions || "Исключения не подтверждены"} /><Metric label="Квалифицированный результат" value={model.qualified_result || "Missing evidence"} copy="Owner confirmation хранится отдельно от first-party evidence" /></div></section>;
 }
 
+const landingDimensionLabels: Record<string, string> = {
+  OFFER_MESSAGE_MATCH: "Offer / message match",
+  CTA_ACTION: "CTA / qualified action",
+  FORMS: "Forms",
+  MEASUREMENT_READINESS: "Measurement readiness",
+  TECHNICAL_ACCESS: "Technical access",
+  PERFORMANCE: "Performance",
+  ACCESSIBILITY: "Accessibility",
+  OBSERVED_METRIKA_BEHAVIOR: "Observed Metrika behavior",
+};
+
+function LandingAdvisoryPanel({ run }: { run: Record<string, any> | null }) {
+  const priorities = landingAdvisoryPriorities(run);
+  const findings = Array.isArray(run?.findings) ? run.findings : [];
+  const coverage = Array.isArray(run?.coverage) ? run.coverage : [];
+  const insufficient = !run || run.status === "INSUFFICIENT_EVIDENCE" || run.status === "SAFETY_BLOCKED" || coverage.some((item: Record<string, any>) => item.evidence_status === "INSUFFICIENT_EVIDENCE");
+  return <section className="landing-advisory" aria-labelledby="landing-advisory-title">
+    <header><div><p className="eyebrow">LANDING PAGE · ADVISORY ONLY</p><h3 id="landing-advisory-title">Landing advisory</h3><p>Неблокирующий анализ точной Strategy revision. Findings не меняют eligibility, publish readiness, score, rank, thresholds, calibration или publish fingerprint.</p></div><strong>ADVISORY · NON-BLOCKING</strong></header>
+    {!run && <div className="advisory-insufficient" role="status"><strong>Недостаточно доказательств</strong><p>Сначала утвердите Campaign Strategy revision. Отсутствие landing findings не считается успехом и не блокирует publish decisions.</p></div>}
+    {run && <>
+      <div className="advisory-lineage"><span>{run.strategy_revision_id}</span><code>{run.final_url || run.requested_url}</code><b>{run.status}</b></div>
+      {insufficient && <div className="advisory-insufficient" role="status"><strong>Insufficient evidence раскрыто явно</strong><p>Неполные tool runs, Metrika coverage или manual-review items не превращены в zero, pass или факт.</p></div>}
+      <section className="advisory-priorities" aria-label="До трёх landing advisory priorities"><h4>Приоритеты · максимум 3</h4>{priorities.length ? <ol>{priorities.map((item) => <li key={item.finding_id}><span>{landingDimensionLabels[item.dimension] || item.dimension}</span><strong>{item.title}</strong><small>{item.type} · {item.evidence_status}</small></li>)}</ol> : <p>Детерминированных приоритетов нет. Это не означает доказанное отсутствие проблем.</p>}</section>
+      <details className="advisory-details"><summary>Все details · evidence types, statuses и tool versions</summary><div className="advisory-tools"><code>{JSON.stringify({ required: run.tools?.required, observed: run.tools?.observed, version_status: run.tools?.version_status })}</code><p>Lighthouse: {run.lighthouse?.runs?.length || 0}/5 sequential desktop runs · median: {run.lighthouse?.median ? "available" : "insufficient evidence"}</p><p>axe incomplete: {run.axe?.categories?.incomplete?.count ?? "unavailable"} · {run.axe?.manual_review?.disclosure}</p></div><ul>{findings.map((item: Record<string, any>) => <li key={item.finding_id}><header><strong>{landingDimensionLabels[item.dimension] || item.dimension}</strong><span>{item.type} · {item.evidence_status}</span></header><p>{item.title}</p><small>{item.detail}</small></li>)}</ul></details>
+    </>}
+  </section>;
+}
+
 function ModelStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>) => Promise<void>; back: () => void }) {
   const model = payload.state.business_model || {};
   const research = model.research || {};
@@ -326,6 +355,7 @@ function ModelStep({ payload, apply, back }: { payload: Payload; apply: (action:
   return <>
     <ArtifactHead eyebrow="Шаг 2 · агентное исследование" title="Агент уже собрал модель бизнеса" copy="Сначала — краткая сводка, затем раскрываемые доказательства. Исправьте только неверную гипотезу или факт, которого действительно нет в разрешённых источниках." badge="AGENT RESEARCH" />
     <BusinessModelSummary model={model} />
+    <LandingAdvisoryPanel run={payload.state.landing_advisory_run || null} />
     {analyticsEvidence && <AnalyticsEvidencePanel evidence={analyticsEvidence} />}
     <div className="research-strip"><Metric label="Исследовано" value={`${research.pages_analyzed || 1} страниц`} copy="First-party public HTTPS" /><Metric label="Источники" value={String(research.sources?.length || 0)} copy={(research.sources || []).join(" · ")} /><Metric label="Сделано агентом" value={`${research.completed_fields?.length || 0} / 5 полей`} copy="Человеку — подтверждение и разногласия" /></div>
     {model.assumptions?.length > 0 && <div className="assumption"><strong>Где нужна проверка</strong><span>{model.assumptions.join(" · ")}</span></div>}

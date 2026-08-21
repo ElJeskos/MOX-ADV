@@ -47,11 +47,18 @@ import {
 import { normalizePublicHttpsUrl } from "./site-url.ts";
 import { cleanText } from "./text.ts";
 import type { MarketEvidenceInput } from "./market-evidence.ts";
+import {
+  runLandingAdvisory,
+  unavailableLandingAdvisoryAdapter,
+  verifyLandingAdvisoryRun,
+  type LandingAdvisoryAdapter,
+  type LandingAdvisoryRun,
+} from "./landing-advisory.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.4.0";
-export const P0_DOCUMENT_SCHEMA = "p0-application-document-v3";
-const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2"]);
+export const P0_APPLICATION_CONTRACT_VERSION = "1.5.0";
+export const P0_DOCUMENT_SCHEMA = "p0-application-document-v4";
+const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3"]);
 export const P0_CONTEXT_SCHEMA = "p0-context-v2";
 const P0_LEGACY_CONTEXT_SCHEMA = "p0-context-v1";
 export const P0_CONTEXT_PREFLIGHT_MAX_AGE_MS = 5 * 60_000;
@@ -119,6 +126,7 @@ export type P0Document = {
   analytics_evidence_snapshot: AnalyticsEvidenceBundle | null;
   strategy_questionnaire: StrategyQuestionnaire | null;
   strategy: CampaignStrategyRevision | Record<string, unknown> | null;
+  landing_advisory_run: LandingAdvisoryRun | null;
   recommendation_set: CampaignRecommendationSet | null;
   draft: Record<string, unknown> | null;
   shortlist: {
@@ -185,6 +193,7 @@ export interface P0ApplicationAdapters {
     context: P0Context;
     generatedAt: string;
   }): Promise<MarketEvidenceInput>;
+  landingAdvisory?: LandingAdvisoryAdapter;
   externalWriteConfiguration(): P0ExternalWriteConfiguration;
   createExternalOutcome(input: {
     key: string;
@@ -277,6 +286,9 @@ export const P0_COMMAND_TRUTH_TABLE = {
     && !state.campaign
     && !state.external_write_intent
   ),
+  run_landing_advisory: (state: P0Document) => Boolean(
+    state.strategy && !state.campaign && !state.external_write_intent,
+  ),
   save_draft: (state: P0Document) => Boolean(
     state.strategy && state.recommendation_set && !state.campaign && !state.external_write_intent,
   ),
@@ -311,6 +323,7 @@ function emptyDocument(): P0Document {
     analytics_evidence_snapshot: null,
     strategy_questionnaire: null,
     strategy: null,
+    landing_advisory_run: null,
     recommendation_set: null,
     draft: null,
     shortlist: null,
@@ -766,6 +779,7 @@ function cascadeRecord(
 function invalidateContextDownstream(state: P0Document) {
   state.strategy_questionnaire = null;
   state.strategy = null;
+  state.landing_advisory_run = null;
   state.recommendation_set = null;
   state.draft = null;
   state.shortlist = null;
@@ -774,6 +788,7 @@ function invalidateContextDownstream(state: P0Document) {
 
 function invalidateStrategyDownstream(state: P0Document) {
   state.strategy = null;
+  state.landing_advisory_run = null;
   state.recommendation_set = null;
   state.draft = null;
   state.shortlist = null;
@@ -937,7 +952,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     lineageError("Campaign Strategy не связана с моделью бизнеса.");
   }
 
-  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "recommendation_set", "draft", "shortlist", "external_write_intent", "campaign", "last_cascade"] as const) {
+  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "landing_advisory_run", "recommendation_set", "draft", "shortlist", "external_write_intent", "campaign", "last_cascade"] as const) {
     if (!(key in state)) {
       state[key] = null as never;
       changed = true;
@@ -1068,6 +1083,19 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
         generatedAt: updatedAt,
       });
       changed = true;
+    }
+  }
+
+  if (state.landing_advisory_run) {
+    if (!strategy) lineageError("LandingAdvisoryRun потерял Campaign Strategy revision.");
+    if (!await verifyLandingAdvisoryRun(state.landing_advisory_run)) {
+      lineageError("LandingAdvisoryRun schema, enums, bounds или content hash verification failed.");
+    }
+    if (
+      state.landing_advisory_run.strategy_revision_id !== strategy.strategy_revision_id
+      || state.landing_advisory_run.requested_url !== normalizePublicHttpsUrl(String(strategyAnswerValue(strategy, "landing_page") ?? "")).toString()
+    ) {
+      lineageError("LandingAdvisoryRun ссылается на другую Strategy revision или landing URL.");
     }
   }
 
@@ -1287,6 +1315,19 @@ export class P0Application {
         ...(marketEvidenceInput ? { market_evidence_input: marketEvidenceInput } : {}),
       },
       generatedAt,
+    });
+  }
+
+  private async buildLandingAdvisory(state: P0Document) {
+    if (!state.strategy || !state.context_state || !state.analytics_evidence_snapshot) {
+      fail("P0_PREREQUISITE_MISSING", "Landing advisory требует exact Strategy, Context и Analytics Evidence Snapshot lineage.");
+    }
+    return runLandingAdvisory({
+      strategy: state.strategy as Record<string, unknown>,
+      contextState: state.context_state as unknown as Record<string, unknown>,
+      analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
+      adapter: this.adapters.landingAdvisory ?? unavailableLandingAdvisoryAdapter,
+      now: () => this.adapters.now(),
     });
   }
 
@@ -1598,6 +1639,7 @@ export class P0Application {
             analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
             generatedAt: approvedAt,
           });
+          state.landing_advisory_run = await this.buildLandingAdvisory(state);
           state.draft = null;
           state.shortlist = null;
           state.external_write_intent = null;
@@ -1615,6 +1657,8 @@ export class P0Application {
           throw error;
         }
       }
+    } else if (action === "run_landing_advisory") {
+      state.landing_advisory_run = await this.buildLandingAdvisory(state);
     } else if (action === "save_draft") {
       const value = record(payload.value);
       if (!state.strategy || !state.business_model) {
