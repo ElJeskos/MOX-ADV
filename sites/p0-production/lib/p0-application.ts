@@ -21,10 +21,10 @@ import {
   buildCampaignRecommendationSet,
   campaignDraftPublishBlockers,
   fingerprintDirectProjection,
+  preserveSelectedConditionalProjection,
   type CampaignRecommendationSet,
   type DirectCapabilitySnapshot,
 } from "./campaign-fanout.ts";
-import { bundledCuratedPlaybookReleases } from "./campaign-playbook.ts";
 import {
   CAMPAIGN_STRATEGY_SCHEMA,
   STRATEGY_QUESTIONNAIRE_SCHEMA,
@@ -1143,7 +1143,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
         model: model as unknown as Record<string, unknown>,
         strategy: strategy as unknown as Record<string, unknown>,
         analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown> | undefined,
-        playbookReleases: await bundledCuratedPlaybookReleases(),
+        playbookReleases: [],
         directCapabilitySnapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
         generatedAt: updatedAt,
       });
@@ -1707,7 +1707,7 @@ export class P0Application {
             model: state.business_model as unknown as Record<string, unknown>,
             strategy: state.strategy as unknown as Record<string, unknown>,
             analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
-            playbookReleases: await bundledCuratedPlaybookReleases(),
+            playbookReleases: [],
             directCapabilitySnapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
             generatedAt: approvedAt,
           });
@@ -1759,11 +1759,17 @@ export class P0Application {
         playbook_rule_id: generated.playbook_rule_id,
         playbook_rule_version: generated.playbook_rule_version,
       };
-      const projection = buildPublishProjection(
+      const basicProjection = buildPublishProjection(
         state.business_model as unknown as Record<string, unknown>,
         state.strategy,
         normalized,
       ) as unknown as Record<string, unknown>;
+      const preservedCapability = preserveSelectedConditionalProjection({
+        generatedDraft: generated,
+        editedProjection: basicProjection,
+        snapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
+      });
+      const projection = preservedCapability.projection;
       const editableFields = ["campaign_name", "group_name", "keyword", "negative_keywords", "ad_title", "ad_text"] as const;
       const changedPointers = editableFields
         .filter((field) => String(generated[field] ?? "") !== String(normalized[field] ?? ""))
@@ -1773,11 +1779,30 @@ export class P0Application {
         fail("P0_EVIDENCE_LINEAGE_INVALID", "Scoring требует persisted Analytics Evidence Snapshot из Model revision.");
       }
       const editedAt = this.adapters.now();
+      const capabilityBlockerCodes = new Set([
+        "UNSUPPORTED_SELECTED_FIELD",
+        "CONDITIONAL_CAPABILITY_EVIDENCE_MISSING",
+        "CONDITIONAL_CAPABILITY_ACCOUNT_INELIGIBLE",
+      ]);
+      const publicationBlockers = (Array.isArray(generated.publication_blockers) ? generated.publication_blockers : [])
+        .filter((blocker) => !capabilityBlockerCodes.has(String((blocker as Record<string, unknown>).code ?? "")));
+      publicationBlockers.push(...preservedCapability.capability_selection.blockers.map((blocker) => ({
+        code: blocker.code,
+        message: blocker.message,
+        field_path: blocker.field_path,
+      })));
+      const publishEligibility = publicationBlockers.some((blocker) => String((blocker as Record<string, unknown>).code ?? "") === "DEMAND_EVIDENCE_GAP")
+        ? "BLOCKED_EVIDENCE_GAP" : publicationBlockers.length === 0 ? "ELIGIBLE" : "BLOCKED_HARD";
       const editedDraft = {
         ...generated,
         ...normalized,
         source: "OWNER_REVIEWED_PUBLISH_PROJECTION",
         edited_at: editedAt,
+        capability_selection: preservedCapability.capability_selection,
+        unsupported_fields: preservedCapability.capability_selection.unsupported_fields,
+        publication_blockers: publicationBlockers,
+        shortlist_eligible: publishEligibility === "ELIGIBLE",
+        publish_eligibility: publishEligibility,
         publish_projection: projection,
         publish_fingerprint: await fingerprintDirectProjection(projection),
       } as typeof generated;

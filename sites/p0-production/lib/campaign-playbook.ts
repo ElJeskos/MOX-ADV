@@ -22,6 +22,8 @@ export type CuratedPlaybookRule = {
   required_capabilities: string[];
   evidence_quality: number;
   priority: number;
+  promotion_policy_id: string;
+  qualified_evidence_refs: string[];
   applicability: { campaign_fanout_contract: "campaign-fanout-v1" | string };
 };
 
@@ -44,7 +46,17 @@ export type CuratedPlaybookRelease = {
   content_digest: string;
   status: "ACTIVE" | "APPROVED" | "QUARANTINED" | "DEACTIVATED" | "SUPERSEDED";
   approval_status: "APPROVED" | "UNAPPROVED";
-  approved_by: string | null;
+  promotion_policy: {
+    policy_id: string;
+    policy_version: string;
+    content_digest: string;
+  };
+  approval_attestation: {
+    decision_id: string;
+    actor_id: string;
+    actor_role: "KNOWLEDGE_STEWARD";
+    approved_at: string;
+  } | null;
   superseded_by_release_id: string | null;
   rules: CuratedPlaybookRule[];
   competitive_sample_rules: CompetitiveSampleRule[];
@@ -150,7 +162,9 @@ function ruleExclusionReason(rule: Partial<CuratedPlaybookRule>) {
     || rule.changed_fields.some((pointer) => !text(pointer).startsWith("/direct/"))
     || !Array.isArray(rule.required_capabilities)
     || !Number.isFinite(rule.evidence_quality) || Number(rule.evidence_quality) < 0 || Number(rule.evidence_quality) > 100
-    || !Number.isFinite(rule.priority)) {
+    || !Number.isFinite(rule.priority) || !text(rule.promotion_policy_id)
+    || !Array.isArray(rule.qualified_evidence_refs) || rule.qualified_evidence_refs.length === 0
+    || rule.qualified_evidence_refs.some((reference) => !text(reference))) {
     return "PLAYBOOK_RULE_MALFORMED";
   }
   if (rule.approval_status !== "APPROVED") return "PLAYBOOK_RULE_UNAPPROVED";
@@ -182,7 +196,12 @@ export async function resolveCuratedPlaybookReleases(releases: CuratedPlaybookRe
       || release.contract_version !== CURATED_PLAYBOOK_RELEASE_CONTRACT_VERSION) reason = "PLAYBOOK_RELEASE_UNKNOWN_VERSION";
     else if (!text(release.release_id) || !semver(release.release_version) || !Array.isArray(release.rules)
       || !Array.isArray(release.competitive_sample_rules) || !await releaseDigestMatches(release)) reason = "PLAYBOOK_RELEASE_MALFORMED";
-    else if (release.approval_status !== "APPROVED" || !text(release.approved_by)) reason = "PLAYBOOK_RELEASE_UNAPPROVED";
+    else if (release.approval_status !== "APPROVED"
+      || !text(release.promotion_policy?.policy_id) || !semver(release.promotion_policy?.policy_version)
+      || !sha256Pattern.test(text(release.promotion_policy?.content_digest))
+      || !text(release.approval_attestation?.decision_id) || !text(release.approval_attestation?.actor_id)
+      || release.approval_attestation?.actor_role !== "KNOWLEDGE_STEWARD"
+      || !Number.isFinite(Date.parse(String(release.approval_attestation?.approved_at)))) reason = "PLAYBOOK_RELEASE_UNAPPROVED";
     else if (release.status !== "ACTIVE") reason = `PLAYBOOK_RELEASE_${text(release.status) || "UNKNOWN_STATE"}`;
     else if (text(release.superseded_by_release_id)) reason = "PLAYBOOK_RELEASE_SUPERSEDED";
     if (reason) audits.push(releaseAudit(release, reason));
@@ -196,7 +215,8 @@ export async function resolveCuratedPlaybookReleases(releases: CuratedPlaybookRe
   const release = accepted[0];
   const rules: CuratedPlaybookRule[] = [];
   for (const rule of release.rules) {
-    const reason = ruleExclusionReason(rule);
+    const reason = ruleExclusionReason(rule)
+      ?? (rule.promotion_policy_id !== release.promotion_policy.policy_id ? "PLAYBOOK_RULE_PROMOTION_POLICY_MISMATCH" : null);
     if (reason) audits.push(ruleAudit(release.release_id, rule, reason));
     else rules.push(rule);
   }
@@ -214,73 +234,4 @@ export async function resolveCuratedPlaybookReleases(releases: CuratedPlaybookRe
     competitiveSampleRules: competitiveSampleRules.sort((left, right) => left.sample_rule_id.localeCompare(right.sample_rule_id)),
     audits,
   };
-}
-
-const BUNDLED_RELEASE: Omit<CuratedPlaybookRelease, "content_digest"> = {
-  schema_version: CURATED_PLAYBOOK_RELEASE_SCHEMA,
-  contract_version: CURATED_PLAYBOOK_RELEASE_CONTRACT_VERSION,
-  release_id: "p0-curated-playbook-2026-08",
-  release_version: "1.0.0",
-  status: "ACTIVE",
-  approval_status: "APPROVED",
-  approved_by: "KNOWLEDGE_STEWARD",
-  superseded_by_release_id: null,
-  rules: [
-    {
-      rule_id: "qualified-action-v1",
-      rule_version: "1.0.0",
-      contract_version: PLAYBOOK_RULE_CONTRACT_VERSION,
-      state: "ACTIVE",
-      approval_status: "APPROVED",
-      changed_family: "QUALIFIED_ACTION",
-      mechanism: "Явное квалифицированное действие может точнее отделить коммерческий спрос.",
-      changed_fields: ["/direct/keyword/Keyword", "/direct/ad/TextAd/Text"],
-      required_capabilities: [],
-      evidence_quality: 82,
-      priority: 10,
-      applicability: { campaign_fanout_contract: "campaign-fanout-v1" },
-    },
-    {
-      rule_id: "audience-specificity-v1",
-      rule_version: "1.0.0",
-      contract_version: PLAYBOOK_RULE_CONTRACT_VERSION,
-      state: "ACTIVE",
-      approval_status: "APPROVED",
-      changed_family: "AUDIENCE_SPECIFICITY",
-      mechanism: "Явное обращение к принимающей решение роли может повысить релевантность сообщения.",
-      changed_fields: ["/direct/keyword/Keyword", "/direct/ad/TextAd/Text"],
-      required_capabilities: [],
-      evidence_quality: 76,
-      priority: 20,
-      applicability: { campaign_fanout_contract: "campaign-fanout-v1" },
-    },
-    {
-      rule_id: "message-offer-contradicted-v1",
-      rule_version: "1.0.0",
-      contract_version: PLAYBOOK_RULE_CONTRACT_VERSION,
-      state: "CONTRADICTED",
-      approval_status: "APPROVED",
-      changed_family: "MESSAGE_OFFER",
-      mechanism: "Историческая framing-гипотеза сохранена только для audit.",
-      changed_fields: ["/direct/keyword/Keyword", "/direct/ad/TextAd/Text"],
-      required_capabilities: [],
-      evidence_quality: 70,
-      priority: 30,
-      applicability: { campaign_fanout_contract: "campaign-fanout-v1" },
-    },
-  ],
-  competitive_sample_rules: [{
-    sample_rule_id: "competitive-pattern-independent-sources",
-    sample_rule_version: "1.0.0",
-    state: "ACTIVE",
-    approval_status: "APPROVED",
-    minimum_independent_sources: 2,
-    required_source_status: "VERIFIED",
-    require_pattern_id: true,
-    require_evidence_ids: true,
-  }],
-};
-
-export async function bundledCuratedPlaybookReleases(): Promise<CuratedPlaybookRelease[]> {
-  return [await sealCuratedPlaybookRelease(structuredClone(BUNDLED_RELEASE))];
 }

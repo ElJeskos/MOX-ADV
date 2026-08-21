@@ -322,8 +322,9 @@ export function evaluateDirectCapabilitySelection({
 }) {
   const blockers: CapabilityBlocker[] = [];
   const unsupportedFields: string[] = [];
+  const normalizedSelectedFields = [...new Set(selectedFields.map(text).filter(Boolean))].sort();
   const selectedCapabilities = new Set(requiredCapabilities.map(text).filter(Boolean));
-  for (const fieldPath of [...new Set(selectedFields.map(text).filter(Boolean))].sort()) {
+  for (const fieldPath of normalizedSelectedFields) {
     const capability = CONDITIONAL_FIELD_CAPABILITY.get(fieldPath);
     if (!capability) {
       blockers.push({
@@ -371,10 +372,55 @@ export function evaluateDirectCapabilitySelection({
   return {
     eligible: blockers.length === 0,
     selected_capabilities: [...selectedCapabilities].sort(),
+    selected_fields: normalizedSelectedFields,
     unsupported_fields: [...new Set(unsupportedFields)].sort(),
     blockers,
     capability_snapshot_id: snapshot?.snapshot_id ?? null,
   };
+}
+
+export function preserveSelectedConditionalProjection({
+  generatedDraft,
+  editedProjection,
+  snapshot,
+}: {
+  generatedDraft: Record<string, unknown>;
+  editedProjection: Record<string, unknown>;
+  snapshot?: DirectCapabilitySnapshot | null;
+}) {
+  const projection = structuredClone(editedProjection);
+  const sourceDirect = (generatedDraft.publish_projection as Record<string, unknown> | undefined)?.direct as Record<string, unknown> | undefined;
+  const targetDirect = projection.direct as Record<string, unknown>;
+  const previousSelection = generatedDraft.capability_selection as Record<string, unknown> | undefined;
+  const selectedCapabilities = Array.isArray(previousSelection?.selected_capabilities)
+    ? previousSelection.selected_capabilities.map(text).filter(Boolean) : [];
+  const selectedFields = Array.isArray(previousSelection?.selected_fields)
+    ? previousSelection.selected_fields.map(text).filter(Boolean) : [];
+  if (selectedCapabilities.includes("AUTOTARGETING") && sourceDirect?.keyword && targetDirect.keyword) {
+    const sourceKeyword = sourceDirect.keyword as Record<string, unknown>;
+    if (Object.hasOwn(sourceKeyword, "AutotargetingSettings")) {
+      (targetDirect.keyword as Record<string, unknown>).AutotargetingSettings = structuredClone(sourceKeyword.AutotargetingSettings);
+    }
+  }
+  if (selectedCapabilities.includes("PRODUCT_GALLERY") && sourceDirect?.campaign && targetDirect.campaign) {
+    const sourceSearch = (((sourceDirect.campaign as Record<string, unknown>).UnifiedCampaign as Record<string, unknown>)?.BiddingStrategy as Record<string, unknown>)?.Search as Record<string, unknown>;
+    const targetSearch = (((targetDirect.campaign as Record<string, unknown>).UnifiedCampaign as Record<string, unknown>)?.BiddingStrategy as Record<string, unknown>)?.Search as Record<string, unknown>;
+    if (sourceSearch?.PlacementTypes && targetSearch) targetSearch.PlacementTypes = structuredClone(sourceSearch.PlacementTypes);
+  }
+  if (selectedCapabilities.includes("NETWORK") && sourceDirect?.campaign && targetDirect.campaign) {
+    const sourceBidding = ((sourceDirect.campaign as Record<string, unknown>).UnifiedCampaign as Record<string, unknown>)?.BiddingStrategy as Record<string, unknown>;
+    const targetBidding = ((targetDirect.campaign as Record<string, unknown>).UnifiedCampaign as Record<string, unknown>)?.BiddingStrategy as Record<string, unknown>;
+    if (sourceBidding?.Network && targetBidding) targetBidding.Network = structuredClone(sourceBidding.Network);
+  }
+  if (selectedCapabilities.includes("SITELINKS") && sourceDirect?.sitelink_sets) {
+    targetDirect.sitelink_sets = structuredClone(sourceDirect.sitelink_sets);
+  }
+  const capabilitySelection = evaluateDirectCapabilitySelection({
+    selectedFields,
+    requiredCapabilities: selectedCapabilities,
+    snapshot,
+  });
+  return { projection, capability_selection: capabilitySelection };
 }
 
 export function campaignDraftPublishBlockers(draft: Record<string, unknown> | null | undefined) {

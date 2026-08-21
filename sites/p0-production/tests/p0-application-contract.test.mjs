@@ -406,7 +406,11 @@ test("authoritative application collects market evidence only for a Model revisi
   assert.equal(result.state.context_state.facts.direct.capability_snapshot.source, "YANDEX_DIRECT_API_V501");
   assert.equal(result.state.recommendation_set.direct_capability_snapshot_id, result.state.context_state.facts.direct.capability_snapshot.snapshot_id);
   assert.equal(result.state.recommendation_set.capability_profile.eligibility.eligible, true);
-  assert.equal(result.state.recommendation_set.playbook_release.status, "ACTIVE_APPROVED");
+  assert.equal(result.state.recommendation_set.playbook_release.status, "BLOCKED_FAIL_CLOSED");
+  assert.equal(result.state.recommendation_set.drafts.length, 1);
+  assert.equal(result.state.recommendation_set.drafts[0].variant.control_basis.kind, "STRATEGY_BASELINE_FALLBACK");
+  assert.equal(result.state.recommendation_set.drafts[0].publish_eligibility, "BLOCKED_HARD");
+  assert.equal(result.state.recommendation_set.candidate_audit.some((candidate) => candidate.reason_code === "HIDDEN:PLAYBOOK_NO_ACTIVE_APPROVED_RELEASE"), true);
   assert.equal(result.state.recommendation_set.drafts.every((draft) => draft.market_evidence.frequency.snapshot_batch_id === result.state.analytics_evidence_snapshot.market_evidence.snapshot_batch_id), true);
 });
 

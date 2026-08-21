@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildCampaignRecommendationSet } from "../lib/campaign-fanout.ts";
-import { bundledCuratedPlaybookReleases } from "../lib/campaign-playbook.ts";
+import { sealCuratedPlaybookRelease } from "../lib/campaign-playbook.ts";
 import { explainScoreDelta, scoreCampaignDrafts, viabilityScorePolicy } from "../lib/campaign-viability.ts";
 
 const model = {
@@ -58,12 +58,44 @@ const evidence = {
   prelaunch_cost: { status: "UNAVAILABLE" },
 };
 
+async function playbookFixture() {
+  const rule = (rule_id, changed_family, priority) => ({
+    rule_id,
+    rule_version: "1.0.0",
+    contract_version: "1.0.0",
+    state: "ACTIVE",
+    approval_status: "APPROVED",
+    changed_family,
+    mechanism: "Deterministic test-only improvement.",
+    changed_fields: ["/direct/keyword/Keyword", "/direct/ad/TextAd/Text"],
+    required_capabilities: [],
+    evidence_quality: 80,
+    priority,
+    promotion_policy_id: "test-promotion-policy-v1",
+    qualified_evidence_refs: [`test-evidence:${rule_id}`],
+    applicability: { campaign_fanout_contract: "campaign-fanout-v1" },
+  });
+  return [await sealCuratedPlaybookRelease({
+    schema_version: "p0-curated-playbook-release-v1",
+    contract_version: "1.0.0",
+    release_id: "test-viability-release",
+    release_version: "1.0.0",
+    status: "ACTIVE",
+    approval_status: "APPROVED",
+    promotion_policy: { policy_id: "test-promotion-policy-v1", policy_version: "1.0.0", content_digest: `sha256:${"c".repeat(64)}` },
+    approval_attestation: { decision_id: "test-decision", actor_id: "test-steward", actor_role: "KNOWLEDGE_STEWARD", approved_at: "2026-08-21T11:00:00.000Z" },
+    superseded_by_release_id: null,
+    rules: [rule("qualified-action-v1", "QUALIFIED_ACTION", 10), rule("audience-specificity-v1", "AUDIENCE_SPECIFICITY", 20)],
+    competitive_sample_rules: [],
+  })];
+}
+
 async function recommendationSet(analyticsEvidence = evidence) {
   return buildCampaignRecommendationSet({
     model,
     strategy,
     analyticsEvidence,
-    playbookReleases: await bundledCuratedPlaybookReleases(),
+    playbookReleases: await playbookFixture(),
     generatedAt: "2026-08-21T12:00:00.000Z",
   });
 }

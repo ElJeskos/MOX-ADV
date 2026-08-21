@@ -1,0 +1,94 @@
+{
+  "schema_version": "campaign-recommendation-set-v3",
+  "recommendation_set_id": "recommendation-set-eae5d625014af42e5d1e",
+  "capability_profile": "direct-v501-unified-search-explicit-text@1.0.0",
+  "playbook_release": "test-curated-release-default@1.0.0",
+  "coverage": {
+    "status": "COMPLETE",
+    "generated_count": 4,
+    "visible_count": 3,
+    "hidden_count": 1,
+    "candidates_total": 4,
+    "visible_drafts": 3,
+    "hidden_drafts": 0,
+    "audited_non_draft_candidates": 1,
+    "publishable_drafts": 3,
+    "evidence_gap_drafts": 0,
+    "reconciliation": {
+      "generated_equals_visible_plus_hidden": true,
+      "generated_equals_audited": true,
+      "unaudited_candidate_ids": []
+    },
+    "uncovered_axis_members": []
+  },
+  "termination": {
+    "contract": "FINITE_NON_RECURSIVE_ONE_PASS",
+    "recursion_allowed": false,
+    "delivery_buckets": 1,
+    "comparators_per_bucket": 1,
+    "maximum_improvements_per_bucket": 2,
+    "maximum_drafts_per_bucket": 3,
+    "generated_draft_count": 3,
+    "all_candidates_terminal": true
+  },
+  "draft_identities": [
+    {
+      "draft_id": "draft-84bf7e71993fda9a5514",
+      "draft_revision_id": "draft-84bf7e71993fda9a5514-r1",
+      "variant": "CONTROL",
+      "playbook_rule_id": null,
+      "visibility": "VISIBLE",
+      "suppression_reason": null,
+      "publish_fingerprint": "sha256:cb4ab66a7b5cdb2a277f1813cc1f538608f8ec2b7e4bda16a00f58ba55655e21",
+      "changed_fields": []
+    },
+    {
+      "draft_id": "draft-040a023bb3a0441de667",
+      "draft_revision_id": "draft-040a023bb3a0441de667-r1",
+      "variant": "QUALIFIED_ACTION",
+      "playbook_rule_id": "qualified-action-v1",
+      "visibility": "VISIBLE",
+      "suppression_reason": null,
+      "publish_fingerprint": "sha256:712ab5427d215d0d9a149e53b8aa717808267879ab6380094b3fe5e7a26b384b",
+      "changed_fields": [
+        "/direct/ad/TextAd/Text",
+        "/direct/keyword/Keyword"
+      ]
+    },
+    {
+      "draft_id": "draft-070206df41eca1786bc6",
+      "draft_revision_id": "draft-070206df41eca1786bc6-r1",
+      "variant": "AUDIENCE_SPECIFICITY",
+      "playbook_rule_id": "audience-specificity-v1",
+      "visibility": "VISIBLE",
+      "suppression_reason": null,
+      "publish_fingerprint": "sha256:3821c19d1c2791f0503aa31c2d05674cc1c546e66ff93daf10448edda262bd43",
+      "changed_fields": [
+        "/direct/ad/TextAd/Text",
+        "/direct/keyword/Keyword"
+      ]
+    }
+  ],
+  "candidate_dispositions": [
+    {
+      "candidate_id": "draft-candidate:draft-040a023bb3a0441de667",
+      "visibility": "VISIBLE",
+      "reason_code": "VISIBLE:GENERATED_DRAFT"
+    },
+    {
+      "candidate_id": "draft-candidate:draft-070206df41eca1786bc6",
+      "visibility": "VISIBLE",
+      "reason_code": "VISIBLE:GENERATED_DRAFT"
+    },
+    {
+      "candidate_id": "draft-candidate:draft-84bf7e71993fda9a5514",
+      "visibility": "VISIBLE",
+      "reason_code": "VISIBLE:GENERATED_DRAFT"
+    },
+    {
+      "candidate_id": "playbook-rule:test-curated-release-default:message-offer-contradicted-v1:PLAYBOOK_RULE_CONTRADICTED",
+      "visibility": "HIDDEN",
+      "reason_code": "HIDDEN:PLAYBOOK_RULE_CONTRADICTED"
+    }
+  ]
+}

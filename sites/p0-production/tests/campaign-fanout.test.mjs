@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -6,11 +7,9 @@ import {
   campaignDraftPublishBlockers,
   evaluateDirectCapabilitySelection,
   fingerprintDirectProjection,
+  preserveSelectedConditionalProjection,
 } from "../lib/campaign-fanout.ts";
-import {
-  bundledCuratedPlaybookReleases,
-  sealCuratedPlaybookRelease,
-} from "../lib/campaign-playbook.ts";
+import { sealCuratedPlaybookRelease } from "../lib/campaign-playbook.ts";
 
 const model = {
   product: "Участие со стендом в выставке ИННОПРОМ",
@@ -51,7 +50,7 @@ async function recommendationSet(analyticsEvidence = null, overrides = {}) {
     model,
     strategy,
     analyticsEvidence,
-    playbookReleases: await bundledCuratedPlaybookReleases(),
+    playbookReleases: await defaultPlaybookFixtureReleases(),
     directCapabilitySnapshot: coreCapabilitySnapshot,
     generatedAt: "2026-08-21T12:00:00.000Z",
     ...overrides,
@@ -227,6 +226,8 @@ function playbookRule(rule_id, overrides = {}) {
     required_capabilities: [],
     evidence_quality: 80,
     priority: 10,
+    promotion_policy_id: "test-promotion-policy-v1",
+    qualified_evidence_refs: [`test-qualified-evidence:${rule_id}`],
     applicability: { campaign_fanout_contract: "campaign-fanout-v1" },
     ...overrides,
   };
@@ -240,12 +241,42 @@ async function playbookRelease(rules, overrides = {}) {
     release_version: "1.0.0",
     status: "ACTIVE",
     approval_status: "APPROVED",
-    approved_by: "KNOWLEDGE_STEWARD",
+    promotion_policy: {
+      policy_id: "test-promotion-policy-v1",
+      policy_version: "1.0.0",
+      content_digest: `sha256:${"b".repeat(64)}`,
+    },
+    approval_attestation: {
+      decision_id: "test-playbook-approval-1",
+      actor_id: "test-knowledge-steward",
+      actor_role: "KNOWLEDGE_STEWARD",
+      approved_at: "2026-08-21T11:00:00.000Z",
+    },
     superseded_by_release_id: null,
     rules,
     competitive_sample_rules: [],
     ...overrides,
   });
+}
+
+async function defaultPlaybookFixtureReleases() {
+  return [await playbookRelease([
+    playbookRule("qualified-action-v1", { changed_family: "QUALIFIED_ACTION", priority: 10, evidence_quality: 82 }),
+    playbookRule("audience-specificity-v1", { changed_family: "AUDIENCE_SPECIFICITY", priority: 20, evidence_quality: 76 }),
+    playbookRule("message-offer-contradicted-v1", { changed_family: "MESSAGE_OFFER", state: "CONTRADICTED", priority: 30, evidence_quality: 70 }),
+  ], {
+    release_id: "test-curated-release-default",
+    competitive_sample_rules: [{
+      sample_rule_id: "competitive-pattern-independent-sources",
+      sample_rule_version: "1.0.0",
+      state: "ACTIVE",
+      approval_status: "APPROVED",
+      minimum_independent_sources: 2,
+      required_source_status: "VERIFIED",
+      require_pattern_id: true,
+      require_evidence_ids: true,
+    }],
+  })];
 }
 
 const availableDemandEvidence = {
@@ -263,6 +294,35 @@ const availableDemandEvidence = {
     cost: { status: "UNAVAILABLE", compact_source: null, observations: [] },
   },
 };
+
+test("matches the checked-in Recommendation Set identity and disposition golden", async () => {
+  const value = await recommendationSet(availableDemandEvidence);
+  const actual = {
+    schema_version: value.schema_version,
+    recommendation_set_id: value.recommendation_set_id,
+    capability_profile: `${value.capability_profile.profile_id}@${value.capability_profile.profile_version}`,
+    playbook_release: `${value.playbook_release.release_id}@${value.playbook_release.release_version}`,
+    coverage: value.coverage,
+    termination: value.termination,
+    draft_identities: value.drafts.map((draft) => ({
+      draft_id: draft.draft_id,
+      draft_revision_id: draft.draft_revision_id,
+      variant: draft.variant.code,
+      playbook_rule_id: draft.playbook_rule_id,
+      visibility: draft.visibility,
+      suppression_reason: draft.suppression_reason,
+      publish_fingerprint: draft.publish_fingerprint,
+      changed_fields: draft.treatment_delta?.changed_fields ?? [],
+    })),
+    candidate_dispositions: value.candidate_audit.map((candidate) => ({
+      candidate_id: candidate.candidate_id,
+      visibility: candidate.visibility,
+      reason_code: candidate.reason_code,
+    })),
+  };
+  const expected = JSON.parse(await readFile(new URL("./fixtures/recommendation-set-golden.json", import.meta.url), "utf8"));
+  assert.deepEqual(actual, expected);
+});
 
 test("packs compatible keyword clusters before a finite product-audience-offer fan-out", async () => {
   const value = await recommendationSet(availableDemandEvidence);
@@ -363,7 +423,7 @@ test("filters curated releases and rule states fail closed while pinning exact a
 test("excludes unavailable, superseded, malformed, unapproved and unknown-version releases fail closed", async () => {
   const quarantined = await playbookRelease([], { release_id: "release-quarantined", status: "QUARANTINED" });
   const superseded = await playbookRelease([], { release_id: "release-superseded", superseded_by_release_id: "release-next" });
-  const unapproved = await playbookRelease([], { release_id: "release-unapproved", approval_status: "UNAPPROVED", approved_by: null });
+  const unapproved = await playbookRelease([], { release_id: "release-unapproved", approval_status: "UNAPPROVED", approval_attestation: null });
   const unknown = await playbookRelease([], { release_id: "release-unknown", contract_version: "99.0.0" });
   const malformed = { ...await playbookRelease([], { release_id: "release-malformed" }), content_digest: "sha256:invalid" };
   const value = await recommendationSet(availableDemandEvidence, {
@@ -431,6 +491,21 @@ test("blocks conditional or unknown selected fields without silently dropping th
   assert.equal(eligibleDraft.visibility, "VISIBLE");
   assert.equal(eligibleDraft.publish_eligibility, "ELIGIBLE");
   assert.equal(eligibleDraft.direct_capability_snapshot_id, snapshot.snapshot_id);
+
+  const ownerEditedProjection = structuredClone(eligibleDraft.publish_projection);
+  delete ownerEditedProjection.direct.keyword.AutotargetingSettings;
+  ownerEditedProjection.direct.ad.TextAd.Text = "Owner-edited text";
+  const preserved = preserveSelectedConditionalProjection({
+    generatedDraft: eligibleDraft,
+    editedProjection: ownerEditedProjection,
+    snapshot,
+  });
+  assert.deepEqual(
+    preserved.projection.direct.keyword.AutotargetingSettings,
+    eligibleDraft.publish_projection.direct.keyword.AutotargetingSettings,
+  );
+  assert.equal(preserved.projection.direct.ad.TextAd.Text, "Owner-edited text");
+  assert.equal(preserved.capability_selection.eligible, true);
 });
 
 test("pins Strategy, Draft, capability profile and playbook IDs in immutable Draft identity", async () => {
@@ -450,7 +525,7 @@ test("pins Strategy, Draft, capability profile and playbook IDs in immutable Dra
     model,
     strategy: nextStrategy,
     analyticsEvidence: availableDemandEvidence,
-    playbookReleases: await bundledCuratedPlaybookReleases(),
+    playbookReleases: await defaultPlaybookFixtureReleases(),
     directCapabilitySnapshot: coreCapabilitySnapshot,
     generatedAt: "2026-08-21T12:00:00.000Z",
   });
