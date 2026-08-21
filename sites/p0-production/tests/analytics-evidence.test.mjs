@@ -229,7 +229,7 @@ test("keeps first-party public and owner-confirmed provenance in separate source
   ]);
   assert.equal(records.find((item) => item.source_kind === "first_party_web")?.source_id, "first-party-web");
   assert.equal(records.find((item) => item.source_kind === "owner_confirmation")?.source_id, "owner-confirmed");
-  assert.equal(result.sources.find((item) => item.source_id === "first-party-web")?.status, "VERIFIED");
+  assert.equal(result.sources.find((item) => item.source_id === "first-party-web")?.status, "PARTIAL");
   assert.equal(result.sources.find((item) => item.source_id === "owner-confirmed")?.status, "VERIFIED");
 });
 
@@ -270,6 +270,35 @@ test("attaches exact Direct read scope and treats unavailable current inventory 
   assert.ok(unavailable.gaps.some((item) => item.code === "CURRENT_DIRECT_INVENTORY_UNAVAILABLE" && item.material));
 });
 
+test("rejects non-official Metrika report provenance instead of relabeling metrics as API evidence", async () => {
+  const input = fixture();
+  input.context.performance.provenance.source_kind = "OWNER_SPREADSHEET";
+  const result = await buildAnalyticsEvidence(input);
+
+  assert.equal(result.claims.some((item) => item.predicate === "observed_performance"), false);
+  assert.equal(result.evidence.some((item) => item.source_kind === "metrica_reports_api"), false);
+  assert.equal(result.sources.find((item) => item.source_id === "metrika")?.status, "PARTIAL");
+  assert.ok(result.gaps.some((item) => item.code === "METRIKA_REPORT_UNAVAILABLE"));
+});
+
+test("treats absent Metrika sampling/privacy/lag metadata as partial unknown, never an unsampled assertion", async () => {
+  const input = fixture();
+  delete input.context.performance.provenance.sampling;
+  const result = await buildAnalyticsEvidence(input);
+  const source = result.sources.find((item) => item.source_id === "metrika");
+  const claim = result.claims.find((item) => item.predicate === "observed_performance");
+  const record = result.evidence.find((item) => item.source_kind === "metrica_reports_api");
+
+  assert.equal(source?.status, "PARTIAL");
+  assert.equal(claim?.confidence.coverage, "partial");
+  assert.ok(claim?.confidence.uncertainty.some((item) => item.includes("metadata unavailable")));
+  assert.equal(record?.provider_metadata.metrika_report.metadata_complete, false);
+  assert.equal(record?.provider_metadata.metrika_report.sampled, null);
+  assert.equal(record?.provider_metadata.metrika_report.contains_sensitive_data, null);
+  assert.equal(record?.provider_metadata.metrika_report.data_lag, null);
+  assert.ok(record?.quality_flags.includes("SAMPLING_METADATA_UNAVAILABLE"));
+});
+
 test("preserves Metrika sampling, privacy, lag, attribution and exact counter/goal binding as partial metadata", async () => {
   const result = await buildAnalyticsEvidence(fixture({ sampled: true, sensitive: true, lag: 7200 }));
   const source = result.sources.find((item) => item.source_id === "metrika");
@@ -285,6 +314,7 @@ test("preserves Metrika sampling, privacy, lag, attribution and exact counter/go
     goal_id: "456",
   });
   assert.deepEqual(record?.provider_metadata.metrika_report, {
+    metadata_complete: true,
     sampled: true,
     contains_sensitive_data: true,
     sample_share: 0.5,
@@ -329,7 +359,7 @@ test("fails closed for a non-allowlisted competitor host or a hidden competitor 
       (error) => error instanceof AnalyticsEvidenceError && error.code === "PUBLIC_HOST_NOT_ALLOWLISTED",
     );
   });
-  await t.test("hidden claim", async () => {
+  await t.test("hidden predicate", async () => {
     const observation = competitorObservation({
       claim: {
         subject: "competitor:competitor.example",
@@ -337,6 +367,22 @@ test("fails closed for a non-allowlisted competitor host or a hidden competitor 
         value: "120 RUB",
       },
     });
+    await assert.rejects(
+      buildAnalyticsEvidence(fixture({ competitors: [observation] })),
+      (error) => error instanceof AnalyticsEvidenceError && error.code === "COMPETITOR_HIDDEN_CLAIM_FORBIDDEN",
+    );
+  });
+  await t.test("hidden fact disguised as offer value", async () => {
+    const observation = competitorObservation();
+    observation.claim.value = "CPC 120 RUB and 30 conversions";
+    await assert.rejects(
+      buildAnalyticsEvidence(fixture({ competitors: [observation] })),
+      (error) => error instanceof AnalyticsEvidenceError && error.code === "COMPETITOR_HIDDEN_CLAIM_FORBIDDEN",
+    );
+  });
+  await t.test("hidden fact in raw quote", async () => {
+    const observation = competitorObservation();
+    observation.raw_quote = "Внутренняя стратегия и рекламный бюджет 1 000 000 ₽";
     await assert.rejects(
       buildAnalyticsEvidence(fixture({ competitors: [observation] })),
       (error) => error instanceof AnalyticsEvidenceError && error.code === "COMPETITOR_HIDDEN_CLAIM_FORBIDDEN",

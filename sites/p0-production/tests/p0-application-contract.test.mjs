@@ -398,6 +398,36 @@ test("migrates the baseline v1 nested evidence bundle into one authoritative top
   assert.equal(persisted.business_model.analysis_evidence, undefined);
 });
 
+test("rejects a corrupted persisted evidence snapshot before query reuse or downstream recommendations", async (t) => {
+  const { directory, store, application } = await fixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let result = await application.query("owner");
+  result = await application.command("owner", {
+    action: "analyze_site",
+    expected_revision: result.revision,
+    url: "https://owner.example/",
+  });
+  await application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: result.state.context_state.provisional_business_goal.value,
+  });
+  const row = await store.load("owner");
+  const corrupted = JSON.parse(row.value_json);
+  corrupted.analytics_evidence_snapshot.claims[0].value = "forged without rehash";
+  await store.seed("owner", { ...row, value_json: JSON.stringify(corrupted) });
+
+  await assert.rejects(
+    new P0Application({ store, adapters: adapters() }).query("owner"),
+    (error) => error instanceof P0ApplicationError
+      && error.code === "P0_MIGRATION_LINEAGE_INVALID"
+      && /snapshot hash/i.test(error.message),
+  );
+  assert.equal((await store.load("owner")).revision, row.revision);
+  assert.equal(JSON.parse((await store.load("owner")).value_json).analytics_evidence_snapshot.claims[0].value, "forged without rehash");
+});
+
 test("client context and persisted Context facts exclude injected credentials", async (t) => {
   const { directory, store } = await fixture();
   t.after(() => rm(directory, { recursive: true, force: true }));

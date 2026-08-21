@@ -525,6 +525,10 @@ function confidenceForClaim(input: Partial<ClaimConfidence> & Pick<ClaimConfiden
   };
 }
 
+function containsForbiddenCompetitorPerformance(value: unknown) {
+  return /(?:\b(?:cpc|conversions?|spend|bids?|account state|internal strategy)\b|бюджет|цен[аы]\s+клик|стоимост\p{L}*\s+клик|конверс\p{L}*|внутренн\p{L}*\s+стратег|состояни\p{L}*\s+аккаунт|рекламн\p{L}*\s+расход|ставк\p{L}*)/iu.test(text(value).replace(/[_-]+/gu, " "));
+}
+
 function assertCompetitorObservation(observation: Record<string, unknown>) {
   const locator = record(observation.locator);
   const policy = record(observation.policy);
@@ -544,7 +548,11 @@ function assertCompetitorObservation(observation: Record<string, unknown>) {
     fail("PUBLIC_COLLECTION_POLICY_INVALID", "Competitor observation должен проходить credential-free public research egress.");
   }
   const predicate = text(claim.predicate);
-  if (/(?:budget|cpc|conversion|internal[_-]?strategy|account[_-]?state|spend|bid)/iu.test(predicate)) {
+  if (
+    containsForbiddenCompetitorPerformance(predicate)
+    || containsForbiddenCompetitorPerformance(claim.value)
+    || containsForbiddenCompetitorPerformance(observation.raw_quote)
+  ) {
     fail("COMPETITOR_HIDDEN_CLAIM_FORBIDDEN", "Скрытые performance/strategy claims конкурентов запрещены.");
   }
   if (!predicate || !text(claim.subject)) {
@@ -789,7 +797,10 @@ export async function buildAnalyticsEvidence({
 
   const metrikaOfficial = officialMetrikaScope(metrika);
   const metrikaManagementReady = metrika.ready === true && metrikaOfficial;
-  const metrikaReportReady = metrikaManagementReady && Boolean(text(performance.period_start) && text(performance.period_end));
+  const metrikaReportOfficial = text(performanceProvenance.source_kind) === "METRIKA_REPORTS_API";
+  const metrikaReportReady = metrikaManagementReady
+    && metrikaReportOfficial
+    && Boolean(text(performance.period_start) && text(performance.period_end));
   if (metrikaManagementReady) {
     const normalizedBinding = { counter_id: metrikaCounterId, goal_id: metrikaGoalId, goal_exists: true };
     const bindingIdentity = await contentHash({
@@ -852,17 +863,30 @@ export async function buildAnalyticsEvidence({
       }),
     }));
   }
-  const metrikaPartial = sampling.sampled === true
+  const samplingMetadataKeys = [
+    "sampled",
+    "contains_sensitive_data",
+    "sample_share",
+    "sample_size",
+    "sample_space",
+    "data_lag",
+  ];
+  const samplingMetadataComplete = sampling.metadata_complete === true
+    || (sampling.metadata_complete === undefined
+      && samplingMetadataKeys.every((key) => Object.hasOwn(sampling, key)));
+  const metrikaPartial = !samplingMetadataComplete
+    || sampling.sampled === true
     || sampling.contains_sensitive_data === true
     || numberOr(sampling.data_lag) > 0;
   if (metrikaReportReady) {
     const reportMetadata = {
-      sampled: sampling.sampled === true,
-      contains_sensitive_data: sampling.contains_sensitive_data === true,
-      sample_share: numberOr(sampling.sample_share, 1),
-      sample_size: numberOr(sampling.sample_size),
-      sample_space: numberOr(sampling.sample_space),
-      data_lag: numberOr(sampling.data_lag),
+      metadata_complete: samplingMetadataComplete,
+      sampled: samplingMetadataComplete ? sampling.sampled === true : null,
+      contains_sensitive_data: samplingMetadataComplete ? sampling.contains_sensitive_data === true : null,
+      sample_share: samplingMetadataComplete ? numberOr(sampling.sample_share, 1) : null,
+      sample_size: samplingMetadataComplete ? numberOr(sampling.sample_size) : null,
+      sample_space: samplingMetadataComplete ? numberOr(sampling.sample_space) : null,
+      data_lag: samplingMetadataComplete ? numberOr(sampling.data_lag) : null,
       attribution: text(performanceProvenance.attribution) || "unspecified",
       timezone: text(performanceProvenance.timezone) || "unspecified",
       dimensions: list(performanceProvenance.dimensions).map(text).filter(Boolean),
@@ -885,6 +909,7 @@ export async function buildAnalyticsEvidence({
     });
     const reportClaimId = `urn:mox:claim:${reportIdentity.slice("sha256:".length)}`;
     const uncertainty = [
+      ...(!samplingMetadataComplete ? ["Metrika sampling/privacy/lag metadata unavailable; unsampled completeness cannot be asserted."] : []),
       ...(sampling.sampled === true ? ["Metrika sampling limits report coverage."] : []),
       ...(sampling.contains_sensitive_data === true ? ["Metrika privacy limitation restricts disclosed data."] : []),
       ...(numberOr(sampling.data_lag) > 0 ? [`Metrika platform lag is ${numberOr(sampling.data_lag)} seconds.`] : []),
@@ -930,6 +955,7 @@ export async function buildAnalyticsEvidence({
       normalized,
       limitations: uncertainty,
       qualityFlags: [
+        ...(!samplingMetadataComplete ? ["SAMPLING_METADATA_UNAVAILABLE"] : []),
         ...(sampling.sampled === true ? ["SAMPLED"] : []),
         ...(sampling.contains_sensitive_data === true ? ["PRIVACY_LIMITED"] : []),
         ...(numberOr(sampling.data_lag) > 0 ? ["DATA_LAG"] : []),
@@ -1114,8 +1140,16 @@ export async function buildAnalyticsEvidence({
   }));
   gaps.sort((left, right) => compareText(left.gap_id, right.gap_id));
 
+  const modelFields = ["product", "audience", "value", "qualified_result", "exclusions"];
+  const populatedModelFields = modelFields.filter((field) => text(model[field])).length;
+  const publicEvidenceFields = modelFields.filter((field) => {
+    const item = record(fieldEvidence[field]);
+    return Boolean(text(item.quote) && text(item.source_url));
+  }).length;
   const firstPartyStatus: EvidenceSourceStatus = sourceEvidence["first-party-web"].length
-    ? "VERIFIED"
+    ? missingQuestions.length === 0 && publicEvidenceFields >= populatedModelFields
+      ? "VERIFIED"
+      : "PARTIAL"
     : list(site.pages).length
       ? "PARTIAL"
       : "UNAVAILABLE";
@@ -1191,7 +1225,10 @@ export async function buildAnalyticsEvidence({
       versions: { schema: ANALYTICS_EVIDENCE_SCHEMA, extractor: "metrika-stat-v2", policy: "official-yandex-metrika-read-only/v1" },
       facts: metrikaReportReady ? [`Report is bound to counter ${metrikaCounterId} and goal ${metrikaGoalId}`] : [],
       limitations: [
-        ...(!metrikaReportReady ? ["Exact-bound Metrika report unavailable."] : []),
+        ...(!metrikaReportReady ? [metrikaReportOfficial
+          ? "Exact-bound Metrika report unavailable."
+          : "Metrika report provenance is not the official METRIKA_REPORTS_API adapter."] : []),
+        ...(!samplingMetadataComplete ? ["Sampling/privacy/lag metadata unavailable; coverage is partial."] : []),
         ...(sampling.sampled === true ? ["Response is sampled; coverage is partial."] : []),
         ...(sampling.contains_sensitive_data === true ? ["Privacy limitation is attached; coverage is partial."] : []),
         ...(numberOr(sampling.data_lag) > 0 ? [`Provider data lag: ${numberOr(sampling.data_lag)} seconds.`] : []),
@@ -1241,7 +1278,9 @@ export async function buildAnalyticsEvidence({
     .map((item) => `Unresolved material conflict: ${item.predicate}.`);
   const hardBlockers = [
     ...missingQuestions.map((question) => `Не разрешено: ${question}`),
-    ...(firstPartyStatus === "UNAVAILABLE" ? ["First-party business model has no recoverable evidence or owner confirmation."] : []),
+    ...(firstPartyStatus === "UNAVAILABLE" && ownerStatus === "UNAVAILABLE"
+      ? ["First-party business model has no recoverable evidence or owner confirmation."]
+      : []),
     ...(!directInventoryReady ? ["Current Direct inventory недоступен: duplicates and already-covered demand are unknown, not zero."] : []),
     ...materialConflictBlockers,
   ];
@@ -1325,51 +1364,66 @@ export async function buildAnalyticsEvidence({
   return deepFreeze(snapshot);
 }
 
-export async function verifyAnalyticsEvidenceSnapshot(snapshot: AnalyticsEvidenceBundle) {
-  for (const source of snapshot.sources) {
-    const { manifest_hash: manifestHash, ...body } = source;
-    if (manifestHash !== await contentHash(body)) return false;
+export async function verifyAnalyticsEvidenceSnapshot(snapshot: AnalyticsEvidenceBundle | unknown) {
+  try {
+    const candidate = record(snapshot);
+    const snapshotId = text(candidate.snapshot_id);
+    if (!snapshotId) return false;
+    if (candidate.schema_version === "p0-analytics-evidence-v1") {
+      const unsigned = { ...candidate };
+      delete unsigned.snapshot_id;
+      return snapshotId === await contentHash(unsigned);
+    }
+    if (candidate.schema_version !== ANALYTICS_EVIDENCE_SCHEMA) return false;
+    const current = candidate as unknown as AnalyticsEvidenceBundle;
+    for (const source of current.sources) {
+      const { manifest_hash: manifestHash, ...body } = source;
+      if (manifestHash !== await contentHash(body)) return false;
+    }
+    const claimIds = new Set(current.claims.map((claim) => claim.claim_id));
+    for (const claim of current.claims) {
+      const body = { ...claim } as Record<string, unknown>;
+      delete body.claim_id;
+      delete body.claim_hash;
+      if (claim.claim_hash !== await contentHash(body)) return false;
+    }
+    for (const evidenceRecord of current.evidence) {
+      if (evidenceRecord.claim_links.some((link) => !claimIds.has(link.claim_id))) return false;
+      const { evidence_id: evidenceId, record_hash: recordHash, ...body } = evidenceRecord;
+      if (recordHash !== await contentHash(body)) return false;
+      if (evidenceId !== `urn:mox:evidence:${recordHash.slice("sha256:".length)}`) return false;
+      if (evidenceRecord.raw.sha256 !== await contentHash(evidenceRecord.raw.value)) return false;
+    }
+    for (const conflict of current.conflicts) {
+      const { conflict_id: conflictId, conflict_hash: conflictHash, ...body } = conflict;
+      if (conflictHash !== await contentHash(body)) return false;
+      if (conflictId !== `urn:mox:conflict:${conflictHash.slice("sha256:".length)}`) return false;
+    }
+    for (const gap of current.gaps) {
+      const { gap_id: gapId, gap_hash: gapHash, ...body } = gap;
+      if (gapHash !== await contentHash(body)) return false;
+      if (gapId !== `urn:mox:gap:${gapHash.slice("sha256:".length)}`) return false;
+    }
+    if (current.hashes.sources_sha256 !== await contentHash(current.sources)) return false;
+    if (current.hashes.claims_sha256 !== await contentHash(current.claims)) return false;
+    if (current.hashes.evidence_sha256 !== await contentHash(current.evidence)) return false;
+    if (current.hashes.conflicts_sha256 !== await contentHash(current.conflicts)) return false;
+    if (current.hashes.gaps_sha256 !== await contentHash(current.gaps)) return false;
+    if (current.hashes.input_root_sha256 !== await contentHash({
+      scope: current.scope,
+      generated_at: current.generated_at,
+      as_of: current.as_of,
+      versions: current.versions,
+      sources: current.sources,
+      claims: current.claims,
+      evidence: current.evidence,
+      conflicts: current.conflicts,
+      gaps: current.gaps,
+    })) return false;
+    const unsigned = { ...current } as Record<string, unknown>;
+    delete unsigned.snapshot_id;
+    return snapshotId === await contentHash(unsigned);
+  } catch {
+    return false;
   }
-  const claimIds = new Set(snapshot.claims.map((claim) => claim.claim_id));
-  for (const claim of snapshot.claims) {
-    const body = { ...claim } as Record<string, unknown>;
-    delete body.claim_id;
-    delete body.claim_hash;
-    if (claim.claim_hash !== await contentHash(body)) return false;
-  }
-  for (const evidenceRecord of snapshot.evidence) {
-    if (evidenceRecord.claim_links.some((link) => !claimIds.has(link.claim_id))) return false;
-    const { evidence_id: evidenceId, record_hash: recordHash, ...body } = evidenceRecord;
-    if (recordHash !== await contentHash(body)) return false;
-    if (evidenceId !== `urn:mox:evidence:${recordHash.slice("sha256:".length)}`) return false;
-    if (evidenceRecord.raw.sha256 !== await contentHash(evidenceRecord.raw.value)) return false;
-  }
-  for (const conflict of snapshot.conflicts) {
-    const { conflict_id: conflictId, conflict_hash: conflictHash, ...body } = conflict;
-    if (conflictHash !== await contentHash(body)) return false;
-    if (conflictId !== `urn:mox:conflict:${conflictHash.slice("sha256:".length)}`) return false;
-  }
-  for (const gap of snapshot.gaps) {
-    const { gap_id: gapId, gap_hash: gapHash, ...body } = gap;
-    if (gapHash !== await contentHash(body)) return false;
-    if (gapId !== `urn:mox:gap:${gapHash.slice("sha256:".length)}`) return false;
-  }
-  if (snapshot.hashes.sources_sha256 !== await contentHash(snapshot.sources)) return false;
-  if (snapshot.hashes.claims_sha256 !== await contentHash(snapshot.claims)) return false;
-  if (snapshot.hashes.evidence_sha256 !== await contentHash(snapshot.evidence)) return false;
-  if (snapshot.hashes.conflicts_sha256 !== await contentHash(snapshot.conflicts)) return false;
-  if (snapshot.hashes.gaps_sha256 !== await contentHash(snapshot.gaps)) return false;
-  if (snapshot.hashes.input_root_sha256 !== await contentHash({
-    scope: snapshot.scope,
-    generated_at: snapshot.generated_at,
-    as_of: snapshot.as_of,
-    versions: snapshot.versions,
-    sources: snapshot.sources,
-    claims: snapshot.claims,
-    evidence: snapshot.evidence,
-    conflicts: snapshot.conflicts,
-    gaps: snapshot.gaps,
-  })) return false;
-  const { snapshot_id: snapshotId, ...unsigned } = snapshot;
-  return snapshotId === await contentHash(unsigned);
 }

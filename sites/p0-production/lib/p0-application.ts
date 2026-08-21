@@ -2,6 +2,7 @@ import { buildAdTitle } from "./ad-copy.ts";
 import {
   buildAnalyticsEvidence,
   redactSensitiveEvidenceText,
+  verifyAnalyticsEvidenceSnapshot,
   type AnalyticsEvidenceBundle,
 } from "./analytics-evidence.ts";
 import {
@@ -346,6 +347,14 @@ function sanitizeContext(input: P0Context): P0Context {
   const metrics = record(performance.display_metrics);
   const provenance = record(performance.provenance);
   const sampling = record(provenance.sampling);
+  const samplingMetadataComplete = [
+    "sampled",
+    "contains_sensitive_data",
+    "sample_share",
+    "sample_size",
+    "sample_space",
+    "data_lag",
+  ].every((key) => Object.hasOwn(sampling, key));
   return {
     environment: "PRODUCTION",
     test_scenario: false,
@@ -427,6 +436,7 @@ function sanitizeContext(input: P0Context): P0Context {
             dimensions: stringList(provenance.dimensions),
             filters: cleanText(String(provenance.filters ?? ""), 1_000),
             sampling: {
+              metadata_complete: samplingMetadataComplete,
               sampled: sampling.sampled === true,
               contains_sensitive_data: sampling.contains_sensitive_data === true,
               sample_share: Number(sampling.sample_share ?? 1),
@@ -843,6 +853,9 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
       state[key] = null as never;
       changed = true;
     }
+  }
+  if (state.analytics_evidence_snapshot && !await verifyAnalyticsEvidenceSnapshot(state.analytics_evidence_snapshot)) {
+    lineageError("Analytics Evidence Snapshot hash verification failed.");
   }
 
   let modelChanged = false;
