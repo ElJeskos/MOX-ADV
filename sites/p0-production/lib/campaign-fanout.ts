@@ -1,5 +1,6 @@
 import { buildAdText, buildAdTitle } from "./ad-copy.ts";
 import { buildPublishProjection } from "./campaign-draft.ts";
+import { strategyAnswerValue } from "./campaign-strategy.ts";
 import {
   packDemandClusters,
   type PackableDemandCluster,
@@ -85,29 +86,33 @@ function editableDraft(
   strategy: Record<string, unknown>,
   variant: Record<string, unknown>,
 ) {
-  const participation = /участ|participant/iu.test(text(model.qualified_result));
+  const advertisedOffer = strategyAnswerValue(strategy, "advertised_offer") || model.product;
+  const targetAudience = strategyAnswerValue(strategy, "target_audience") || model.audience;
+  const qualifiedResult = strategyAnswerValue(strategy, "qualified_result") || model.qualified_result;
+  const coreMessage = strategyAnswerValue(strategy, "core_message") || model.value;
+  const participation = /участ|participant/iu.test(text(qualifiedResult));
   const variantCode = String(variant.code);
   const adMessage = variantCode === "CONTROL"
-    ? strategy.message
+    ? coreMessage
     : variantCode === "QUALIFIED_ACTION"
-      ? model.qualified_result
+      ? qualifiedResult
       : variantCode === "AUDIENCE_SPECIFICITY"
-        ? `${strategy.message}. Для: ${model.audience}`
-        : model.value;
+        ? `${coreMessage}. Для: ${targetAudience}`
+        : coreMessage;
   const keyword = variantCode === "CONTROL"
-    ? phrase(model.product)
+    ? phrase(advertisedOffer)
     : variantCode === "QUALIFIED_ACTION"
-      ? phrase(model.product, model.qualified_result)
+      ? phrase(advertisedOffer, qualifiedResult)
       : variantCode === "AUDIENCE_SPECIFICITY"
-        ? phrase(model.product, model.audience)
-        : phrase(model.product, model.value);
+        ? phrase(advertisedOffer, targetAudience)
+        : phrase(advertisedOffer, coreMessage);
   return {
-    campaign_name: namedVariant(model.product, String(variant.short_label)),
+    campaign_name: namedVariant(advertisedOffer, String(variant.short_label)),
     group_name: text(variant.cluster_label),
     keyword,
     negative_keywords: "бесплатно, вакансии, посетитель, билет",
-    ad_title: buildAdTitle(model.product),
-    ad_text: buildAdText(adMessage, model.product, participation),
+    ad_title: buildAdTitle(advertisedOffer),
+    ad_text: buildAdText(adMessage, advertisedOffer, participation),
   };
 }
 
@@ -167,6 +172,15 @@ export async function buildCampaignRecommendationSet({
 }): Promise<CampaignRecommendationSet> {
   const strategyRevisionId = text(strategy.strategy_revision_id);
   if (!strategyRevisionId) throw new Error("Campaign Strategy должна иметь immutable revision ID.");
+  const businessGoal = strategyAnswerValue(strategy, "business_goal");
+  const advertisedOffer = strategyAnswerValue(strategy, "advertised_offer") || model.product;
+  const targetAudience = strategyAnswerValue(strategy, "target_audience") || model.audience;
+  const qualifiedResult = strategyAnswerValue(strategy, "qualified_result") || model.qualified_result;
+  const geography = strategyAnswerValue(strategy, "geography");
+  const landingPage = strategyAnswerValue(strategy, "landing_page");
+  const weeklyBudget = strategyAnswerValue(strategy, "weekly_budget");
+  const targetResultCost = strategyAnswerValue(strategy, "target_result_cost");
+  const coreMessage = strategyAnswerValue(strategy, "core_message") || model.value;
   const controlBasis = competitorControlBasis(analyticsEvidence);
   const marketEvidence = analyticsEvidence?.market_evidence && typeof analyticsEvidence.market_evidence === "object"
     ? analyticsEvidence.market_evidence as Record<string, unknown>
@@ -192,7 +206,7 @@ export async function buildCampaignRecommendationSet({
         forecast_total_spend: Number((selectedCost.capacity as Record<string, unknown>).forecast_total_spend),
       }
     : { status: "UNAVAILABLE" as const, source: null };
-  const provisionalMonthlyBudget = Number(strategy.weekly_budget_rub) * 52 / 12;
+  const provisionalMonthlyBudget = Number(weeklyBudget) * 52 / 12;
   const packableClusters: PackableDemandCluster[] = demandClusters.map((cluster, index) => ({
     cluster_id: text(cluster.cluster_id),
     primary: index === 0,
@@ -201,11 +215,11 @@ export async function buildCampaignRecommendationSet({
       : "UNAVAILABLE",
     unique_publish_row_ids: Array.isArray(cluster.assigned_row_ids) ? cluster.assigned_row_ids.map(text).filter(Boolean) : [],
     delivery_key: {
-      goal: strategy.goal,
-      economics: { weekly_budget_rub: strategy.weekly_budget_rub, target_cpa_rub: strategy.target_cpa_rub },
-      geography: strategy.geography,
-      landing: strategy.landing_page,
-      message: strategy.message,
+      goal: businessGoal,
+      economics: { weekly_budget_rub: weeklyBudget, target_cpa_rub: targetResultCost },
+      geography,
+      landing: landingPage,
+      message: coreMessage,
       management: CAPABILITY_PROFILE,
     },
     provisional_monthly_budget: provisionalMonthlyBudget,
@@ -221,7 +235,7 @@ export async function buildCampaignRecommendationSet({
       kind: "CONTROL",
       short_label: controlBasis.kind === "COMPETITIVE_NORM_CONTROL" ? "Контроль" : "Базовый",
       cluster_label: "Базовый коммерческий спрос",
-      offer: strategy.message,
+      offer: coreMessage,
       hypothesis: null,
     },
     {
@@ -229,7 +243,7 @@ export async function buildCampaignRecommendationSet({
       kind: "IMPROVEMENT",
       short_label: "Целевое действие",
       cluster_label: "Квалифицированное действие",
-      offer: model.qualified_result,
+      offer: qualifiedResult,
       hypothesis: {
         hypothesis_id: "qualified-action-v1",
         changed_family: "QUALIFIED_ACTION",
@@ -242,7 +256,7 @@ export async function buildCampaignRecommendationSet({
       kind: "IMPROVEMENT",
       short_label: "Аудитория",
       cluster_label: "Ролевой коммерческий спрос",
-      offer: `${strategy.message}. Для: ${model.audience}`,
+      offer: `${coreMessage}. Для: ${targetAudience}`,
       hypothesis: {
         hypothesis_id: "audience-specificity-v1",
         changed_family: "AUDIENCE_SPECIFICITY",
@@ -255,7 +269,7 @@ export async function buildCampaignRecommendationSet({
       kind: "IMPROVEMENT",
       short_label: "Ценность",
       cluster_label: "Ценностный коммерческий спрос",
-      offer: model.value,
+      offer: coreMessage,
       hypothesis: {
         hypothesis_id: "message-offer-v1",
         changed_family: "MESSAGE_OFFER",
@@ -299,17 +313,17 @@ export async function buildCampaignRecommendationSet({
         comparator_draft_id: variant.kind === "CONTROL" ? null : compiled[0]?.draft_id ?? null,
       },
       dimensions: {
-        product: text(model.product),
-        audience: text(model.audience),
+        product: text(advertisedOffer),
+        audience: text(targetAudience),
         offer: text(variant.offer),
         keyword_cluster: text(variant.cluster_label),
       },
       delivery_key: {
-        goal: text(strategy.goal),
-        economics: `${strategy.weekly_budget_rub}:${strategy.target_cpa_rub}`,
-        geography: text(strategy.geography),
-        landing_page: text(strategy.landing_page),
-        core_message: text(strategy.message),
+        goal: text(businessGoal),
+        economics: `${weeklyBudget}:${targetResultCost}`,
+        geography: text(geography),
+        landing_page: text(landingPage),
+        core_message: text(coreMessage),
         management_profile: CAPABILITY_PROFILE,
       },
       market_evidence: {
@@ -368,8 +382,8 @@ export async function buildCampaignRecommendationSet({
     },
     coverage: {
       status: "COMPLETE",
-      products: [text(model.product)],
-      audiences: [text(model.audience)],
+      products: [text(advertisedOffer)],
+      audiences: [text(targetAudience)],
       offers_considered: variantSpecs.map((variant) => text(variant.offer)),
       keyword_clusters_considered: variantSpecs.map((variant) => text(variant.cluster_label)),
       candidates_total: scored.length,

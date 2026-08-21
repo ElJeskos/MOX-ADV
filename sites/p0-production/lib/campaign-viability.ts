@@ -1,3 +1,5 @@
+import { strategyAnswerValue } from "./campaign-strategy.ts";
+
 const SCORE_CONTRACT_VERSION = "viability-score/1.0.0";
 const SCORE_SCHEMA_VERSION = "viability-score-result-v1";
 const HIDDEN_THRESHOLD = 45;
@@ -393,8 +395,8 @@ function hasVolumeScore(frequency: Record<string, unknown>) {
 }
 
 function economicsDimension(strategy: Record<string, unknown>, draft: DraftCandidate) {
-  const weeklyBudget = numberOrNull(strategy.weekly_budget_rub);
-  const targetCost = numberOrNull(strategy.target_cpa_rub);
+  const weeklyBudget = numberOrNull(strategyAnswerValue(strategy, "weekly_budget"));
+  const targetCost = numberOrNull(strategyAnswerValue(strategy, "target_result_cost"));
   const plannedUnits = weeklyBudget !== null && targetCost !== null && weeklyBudget > 0 && targetCost > 0
     ? weeklyBudget * (52 / 12) / targetCost
     : null;
@@ -462,14 +464,12 @@ function messageAlignment(draft: DraftCandidate, model: Record<string, unknown>,
   const hypothesis = record(variant.hypothesis);
   const family = text(hypothesis.changed_family);
   const anchor = family === "QUALIFIED_ACTION"
-    ? model.qualified_result
+    ? strategyAnswerValue(strategy, "qualified_result") || model.qualified_result
     : family === "AUDIENCE_SPECIFICITY"
-      ? model.audience
-      : family === "MESSAGE_OFFER"
-        ? model.value
-        : strategy.message;
+      ? strategyAnswerValue(strategy, "target_audience") || model.audience
+      : strategyAnswerValue(strategy, "core_message") || model.value;
   const combined = [draft.keyword, draft.ad_title, draft.ad_text].map(text).join(" ");
-  const productCoverage = tokenCoverage(combined, model.product) ?? 0;
+  const productCoverage = tokenCoverage(combined, strategyAnswerValue(strategy, "advertised_offer") || model.product) ?? 0;
   const anchorCoverage = tokenCoverage(combined, anchor) ?? 0;
   const value = 100 * (0.55 * productCoverage + 0.45 * anchorCoverage);
   return value >= 85 ? 100 : value >= 60 ? 75 : value >= 30 ? 50 : 0;

@@ -24,6 +24,17 @@ import {
   type CampaignRecommendationSet,
 } from "./campaign-fanout.ts";
 import {
+  CAMPAIGN_STRATEGY_SCHEMA,
+  STRATEGY_QUESTIONNAIRE_SCHEMA,
+  buildStrategyQuestionnaire,
+  missingStrategyDecisions,
+  normalizeStrategyAnswers,
+  strategyAnswerValue,
+  strategyAnswersFingerprint,
+  type CampaignStrategyRevision,
+  type StrategyQuestionnaire,
+} from "./campaign-strategy.ts";
+import {
   explainScoreDelta,
   scoreCampaignDrafts,
 } from "./campaign-viability.ts";
@@ -38,10 +49,11 @@ import { cleanText } from "./text.ts";
 import type { MarketEvidenceInput } from "./market-evidence.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.3.0";
-export const P0_DOCUMENT_SCHEMA = "p0-application-document-v2";
-const P0_LEGACY_DOCUMENT_SCHEMA = "p0-application-document-v1";
-export const P0_CONTEXT_SCHEMA = "p0-context-v1";
+export const P0_APPLICATION_CONTRACT_VERSION = "1.4.0";
+export const P0_DOCUMENT_SCHEMA = "p0-application-document-v3";
+const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2"]);
+export const P0_CONTEXT_SCHEMA = "p0-context-v2";
+const P0_LEGACY_CONTEXT_SCHEMA = "p0-context-v1";
 export const P0_CONTEXT_PREFLIGHT_MAX_AGE_MS = 5 * 60_000;
 
 export type P0ContextState = {
@@ -83,6 +95,8 @@ export type P0ContextState = {
     decided_at: string;
     owner_confirmed: true;
   } | null;
+  context_revision_id: string;
+  research_fingerprint: string;
   material_fingerprint: string;
   last_material_change: {
     affected_steps: ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"];
@@ -103,7 +117,8 @@ export type P0Document = {
   site_analysis: SiteAnalysis | null;
   business_model: BusinessModel | null;
   analytics_evidence_snapshot: AnalyticsEvidenceBundle | null;
-  strategy: Record<string, unknown> | null;
+  strategy_questionnaire: StrategyQuestionnaire | null;
+  strategy: CampaignStrategyRevision | Record<string, unknown> | null;
   recommendation_set: CampaignRecommendationSet | null;
   draft: Record<string, unknown> | null;
   shortlist: {
@@ -120,6 +135,15 @@ export type P0Document = {
     confirmed_at: string;
   } | null;
   campaign: Record<string, unknown> | null;
+  last_cascade: {
+    schema_version: "p0-recomputation-cascade-v1";
+    trigger: "CONTEXT" | "MODEL" | "STRATEGY";
+    affected_steps: string[];
+    changed_at: string;
+    recomputation_status: "REQUIRED" | "PENDING" | "COMPLETE";
+    confirmation_blocked_while_pending: true;
+    previous_lineage: ReturnType<typeof previousLineage>;
+  } | null;
 };
 
 export type P0StoredRow = {
@@ -216,6 +240,7 @@ export type BusinessModel = {
       quote: string;
       owner_confirmed?: boolean;
       owner_confirmed_at?: string;
+      owner_edited?: boolean;
     }
   >;
 };
@@ -246,8 +271,9 @@ export const P0_COMMAND_TRUTH_TABLE = {
   save_business_model: (state: P0Document) => Boolean(
     state.site_analysis && state.business_model && !state.campaign && !state.external_write_intent,
   ),
-  save_strategy: (state: P0Document) => (
+  approve_strategy: (state: P0Document) => (
     state.business_model?.source === "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION"
+    && state.strategy_questionnaire?.schema_version === STRATEGY_QUESTIONNAIRE_SCHEMA
     && !state.campaign
     && !state.external_write_intent
   ),
@@ -255,7 +281,8 @@ export const P0_COMMAND_TRUTH_TABLE = {
     state.strategy && state.recommendation_set && !state.campaign && !state.external_write_intent,
   ),
   confirm_creation: (state: P0Document) => Boolean(
-    state.draft?.publish_projection
+    state.last_cascade?.recomputation_status !== "PENDING"
+    && state.draft?.publish_projection
     && state.shortlist?.draft_revision_ids.includes(String(state.draft.draft_revision_id ?? ""))
     && (!state.context_state || state.context_state.status === "GOAL_CONFIRMED")
     && !state.campaign,
@@ -282,12 +309,14 @@ function emptyDocument(): P0Document {
     site_analysis: null,
     business_model: null,
     analytics_evidence_snapshot: null,
+    strategy_questionnaire: null,
     strategy: null,
     recommendation_set: null,
     draft: null,
     shortlist: null,
     external_write_intent: null,
     campaign: null,
+    last_cascade: null,
   };
 }
 
@@ -308,8 +337,15 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Неизвестная ошибка";
 }
 
+function isValidIsoCalendarDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 function artifactText(value: unknown, maximum: number) {
-  return cleanText(redactSensitiveEvidenceText(value, maximum), maximum + 20);
+  const normalized = String(value ?? "").normalize("NFKC");
+  return cleanText(redactSensitiveEvidenceText(normalized, maximum), maximum + 20);
 }
 
 function stringList(value: unknown) {
@@ -646,7 +682,7 @@ function persistedProviderMaterialFacts(facts: P0ContextState["facts"]) {
   };
 }
 
-async function contextMaterialFingerprint(site: SiteAnalysis, context: P0Context) {
+async function contextResearchFingerprint(site: SiteAnalysis, context: P0Context) {
   return sha256({
     providers: providerMaterialFacts(context),
     site: {
@@ -664,6 +700,13 @@ async function contextMaterialFingerprint(site: SiteAnalysis, context: P0Context
         text_excerpt: cleanText(page.text_excerpt, 8_000),
       })),
     },
+  });
+}
+
+async function confirmedContextMaterialFingerprint(researchFingerprint: string, businessGoal: string) {
+  return sha256({
+    research_fingerprint: researchFingerprint,
+    business_goal: cleanText(businessGoal.normalize("NFKC"), 500),
   });
 }
 
@@ -703,7 +746,33 @@ function invalidationRecord(state: P0Document, invalidatedAt: string): P0Context
   };
 }
 
+function cascadeRecord(
+  state: P0Document,
+  trigger: "CONTEXT" | "MODEL" | "STRATEGY",
+  changedAt: string,
+  affectedSteps: string[],
+): NonNullable<P0Document["last_cascade"]> {
+  return {
+    schema_version: "p0-recomputation-cascade-v1",
+    trigger,
+    affected_steps: affectedSteps,
+    changed_at: changedAt,
+    recomputation_status: trigger === "STRATEGY" ? "COMPLETE" : "REQUIRED",
+    confirmation_blocked_while_pending: true,
+    previous_lineage: previousLineage(state),
+  };
+}
+
 function invalidateContextDownstream(state: P0Document) {
+  state.strategy_questionnaire = null;
+  state.strategy = null;
+  state.recommendation_set = null;
+  state.draft = null;
+  state.shortlist = null;
+  state.external_write_intent = null;
+}
+
+function invalidateStrategyDownstream(state: P0Document) {
   state.strategy = null;
   state.recommendation_set = null;
   state.draft = null;
@@ -814,7 +883,7 @@ function lineageError(message: string): never {
 
 async function migrateDocument(raw: Record<string, unknown>, revision: number, updatedAt: string) {
   const version = raw.schema_version;
-  if (version !== undefined && version !== P0_DOCUMENT_SCHEMA && version !== P0_LEGACY_DOCUMENT_SCHEMA) {
+  if (version !== undefined && version !== P0_DOCUMENT_SCHEMA && !P0_LEGACY_DOCUMENT_SCHEMAS.has(String(version))) {
     fail("P0_DOCUMENT_SCHEMA_UNSUPPORTED", `Persisted P0 document использует неподдерживаемую схему ${String(version)}.`);
   }
   const state = raw as unknown as P0Document;
@@ -828,8 +897,22 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
   }
 
   if (state.context_state) {
-    if (state.context_state.schema_version !== P0_CONTEXT_SCHEMA) {
+    if (record(state.context_state).schema_version === P0_LEGACY_CONTEXT_SCHEMA) {
+      const legacyContext = state.context_state as unknown as Record<string, unknown>;
+      const researchFingerprint = cleanText(String(legacyContext.material_fingerprint ?? ""), 255);
+      const decision = record(legacyContext.business_goal_decision);
+      legacyContext.schema_version = P0_CONTEXT_SCHEMA;
+      legacyContext.context_revision_id = `context-r${Math.max(1, revision)}`;
+      legacyContext.research_fingerprint = researchFingerprint;
+      legacyContext.material_fingerprint = decision.value
+        ? await confirmedContextMaterialFingerprint(researchFingerprint, String(decision.value))
+        : researchFingerprint;
+      changed = true;
+    } else if (state.context_state.schema_version !== P0_CONTEXT_SCHEMA) {
       fail("P0_CONTEXT_SCHEMA_UNSUPPORTED", "Persisted Context использует неподдерживаемую схему.");
+    }
+    if (!state.context_state.context_revision_id || !state.context_state.research_fingerprint) {
+      lineageError("Context revision или research fingerprint отсутствует.");
     }
     if (!state.site_analysis || state.context_state.facts.site.url !== state.site_analysis.url) {
       lineageError("Context facts не связаны с first-party site analysis.");
@@ -854,7 +937,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     lineageError("Campaign Strategy не связана с моделью бизнеса.");
   }
 
-  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy", "recommendation_set", "draft", "shortlist", "external_write_intent", "campaign"] as const) {
+  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "recommendation_set", "draft", "shortlist", "external_write_intent", "campaign", "last_cascade"] as const) {
     if (!(key in state)) {
       state[key] = null as never;
       changed = true;
@@ -910,10 +993,64 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
       modelChanged = true;
     }
   }
-  if (modelChanged && model) state.analytics_evidence_snapshot = null;
+  if (modelChanged && model) {
+    state.analytics_evidence_snapshot = null;
+    state.strategy_questionnaire = null;
+    state.last_cascade = cascadeRecord(state, "MODEL", updatedAt, ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"]);
+    invalidateStrategyDownstream(state);
+  }
+
+  if (
+    !state.strategy_questionnaire
+    && state.context_state
+    && model?.source === "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION"
+    && state.analytics_evidence_snapshot
+  ) {
+    state.strategy_questionnaire = await buildStrategyQuestionnaire({
+      contextState: state.context_state as unknown as Record<string, unknown>,
+      model: model as unknown as Record<string, unknown>,
+      analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
+      generatedAt: updatedAt,
+    });
+    changed = true;
+  }
+  if (state.strategy_questionnaire) {
+    if (!state.context_state || !model || !state.analytics_evidence_snapshot) {
+      lineageError("Strategy questionnaire потерял Context, Model или Analytics Evidence Snapshot.");
+    }
+    const rebuiltQuestionnaire = await buildStrategyQuestionnaire({
+      contextState: state.context_state as unknown as Record<string, unknown>,
+      model: model as unknown as Record<string, unknown>,
+      analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
+      generatedAt: state.strategy_questionnaire.generated_at,
+    });
+    if (JSON.stringify(rebuiltQuestionnaire) !== JSON.stringify(state.strategy_questionnaire)) {
+      lineageError("Strategy questionnaire contract, field order, metadata или lineage не прошли проверку.");
+    }
+  }
 
   const strategy = state.strategy;
   if (strategy && model) {
+    if (strategy.schema_version === CAMPAIGN_STRATEGY_SCHEMA) {
+      if (!state.context_state || !state.analytics_evidence_snapshot || !state.strategy_questionnaire) {
+        lineageError("Campaign Strategy revision потеряла Context, questionnaire или Analytics Evidence Snapshot.");
+      }
+      if (
+        strategy.questionnaire_id !== state.strategy_questionnaire.questionnaire_id
+        || strategy.context_revision_id !== state.context_state.context_revision_id
+        || strategy.context_material_fingerprint !== state.context_state.material_fingerprint
+        || strategy.analytics_evidence_snapshot_id !== state.analytics_evidence_snapshot.snapshot_id
+      ) {
+        lineageError("Campaign Strategy revision ссылается на другую Context/Model lineage.");
+      }
+      const persistedAnswerRows = Array.isArray(strategy.answers)
+        ? strategy.answers as Array<{ field_id: string; value: unknown }>
+        : [];
+      const persistedAnswers = Object.fromEntries(persistedAnswerRows.map((answer) => [answer.field_id, answer.value]));
+      if (await strategyAnswersFingerprint(persistedAnswers as never) !== strategy.material_fingerprint) {
+        lineageError("Campaign Strategy material fingerprint verification failed.");
+      }
+    }
     if (!strategy.strategy_revision_id) {
       strategy.strategy_revision_id = `campaign-strategy-r${Math.max(1, revision)}`;
       strategy.approved_at = updatedAt;
@@ -926,7 +1063,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     ) {
       state.recommendation_set = await buildCampaignRecommendationSet({
         model: model as unknown as Record<string, unknown>,
-        strategy,
+        strategy: strategy as unknown as Record<string, unknown>,
         analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown> | undefined,
         generatedAt: updatedAt,
       });
@@ -950,10 +1087,13 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     if (draft.strategy_revision_id !== strategy.strategy_revision_id) {
       lineageError("Campaign Draft ссылается на другую Campaign Strategy revision.");
     }
-    const names = buildCampaignNames(model.product, strategy.geography, model.qualified_result);
+    const advertisedOffer = strategyAnswerValue(strategy, "advertised_offer") || model.product;
+    const geography = strategyAnswerValue(strategy, "geography");
+    const qualifiedResult = strategyAnswerValue(strategy, "qualified_result") || model.qualified_result;
+    const names = buildCampaignNames(advertisedOffer, geography, qualifiedResult);
     if (
       isLegacySearchName(draft.campaign_name)
-      || isCampaignNameWithGeography(draft.campaign_name, strategy.geography)
+      || isCampaignNameWithGeography(draft.campaign_name, geography)
       || (previousProduct && String(draft.campaign_name).startsWith(`${previousProduct} ·`))
     ) {
       draft.campaign_name = names.campaignName;
@@ -1047,6 +1187,7 @@ function currentStep(state: P0Document) {
 }
 
 function allowedCommands(state: P0Document): CommandName[] {
+  if (state.last_cascade?.recomputation_status === "PENDING") return [];
   return (Object.keys(P0_COMMAND_TRUTH_TABLE) as CommandName[])
     .filter((command) => P0_COMMAND_TRUTH_TABLE[command](state));
 }
@@ -1177,10 +1318,13 @@ export class P0Application {
     const minimumBudget = Number(context.direct.minimum_weekly_budget_rub);
     if (Number.isFinite(minimumBudget) && state.strategy) {
       try {
-        validateWeeklyBudgetRub(state.strategy.weekly_budget_rub, minimumBudget);
+        validateWeeklyBudgetRub(strategyAnswerValue(state.strategy, "weekly_budget"), minimumBudget);
       } catch (error) {
         blockers.push(errorMessage(error));
       }
+    }
+    if (["REQUIRED", "PENDING"].includes(String(state.last_cascade?.recomputation_status ?? ""))) {
+      blockers.push("Downstream recomputation ещё не завершён");
     }
     if (!state.draft?.publish_projection) blockers.push("Campaign Draft ещё не зафиксирован");
     if (!state.shortlist?.draft_revision_ids.includes(String(state.draft?.draft_revision_id ?? ""))) {
@@ -1244,22 +1388,27 @@ export class P0Application {
       this.assertContextPreflight(context, timestamp);
       const requestedUrl = normalizePublicHttpsUrl(String(payload.url ?? "")).toString();
       const site = sanitizeSiteAnalysis(await this.adapters.researchSite(requestedUrl));
-      const fingerprint = await contextMaterialFingerprint(site, context);
+      const researchFingerprint = await contextResearchFingerprint(site, context);
       const previousContext = state.context_state;
-      const normalizationOnly = previousContext?.material_fingerprint === fingerprint;
+      const normalizationOnly = previousContext?.research_fingerprint === researchFingerprint;
       if (normalizationOnly && previousContext) {
         // Keep the exact persisted evidence/provenance; a technical re-entry only advances document revision.
       } else {
         state.site_analysis = site;
         const hasPreviousContext = Boolean(previousContext || state.business_model || state.strategy || state.draft || state.shortlist);
         const lastMaterialChange = hasPreviousContext ? invalidationRecord(state, timestamp) : null;
+        if (hasPreviousContext) {
+          state.last_cascade = cascadeRecord(state, "CONTEXT", timestamp, ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"]);
+        }
         state.context_state = {
           schema_version: P0_CONTEXT_SCHEMA,
           status: "GOAL_PROVISIONAL",
           facts: persistedContextFacts(site, context),
           provisional_business_goal: provisionalBusinessGoal(site, timestamp),
           business_goal_decision: null,
-          material_fingerprint: fingerprint,
+          context_revision_id: `context-r${current.revision + 1}`,
+          research_fingerprint: researchFingerprint,
+          material_fingerprint: researchFingerprint,
           last_material_change: lastMaterialChange,
         };
         state.business_model = null;
@@ -1282,8 +1431,10 @@ export class P0Application {
       const changedConfirmedGoal = Boolean(previousDecision && previousDecision.value !== goal);
       if (changedConfirmedGoal) {
         state.context_state.last_material_change = invalidationRecord(state, timestamp);
+        state.last_cascade = cascadeRecord(state, "CONTEXT", timestamp, ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"]);
         invalidateContextDownstream(state);
       }
+      const contextDecisionChanged = !previousDecision || changedConfirmedGoal;
       const provisionalValue = state.context_state.provisional_business_goal.value;
       state.context_state = {
         ...state.context_state,
@@ -1293,9 +1444,13 @@ export class P0Application {
           value: goal,
           provisional_value: provisionalValue,
           decision: goal === provisionalValue ? "CONFIRMED" : "CORRECTED",
-          decided_at: timestamp,
+          decided_at: contextDecisionChanged ? timestamp : previousDecision.decided_at,
           owner_confirmed: true,
         },
+        context_revision_id: contextDecisionChanged ? `context-r${current.revision + 1}` : state.context_state.context_revision_id,
+        material_fingerprint: contextDecisionChanged
+          ? await confirmedContextMaterialFingerprint(state.context_state.research_fingerprint, goal)
+          : state.context_state.material_fingerprint,
       };
       if (!state.business_model) {
         state.business_model = await inferModel(state.site_analysis, context);
@@ -1308,66 +1463,158 @@ export class P0Application {
       }
     } else if (action === "save_business_model") {
       if (!state.business_model) fail("P0_PREREQUISITE_MISSING", "Сначала исследуйте сайт.");
+      if (!state.site_analysis || !state.context_state) {
+        fail("P0_EVIDENCE_LINEAGE_INVALID", "Model потеряла persisted Context или first-party site analysis.");
+      }
       const value = record(payload.value);
-      const ownerConfirmedAt = this.adapters.now();
-      for (const field of ["product", "audience", "value", "qualified_result", "exclusions"]) {
+      const fields = ["product", "audience", "value", "qualified_result", "exclusions"] as const;
+      const confirmedValues = Object.fromEntries(fields.map((field) => {
         const confirmedValue = artifactText(value[field], 1_000);
         if (!confirmedValue) fail("P0_INPUT_REQUIRED", `Поле ${field} требует подтверждённого значения.`);
-        (state.business_model as unknown as Record<string, unknown>)[field] = confirmedValue;
-        state.business_model.field_evidence[field] = {
-          ...state.business_model.field_evidence[field],
-          confidence: "OWNER_CONFIRMED",
-          owner_confirmed: true,
-          owner_confirmed_at: ownerConfirmedAt,
-        };
-      }
-      state.business_model.source = "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION";
-      state.business_model.assumptions = [];
-      state.business_model.missing_questions = [];
-      if (!state.site_analysis) fail("P0_EVIDENCE_LINEAGE_INVALID", "Evidence snapshot потерял first-party site analysis.");
+        return [field, confirmedValue];
+      }));
+      const firstOwnerApproval = state.business_model.source !== "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION";
+      const materialModelChange = fields.some((field) => cleanText(String(state.business_model?.[field] ?? ""), 1_000) !== confirmedValues[field]);
+      const modelApprovedAt = this.adapters.now();
       const context = sanitizeContext(await this.adapters.readContext());
-      this.assertContextPreflight(context, ownerConfirmedAt);
+      this.assertContextPreflight(context, modelApprovedAt);
       this.assertPersistedBindings(state, context);
-      state.analytics_evidence_snapshot = await this.buildModelEvidence(
-        state.site_analysis,
-        state.business_model,
-        context,
-        ownerConfirmedAt,
+      if (materialModelChange && (state.strategy || state.draft || state.shortlist)) {
+        state.last_cascade = cascadeRecord(state, "MODEL", modelApprovedAt, ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"]);
+        invalidateStrategyDownstream(state);
+      }
+      const modelRecomputationRequired = !state.analytics_evidence_snapshot;
+      if (firstOwnerApproval || materialModelChange || modelRecomputationRequired) {
+        for (const field of fields) {
+          const fieldChanged = cleanText(String(state.business_model[field] ?? ""), 1_000) !== confirmedValues[field];
+          state.business_model[field] = confirmedValues[field];
+          state.business_model.field_evidence[field] = {
+            ...state.business_model.field_evidence[field],
+            confidence: "OWNER_CONFIRMED",
+            owner_confirmed: true,
+            owner_confirmed_at: modelApprovedAt,
+            owner_edited: state.business_model.field_evidence[field]?.owner_edited === true || fieldChanged,
+          };
+        }
+        state.business_model.source = "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION";
+        state.business_model.assumptions = [];
+        state.business_model.missing_questions = [];
+        state.analytics_evidence_snapshot = await this.buildModelEvidence(
+          state.site_analysis,
+          state.business_model,
+          context,
+          modelApprovedAt,
+        );
+        state.strategy_questionnaire = await buildStrategyQuestionnaire({
+          contextState: state.context_state as unknown as Record<string, unknown>,
+          model: state.business_model as unknown as Record<string, unknown>,
+          analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
+          generatedAt: modelApprovedAt,
+        });
+      } else if (!state.strategy_questionnaire && state.analytics_evidence_snapshot) {
+        state.strategy_questionnaire = await buildStrategyQuestionnaire({
+          contextState: state.context_state as unknown as Record<string, unknown>,
+          model: state.business_model as unknown as Record<string, unknown>,
+          analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
+          generatedAt: modelApprovedAt,
+        });
+      }
+    } else if (action === "approve_strategy") {
+      if (payload.confirmation !== "APPROVE_CAMPAIGN_STRATEGY") {
+        fail("P0_STRATEGY_APPROVAL_REQUIRED", "Нужно одним точным подтверждением утвердить всю Campaign Strategy.");
+      }
+      if (!state.business_model || !state.context_state || !state.analytics_evidence_snapshot || !state.strategy_questionnaire) {
+        fail("P0_PREREQUISITE_MISSING", "Сначала подтвердите Model и подготовьте Strategy questionnaire.");
+      }
+      const questionnaire = state.strategy_questionnaire;
+      if (
+        questionnaire.context_revision_id !== state.context_state.context_revision_id
+        || questionnaire.context_material_fingerprint !== state.context_state.material_fingerprint
+        || questionnaire.analytics_evidence_snapshot_id !== state.analytics_evidence_snapshot.snapshot_id
+      ) {
+        fail("P0_STRATEGY_LINEAGE_STALE", "Strategy questionnaire устарел после material Context или Model change.");
+      }
+      const normalizedAnswers = normalizeStrategyAnswers(
+        payload.answers,
+        (input, maximum) => artifactText(input, maximum),
       );
-      state.strategy = null;
-      state.recommendation_set = null;
-      state.draft = null;
-      state.shortlist = null;
-    } else if (action === "save_strategy") {
-      if (!state.business_model) fail("P0_PREREQUISITE_MISSING", "Сначала подтвердите модель бизнеса.");
-      const value = record(payload.value);
-      const confirmedContextGoal = state.context_state?.business_goal_decision?.value;
-      if (confirmedContextGoal && cleanText(String(value.goal ?? ""), 500) !== confirmedContextGoal) {
-        fail("P0_CONTEXT_GOAL_CHANGED", "Измените бизнес-цель на шаге «Контекст», чтобы показать и применить каскад invalidation.");
+      const missing = missingStrategyDecisions(normalizedAnswers);
+      if (missing.length) {
+        fail("P0_STRATEGY_DECISION_REQUIRED", `Campaign Strategy требует решения владельца: ${missing[0]}.`);
       }
-      const required = ["goal", "geography", "period_start", "period_end", "landing_page", "weekly_budget_rub", "target_cpa_rub", "message"];
-      if (required.some((field) => String(value[field] ?? "").trim() === "")) {
-        fail("P0_STRATEGY_INVALID", "Критические решения Campaign Strategy заполнены не полностью.");
+      const confirmedContextGoal = state.context_state.business_goal_decision?.value;
+      if (normalizedAnswers.business_goal !== confirmedContextGoal) {
+        fail("P0_CONTEXT_GOAL_CHANGED", "Измените business goal на шаге «Контекст», чтобы применить material cascade.");
       }
-      const landing = normalizePublicHttpsUrl(String(value.landing_page));
+      const period = normalizedAnswers.period as { start_date: string; end_date: string };
+      if (!isValidIsoCalendarDate(period.start_date) || !isValidIsoCalendarDate(period.end_date) || period.start_date > period.end_date) {
+        fail("P0_STRATEGY_PERIOD_INVALID", "Период Campaign Strategy должен содержать допустимые даты в правильном порядке.");
+      }
+      normalizedAnswers.landing_page = normalizePublicHttpsUrl(String(normalizedAnswers.landing_page)).toString();
       const limits = await this.adapters.readCurrencyLimits();
-      validateWeeklyBudgetRub(value.weekly_budget_rub, limits.minimum_weekly_budget_rub);
-      const approvedAt = this.adapters.now();
-      state.strategy = {
-        ...value,
-        landing_page: landing.toString(),
-        source: "OWNER_APPROVED_REAL_BUSINESS_INPUT",
-        strategy_revision_id: `campaign-strategy-r${current.revision + 1}`,
-        approved_at: approvedAt,
-      };
-      state.recommendation_set = await buildCampaignRecommendationSet({
-        model: state.business_model as unknown as Record<string, unknown>,
-        strategy: state.strategy,
-        analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown> | undefined,
-        generatedAt: approvedAt,
-      });
-      state.draft = null;
-      state.shortlist = null;
+      validateWeeklyBudgetRub(normalizedAnswers.weekly_budget, limits.minimum_weekly_budget_rub);
+      const materialFingerprint = await strategyAnswersFingerprint(normalizedAnswers);
+      const existingStrategy = state.strategy;
+      if (existingStrategy?.material_fingerprint !== materialFingerprint) {
+        const approvedAt = this.adapters.now();
+        const stateBeforeRecomputation = structuredClone(state);
+        state.last_cascade = {
+          ...cascadeRecord(state, "STRATEGY", approvedAt, ["recommendation_set", "campaign_drafts", "shortlist", "confirmation"]),
+          recomputation_status: "PENDING",
+        };
+        const pendingRow: P0StoredRow = {
+          revision: persistedRevision + 1,
+          updated_at: approvedAt,
+          value_json: JSON.stringify(state),
+        };
+        if (!await this.store.compareAndSwap(key, persistedRevision, pendingRow)) {
+          fail("P0_REVISION_CONFLICT", "P0 изменился в другой вкладке. Обновите страницу.");
+        }
+        persistedRevision = pendingRow.revision;
+        try {
+          state.strategy = {
+            schema_version: CAMPAIGN_STRATEGY_SCHEMA,
+            strategy_revision_id: `campaign-strategy-r${persistedRevision + 1}`,
+            questionnaire_id: questionnaire.questionnaire_id,
+            questionnaire_contract_version: questionnaire.contract_version,
+            context_revision_id: state.context_state.context_revision_id,
+            context_material_fingerprint: state.context_state.material_fingerprint,
+            analytics_evidence_snapshot_id: state.analytics_evidence_snapshot.snapshot_id,
+            answers: questionnaire.fields.map((field) => ({
+              field_id: field.field_id,
+              value: normalizedAnswers[field.field_id]!,
+            })),
+            material_fingerprint: materialFingerprint,
+            approved_at: approvedAt,
+            approved_by: "OWNER",
+            approval_command: "APPROVE_CAMPAIGN_STRATEGY",
+            lineage: {
+              previous_strategy_revision_id: existingStrategy ? String(existingStrategy.strategy_revision_id ?? "") || null : null,
+            },
+          };
+          state.recommendation_set = await buildCampaignRecommendationSet({
+            model: state.business_model as unknown as Record<string, unknown>,
+            strategy: state.strategy as unknown as Record<string, unknown>,
+            analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
+            generatedAt: approvedAt,
+          });
+          state.draft = null;
+          state.shortlist = null;
+          state.external_write_intent = null;
+          state.last_cascade.recomputation_status = "COMPLETE";
+        } catch (error) {
+          const rollbackAt = this.adapters.now();
+          const rollbackRow: P0StoredRow = {
+            revision: persistedRevision + 1,
+            updated_at: rollbackAt,
+            value_json: JSON.stringify(stateBeforeRecomputation),
+          };
+          if (!await this.store.compareAndSwap(key, persistedRevision, rollbackRow)) {
+            fail("P0_RECOMPUTATION_RECOVERY_REQUIRED", "Strategy recomputation не завершён; confirmation остаётся заблокированным до recovery.");
+          }
+          throw error;
+        }
+      }
     } else if (action === "save_draft") {
       const value = record(payload.value);
       if (!state.strategy || !state.business_model) {

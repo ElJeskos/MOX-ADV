@@ -1,4 +1,5 @@
 import type { DirectProjection } from "./direct-write";
+import { strategyAnswerValue, strategyPeriod } from "./campaign-strategy.ts";
 
 const text = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
 
@@ -36,10 +37,10 @@ export function buildPublishProjection(
   strategy: Record<string, unknown>,
   draft: Record<string, unknown>,
 ): DirectProjection {
-  const geography = text(strategy.geography).toLowerCase();
+  const geography = text(strategyAnswerValue(strategy, "geography")).toLowerCase();
   const regionId = REGION_IDS[geography];
   if (!regionId) throw new Error("Выбранная география пока не поддерживается production P0.");
-  const weeklyBudget = Number(strategy.weekly_budget_rub);
+  const weeklyBudget = Number(strategyAnswerValue(strategy, "weekly_budget"));
   if (!Number.isSafeInteger(weeklyBudget) || weeklyBudget < 1) {
     throw new Error("Недельный бюджет некорректен.");
   }
@@ -49,6 +50,7 @@ export function buildPublishProjection(
     .map((item) => item.trim())
     .filter(Boolean);
   if (!negativeKeywords.length) throw new Error("Нужна хотя бы одна минус-фраза.");
+  const period = strategyPeriod(strategy);
 
   return {
     schema_version: "p0-direct-projection-v3",
@@ -58,11 +60,11 @@ export function buildPublishProjection(
       capability_profile_id: draft.capability_profile_id,
     },
     business: {
-      product: model.product,
-      audience: model.audience,
-      qualified_result: model.qualified_result,
-      goal: strategy.goal,
-      target_cpa_rub: strategy.target_cpa_rub,
+      product: strategyAnswerValue(strategy, "advertised_offer") || model.product,
+      audience: strategyAnswerValue(strategy, "target_audience") || model.audience,
+      qualified_result: strategyAnswerValue(strategy, "qualified_result") || model.qualified_result,
+      goal: strategyAnswerValue(strategy, "business_goal"),
+      target_cpa_rub: strategyAnswerValue(strategy, "target_result_cost"),
     },
     safety: {
       must_end_non_serving: true,
@@ -72,8 +74,8 @@ export function buildPublishProjection(
     direct: {
       campaign: {
         Name: draft.campaign_name,
-        StartDate: strategy.period_start,
-        EndDate: strategy.period_end,
+        StartDate: period.start_date,
+        EndDate: period.end_date,
         UnifiedCampaign: {
           BiddingStrategy: {
             Search: {
@@ -102,7 +104,7 @@ export function buildPublishProjection(
         TextAd: {
           Title: draft.ad_title,
           Text: draft.ad_text,
-          Href: strategy.landing_page,
+          Href: strategyAnswerValue(strategy, "landing_page"),
           Mobile: "NO",
         },
       },

@@ -216,6 +216,43 @@ function strategyValue() {
   };
 }
 
+const STRATEGY_FIELD_ORDER = [
+  "business_goal",
+  "advertised_offer",
+  "target_audience",
+  "qualified_result",
+  "exclusions",
+  "geography",
+  "period",
+  "landing_page",
+  "weekly_budget",
+  "target_result_cost",
+  "core_message",
+];
+
+function strategyAnswers(state, overrides = {}) {
+  const recommended = Object.fromEntries(
+    state.strategy_questionnaire.fields.map((field) => [field.field_id, field.recommended_value]),
+  );
+  return {
+    ...recommended,
+    geography: "Москва",
+    period: { start_date: "2026-09-01", end_date: "2026-10-01" },
+    weekly_budget: 50_000,
+    target_result_cost: 10_000,
+    ...overrides,
+  };
+}
+
+async function approveStrategy(application, result, overrides = {}) {
+  return application.command("owner", {
+    action: "approve_strategy",
+    expected_revision: result.revision,
+    confirmation: "APPROVE_CAMPAIGN_STRATEGY",
+    answers: strategyAnswers(result.state, overrides),
+  });
+}
+
 async function marketEvidenceInput() {
   const top = JSON.parse(await readFile(new URL("./fixtures/wordstat/top-requests.json", import.meta.url), "utf8"));
   const dynamics = JSON.parse(await readFile(new URL("./fixtures/wordstat/dynamics.json", import.meta.url), "utf8"));
@@ -272,10 +309,245 @@ test("authoritative application collects market evidence only for a Model revisi
 
   result = await application.command("owner", { action: "save_business_model", expected_revision: queried.revision, value: ownerModel(queried.state) });
   assert.equal(marketReads, 2);
-  result = await application.command("owner", { action: "save_strategy", expected_revision: result.revision, value: strategyValue() });
+  result = await approveStrategy(application, result);
   assert.equal(result.state.recommendation_set.delivery_packing.delivery_buckets.length, 1);
   assert.equal(result.state.recommendation_set.delivery_packing.delivery_buckets[0].disposition, "PACKED");
   assert.equal(result.state.recommendation_set.drafts.every((draft) => draft.market_evidence.frequency.snapshot_batch_id === result.state.analytics_evidence_snapshot.market_evidence.snapshot_batch_id), true);
+});
+
+test("the authoritative contract persists the fixed Strategy questionnaire and freezes one linked immutable revision", async (t) => {
+  const { directory, store, application } = await fixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/" });
+  result = await application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: result.state.context_state.provisional_business_goal.value,
+  });
+  result = await application.command("owner", {
+    action: "save_business_model",
+    expected_revision: result.revision,
+    value: ownerModel(result.state),
+  });
+
+  const questionnaire = result.state.strategy_questionnaire;
+  assert.equal(questionnaire.schema_version, "p0-strategy-questionnaire-v1");
+  assert.deepEqual(questionnaire.fields.map((field) => field.field_id), STRATEGY_FIELD_ORDER);
+  assert.equal(questionnaire.context_revision_id, result.state.context_state.context_revision_id);
+  assert.equal(questionnaire.context_material_fingerprint, result.state.context_state.material_fingerprint);
+  assert.equal(questionnaire.analytics_evidence_snapshot_id, result.state.analytics_evidence_snapshot.snapshot_id);
+  for (const field of questionnaire.fields) {
+    assert.equal(Object.hasOwn(field, "recommended_value"), true);
+    assert.equal(typeof field.explanation, "string");
+    assert.equal(["сайт", "Директ", "Метрика", "аналитика агента", "решение владельца"].includes(field.source_category), true);
+    assert.equal(["уверенно", "нужно проверить", "нет данных"].includes(field.status), true);
+  }
+  for (const fieldId of ["geography", "period", "weekly_budget", "target_result_cost"]) {
+    const field = questionnaire.fields.find((item) => item.field_id === fieldId);
+    assert.equal(field.recommended_value, null);
+    assert.equal(field.status, "нет данных");
+    assert.equal(field.source_category, "решение владельца");
+    assert.equal(field.prepared_decision.required, true);
+    assert.equal(field.prepared_decision.consequences.length > 0, true);
+  }
+  assert.doesNotMatch((await store.load("owner")).value_json, /50000|10000/u);
+
+  await assert.rejects(
+    application.command("owner", {
+      action: "approve_strategy",
+      expected_revision: result.revision,
+      confirmation: "APPROVE_CAMPAIGN_STRATEGY",
+      answers: { ...strategyAnswers(result.state), weekly_budget: null },
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_STRATEGY_DECISION_REQUIRED",
+  );
+  assert.equal((await store.load("owner")).revision, result.revision);
+  await assert.rejects(
+    application.command("owner", {
+      action: "approve_strategy",
+      expected_revision: result.revision,
+      confirmation: "APPROVE_CAMPAIGN_STRATEGY",
+      answers: strategyAnswers(result.state, { period: { start_date: "2026-99-01", end_date: "2026-10-01" } }),
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_STRATEGY_PERIOD_INVALID",
+  );
+  assert.equal((await store.load("owner")).revision, result.revision);
+
+  result = await approveStrategy(application, result);
+  assert.equal(result.state.strategy.schema_version, "p0-campaign-strategy-v1");
+  assert.deepEqual(result.state.strategy.answers.map((answer) => answer.field_id), STRATEGY_FIELD_ORDER);
+  assert.equal(result.state.strategy.questionnaire_id, questionnaire.questionnaire_id);
+  assert.equal(result.state.strategy.questionnaire_contract_version, questionnaire.contract_version);
+  assert.equal(result.state.strategy.context_revision_id, result.state.context_state.context_revision_id);
+  assert.equal(result.state.strategy.context_material_fingerprint, result.state.context_state.material_fingerprint);
+  assert.equal(result.state.strategy.analytics_evidence_snapshot_id, result.state.analytics_evidence_snapshot.snapshot_id);
+  assert.equal(result.state.strategy.lineage.previous_strategy_revision_id, null);
+  assert.equal(result.state.recommendation_set.strategy_revision_id, result.state.strategy.strategy_revision_id);
+  assert.equal(result.state.recommendation_set.analytics_evidence_snapshot_id, result.state.analytics_evidence_snapshot.snapshot_id);
+});
+
+test("rejects a corrupted persisted Strategy questionnaire before it can change field order or approval metadata", async (t) => {
+  const { directory, store, application } = await fixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/" });
+  result = await application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: result.state.context_state.provisional_business_goal.value,
+  });
+  result = await application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
+  const row = await store.load("owner");
+  assert.equal(row.revision, result.revision);
+  const corrupted = JSON.parse(row.value_json);
+  corrupted.strategy_questionnaire.fields.reverse();
+  corrupted.strategy_questionnaire.fields[0].source_category = "скрытый источник";
+  await store.seed("owner", { ...row, value_json: JSON.stringify(corrupted) });
+
+  await assert.rejects(
+    application.query("owner"),
+    (error) => error instanceof P0ApplicationError
+      && error.code === "P0_MIGRATION_LINEAGE_INVALID"
+      && /questionnaire/u.test(error.message),
+  );
+  assert.equal((await store.load("owner")).value_json, JSON.stringify(corrupted));
+});
+
+test("Strategy and Model material changes cascade while technical normalization preserves downstream lineage", async (t) => {
+  const { directory, store, application } = await fixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "owner.example" });
+  result = await application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: result.state.context_state.provisional_business_goal.value,
+  });
+  result = await application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
+  result = await approveStrategy(application, result);
+  const visible = result.state.recommendation_set.drafts.find((candidate) => candidate.visibility === "VISIBLE");
+  result = await application.command("owner", {
+    action: "save_draft",
+    expected_revision: result.revision,
+    value: {
+      draft_id: visible.draft_id,
+      campaign_name: visible.campaign_name,
+      group_name: visible.group_name,
+      keyword: visible.keyword,
+      negative_keywords: visible.negative_keywords,
+      ad_title: visible.ad_title,
+      ad_text: visible.ad_text,
+    },
+  });
+  const original = {
+    strategy: result.state.strategy.strategy_revision_id,
+    recommendation: result.state.recommendation_set.recommendation_set_id,
+    draft: result.state.draft.draft_revision_id,
+    shortlist: result.state.shortlist.shortlist_revision_id,
+    snapshot: result.state.analytics_evidence_snapshot.snapshot_id,
+  };
+
+  const approvedCoreMessage = result.state.strategy.answers.find((answer) => answer.field_id === "core_message").value;
+  result = await application.command("owner", {
+    action: "approve_strategy",
+    expected_revision: result.revision,
+    confirmation: "APPROVE_CAMPAIGN_STRATEGY",
+    answers: strategyAnswers(result.state, {
+      core_message: `  ${String(approvedCoreMessage).replaceAll(" ", "   ")}  `,
+      landing_page: "owner.example/",
+    }),
+  });
+  assert.equal(result.state.strategy.strategy_revision_id, original.strategy);
+  assert.equal(result.state.recommendation_set.recommendation_set_id, original.recommendation);
+  assert.equal(result.state.draft.draft_revision_id, original.draft);
+  assert.equal(result.state.shortlist.shortlist_revision_id, original.shortlist);
+
+  const tabA = await application.query("owner");
+  const tabB = await application.query("owner");
+  const compareAndSwap = store.compareAndSwap.bind(store);
+  let releaseRecomputation;
+  const recomputationMayFinish = new Promise((resolve) => { releaseRecomputation = resolve; });
+  let pendingPersisted;
+  const pendingWasPersisted = new Promise((resolve) => { pendingPersisted = resolve; });
+  let pendingObserved = false;
+  store.compareAndSwap = async (key, expectedRevision, row) => {
+    const saved = await compareAndSwap(key, expectedRevision, row);
+    const nextState = JSON.parse(row.value_json);
+    if (saved && !pendingObserved && nextState.last_cascade?.recomputation_status === "PENDING") {
+      pendingObserved = true;
+      pendingPersisted();
+      await recomputationMayFinish;
+    }
+    return saved;
+  };
+  const approval = approveStrategy(application, tabA, { core_message: "Новый доказуемый message" });
+  await pendingWasPersisted;
+  const duringRecomputation = await application.query("owner");
+  assert.equal(duringRecomputation.state.last_cascade.recomputation_status, "PENDING");
+  assert.deepEqual(duringRecomputation.workflow.allowed_commands, []);
+  assert.equal(duringRecomputation.write_readiness.ready, false);
+  await assert.rejects(
+    application.command("owner", {
+      action: "confirm_creation",
+      expected_revision: duringRecomputation.revision,
+      confirmation: "CREATE_NON_SERVING_CAMPAIGN",
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_TRANSITION_INVALID",
+  );
+  assert.equal((await store.load("owner")).revision, duringRecomputation.revision);
+  releaseRecomputation();
+  result = await approval;
+  assert.notEqual(result.state.strategy.strategy_revision_id, original.strategy);
+  assert.equal(result.state.strategy.lineage.previous_strategy_revision_id, original.strategy);
+  assert.notEqual(result.state.recommendation_set.recommendation_set_id, original.recommendation);
+  assert.equal(result.state.draft, null);
+  assert.equal(result.state.shortlist, null);
+  assert.equal(result.state.last_cascade.trigger, "STRATEGY");
+  assert.deepEqual(result.state.last_cascade.affected_steps, ["recommendation_set", "campaign_drafts", "shortlist", "confirmation"]);
+  assert.equal(result.state.last_cascade.recomputation_status, "COMPLETE");
+  assert.equal(result.workflow.allowed_commands.includes("confirm_creation"), false);
+  assert.equal(result.revision_history.some((item) => item.status === "SUPERSEDED" && item.strategy_revision_id === original.strategy), true);
+
+  await assert.rejects(
+    approveStrategy(application, tabB, { core_message: "Несовместимый ответ stale tab" }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_REVISION_CONFLICT",
+  );
+  const afterConflict = await application.query("owner");
+  assert.equal(afterConflict.revision, result.revision);
+  assert.equal(afterConflict.state.strategy.answers.find((answer) => answer.field_id === "core_message").value, "Новый доказуемый message");
+
+  const normalizedModel = Object.fromEntries(Object.entries(ownerModel(afterConflict.state)).map(([key, value]) => [key, `  ${String(value).replaceAll(" ", "   ")}  `]));
+  result = await application.command("owner", {
+    action: "save_business_model",
+    expected_revision: afterConflict.revision,
+    value: normalizedModel,
+  });
+  const strategyAfterNormalization = result.state.strategy.strategy_revision_id;
+  assert.equal(result.state.analytics_evidence_snapshot.snapshot_id, original.snapshot);
+  assert.equal(strategyAfterNormalization, afterConflict.state.strategy.strategy_revision_id);
+  assert.equal(result.state.recommendation_set.recommendation_set_id, afterConflict.state.recommendation_set.recommendation_set_id);
+
+  const changedModel = ownerModel(result.state);
+  changedModel.product = "Другое рекламируемое предложение";
+  result = await application.command("owner", {
+    action: "save_business_model",
+    expected_revision: result.revision,
+    value: changedModel,
+  });
+  assert.equal(result.state.strategy, null);
+  assert.equal(result.state.recommendation_set, null);
+  assert.equal(result.state.draft, null);
+  assert.equal(result.state.shortlist, null);
+  assert.equal(result.state.last_cascade.trigger, "MODEL");
+  assert.equal(result.state.last_cascade.recomputation_status, "REQUIRED");
+  assert.equal(result.write_readiness.ready, false);
+  assert.notEqual(result.state.analytics_evidence_snapshot.snapshot_id, original.snapshot);
+  assert.equal(result.state.strategy_questionnaire.analytics_evidence_snapshot_id, result.state.analytics_evidence_snapshot.snapshot_id);
+  assert.equal(result.state.strategy_questionnaire.fields.find((field) => field.field_id === "advertised_offer").source_category, "решение владельца");
+  assert.equal((await store.load("owner")).revision, result.revision);
 });
 
 test("one query/command contract drives and persists the current five-step path", async (t) => {
@@ -351,11 +623,7 @@ test("one query/command contract drives and persists the current five-step path"
   });
   assert.equal(result.workflow.current_step, 2);
 
-  result = await restarted.command("owner", {
-    action: "save_strategy",
-    expected_revision: result.revision,
-    value: strategyValue(),
-  });
+  result = await approveStrategy(restarted, result);
   assert.equal(result.workflow.current_step, 3);
   assert.equal(result.state.recommendation_set.strategy_revision_id, result.state.strategy.strategy_revision_id);
 
@@ -373,7 +641,7 @@ test("one query/command contract drives and persists the current five-step path"
       ad_text: draft.ad_text,
     },
   });
-  assert.equal(result.revision, 5);
+  assert.equal(result.revision, 6);
   assert.equal(result.workflow.current_step, 4);
   assert.equal(result.state.draft.strategy_revision_id, result.state.strategy.strategy_revision_id);
   assert.equal(result.state.draft.publish_fingerprint.length, 64);
@@ -387,7 +655,7 @@ test("one query/command contract drives and persists the current five-step path"
     (error) => error instanceof P0ApplicationError && error.code === "P0_PUBLISH_BLOCKED",
   );
   const afterBlockedWrite = await restarted.query("owner");
-  assert.equal(afterBlockedWrite.revision, 5);
+  assert.equal(afterBlockedWrite.revision, 6);
   assert.equal(afterBlockedWrite.state.campaign, null);
 });
 
@@ -615,7 +883,7 @@ test("a material Context change names and invalidates downstream lineage while n
     goal: "Получать заявки на участие через сайт",
   });
   result = await application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
-  result = await application.command("owner", { action: "save_strategy", expected_revision: result.revision, value: strategyValue() });
+  result = await approveStrategy(application, result);
   const draft = result.state.recommendation_set.drafts.find((candidate) => candidate.visibility === "VISIBLE");
   result = await application.command("owner", {
     action: "save_draft",
@@ -688,6 +956,9 @@ test("a material Context change names and invalidates downstream lineage while n
   assert.equal(result.state.context_state.last_material_change.previous_lineage.strategy_revision_id, lineage.strategy);
   assert.equal(result.state.context_state.last_material_change.previous_lineage.draft_revision_id, lineage.draft);
   assert.equal(result.state.context_state.last_material_change.previous_lineage.shortlist_revision_id, lineage.shortlist);
+  assert.equal(result.state.last_cascade.trigger, "CONTEXT");
+  assert.equal(result.state.last_cascade.recomputation_status, "REQUIRED");
+  assert.equal(result.write_readiness.ready, false);
 });
 
 test("compare-and-swap rejects a stale tab without changing the persisted document", async (t) => {

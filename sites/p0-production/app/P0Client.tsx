@@ -71,7 +71,7 @@ export default function P0Client() {
   );
 
   async function apply(action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) {
-    if (!payload) return;
+    if (!payload || busy) return;
     setError("");
     setBusy(
       action === "analyze_site"
@@ -143,7 +143,7 @@ export default function P0Client() {
         <ol className="steps" aria-label="Путь создания кампании">
           {steps.map(({ id, label, detail }, index) => (
             <li key={id}>
-              <button disabled={index > maxStep} className={index === step ? "current" : index < payload.workflow.current_step ? "done" : ""} onClick={() => setStep(index)}>
+              <button disabled={index > maxStep || Boolean(busy)} className={index === step ? "current" : index < payload.workflow.current_step ? "done" : ""} onClick={() => setStep(index)}>
                 <span>{index < payload.workflow.current_step ? "✓" : index + 1}</span><div><strong>{label}</strong><small>{detail}</small></div>
               </button>
             </li>
@@ -169,11 +169,13 @@ export default function P0Client() {
           </aside>
 
           <section className="artifact">
+            {payload.state.last_cascade?.recomputation_status === "PENDING" && <div className="recomputation-pending" role="status"><strong>Идёт downstream recomputation</strong><p>Confirmation и все mutations заблокированы. Обновите данные после завершения пересчёта.</p></div>}
+            {payload.state.last_cascade?.recomputation_status === "REQUIRED" && <div className="recomputation-pending" role="status"><strong>Downstream пересчёт обязателен</strong><p>Material Context/Model change уже инвалидировал Strategy, Drafts, shortlist и confirmation. Завершите следующие шаги заново.</p></div>}
             {step === 0 && <ContextStep payload={payload} busy={Boolean(busy)} apply={apply} />}
             {step === 1 && <ModelStep payload={payload} apply={apply} back={() => setStep(0)} />}
             {step === 2 && <StrategyStep payload={payload} apply={apply} back={() => setStep(1)} />}
             {step === 3 && <DraftStep payload={payload} apply={apply} back={() => setStep(2)} />}
-            {step === 4 && <ConfirmationStep payload={payload} apply={apply} back={() => setStep(3)} editStrategy={() => setStep(2)} />}
+            {step === 4 && <ConfirmationStep payload={payload} apply={apply} busy={Boolean(busy)} back={() => setStep(3)} editStrategy={() => setStep(2)} />}
             {busy && <p className="notice">{busy}</p>}
             {error && <p className="notice error">{error}</p>}
           </section>
@@ -327,6 +329,7 @@ function ModelStep({ payload, apply, back }: { payload: Payload; apply: (action:
     {analyticsEvidence && <AnalyticsEvidencePanel evidence={analyticsEvidence} />}
     <div className="research-strip"><Metric label="Исследовано" value={`${research.pages_analyzed || 1} страниц`} copy="First-party public HTTPS" /><Metric label="Источники" value={String(research.sources?.length || 0)} copy={(research.sources || []).join(" · ")} /><Metric label="Сделано агентом" value={`${research.completed_fields?.length || 0} / 5 полей`} copy="Человеку — подтверждение и разногласия" /></div>
     {model.assumptions?.length > 0 && <div className="assumption"><strong>Где нужна проверка</strong><span>{model.assumptions.join(" · ")}</span></div>}
+    {payload.state.strategy && <div className="material-impact"><strong>До material Model change</strong><p>Strategy, Recommendation Set, Campaign Drafts, shortlist и confirmation будут инвалидированы. Пробелы и техническая нормализация значений не запускают каскад.</p></div>}
     <form className="form two" onSubmit={submit}>
       <Field wide label="Рекламируемое предложение" name="product" value={model.product}><Evidence model={model} field="product" /></Field>
       <Field label="Лица, принимающие решение" name="audience" value={model.audience}><Evidence model={model} field="audience" /></Field>
@@ -342,33 +345,90 @@ function Field({ label, name, value, wide, maxLength, children }: { label: strin
   return <label className={wide ? "wide" : ""}><span>{label}</span><textarea name={name} required maxLength={maxLength} defaultValue={value} />{children}</label>;
 }
 
-function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>) => Promise<void>; back: () => void }) {
-  const model = payload.state.business_model || {};
-  const site = payload.state.site_analysis || {};
+const strategyFieldLabels: Record<string, string> = {
+  business_goal: "Бизнес-цель",
+  advertised_offer: "Рекламируемое предложение",
+  target_audience: "Целевая аудитория",
+  qualified_result: "Квалифицированный результат",
+  exclusions: "Исключения",
+  geography: "География",
+  period: "Период",
+  landing_page: "Посадочная страница",
+  weekly_budget: "Недельный бюджет, ₽",
+  target_result_cost: "Целевая стоимость результата, ₽",
+  core_message: "Основное сообщение",
+};
+
+function strategyAnswer(strategy: Record<string, any>, fieldId: string) {
+  const answer = (Array.isArray(strategy.answers) ? strategy.answers : []).find((item: Record<string, any>) => item.field_id === fieldId);
+  return answer?.value;
+}
+
+function StrategyRecommendation({ field }: { field: Record<string, any> }) {
+  const recommendation = field.recommended_value;
+  const display = recommendation && typeof recommendation === "object"
+    ? `${recommendation.start_date || "—"} — ${recommendation.end_date || "—"}`
+    : recommendation ?? "Рекомендации нет";
+  return <aside className={`strategy-recommendation ${field.status === "нет данных" ? "missing" : ""}`}>
+    <span>Рекомендация агента</span><strong>{String(display)}</strong><p>{field.explanation}</p>
+    <footer><b>{field.source_category}</b><em>{field.status}</em></footer>
+    {field.prepared_decision && <div className="prepared-decision"><strong>{field.prepared_decision.question}</strong><ul>{field.prepared_decision.consequences.map((item: string) => <li key={item}>{item}</li>)}</ul></div>}
+  </aside>;
+}
+
+function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; back: () => void }) {
+  const questionnaire = payload.state.strategy_questionnaire || { fields: [] };
   const existing = payload.state.strategy || {};
-  const contextGoal = payload.state.context_state?.business_goal_decision?.value || `Получать: ${model.qualified_result}`;
-  const minimumWeeklyBudget = Number(payload.context.direct?.minimum_weekly_budget_rub || 1);
-  const [weeklyBudget, setWeeklyBudget] = useState(String(existing.weekly_budget_rub || ""));
-  const weeklyBudgetError = weeklyBudgetValidationMessage(weeklyBudget, minimumWeeklyBudget);
+  const fields = Array.isArray(questionnaire.fields) ? questionnaire.fields : [];
+  const field = (fieldId: string) => fields.find((item: Record<string, any>) => item.field_id === fieldId) || {};
+  const initialValue = (fieldId: string) => strategyAnswer(existing, fieldId) ?? field(fieldId).recommended_value ?? "";
+  const existingPeriod = initialValue("period");
+  const [weeklyBudget, setWeeklyBudget] = useState(String(initialValue("weekly_budget")));
+  const minimumWeeklyBudget = Number(payload.context.direct?.minimum_weekly_budget_rub);
+  const minimumWeeklyBudgetAvailable = Number.isFinite(minimumWeeklyBudget) && minimumWeeklyBudget > 0;
+  const weeklyBudgetError = minimumWeeklyBudgetAvailable
+    ? weeklyBudgetValidationMessage(weeklyBudget, minimumWeeklyBudget)
+    : "Direct minimum недоступен; approval заблокирован без доказуемого platform constraint.";
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
-    const value = Object.fromEntries(["goal", "geography", "period_start", "period_end", "landing_page", "weekly_budget_rub", "target_cpa_rub", "message"].map((name) => [name, fieldValue(form, name)]));
-    void apply("save_strategy", value);
+    const answers = {
+      business_goal: fieldValue(form, "business_goal"),
+      advertised_offer: fieldValue(form, "advertised_offer"),
+      target_audience: fieldValue(form, "target_audience"),
+      qualified_result: fieldValue(form, "qualified_result"),
+      exclusions: fieldValue(form, "exclusions"),
+      geography: fieldValue(form, "geography"),
+      period: { start_date: fieldValue(form, "period_start"), end_date: fieldValue(form, "period_end") },
+      landing_page: fieldValue(form, "landing_page"),
+      weekly_budget: fieldValue(form, "weekly_budget"),
+      target_result_cost: fieldValue(form, "target_result_cost"),
+      core_message: fieldValue(form, "core_message"),
+    };
+    void apply("approve_strategy", undefined, { confirmation: "APPROVE_CAMPAIGN_STRATEGY", answers });
   }
+  const inputFor = (fieldId: string) => {
+    const value = initialValue(fieldId);
+    if (fieldId === "business_goal") return <input name={fieldId} required readOnly value={String(value)} />;
+    if (["advertised_offer", "target_audience", "qualified_result", "exclusions", "core_message"].includes(fieldId)) return <textarea name={fieldId} required defaultValue={String(value)} />;
+    if (fieldId === "geography") return <select name={fieldId} required defaultValue={String(value)}><option value="" disabled>Выберите business-owned географию</option><option>Россия</option><option>Москва</option><option>Санкт-Петербург</option></select>;
+    if (fieldId === "period") return <div className="period-inputs"><label><span>Начало</span><input type="date" name="period_start" required defaultValue={String(existingPeriod?.start_date || "")} /></label><label><span>Окончание</span><input type="date" name="period_end" required defaultValue={String(existingPeriod?.end_date || "")} /></label></div>;
+    if (fieldId === "landing_page") return <input type="url" name={fieldId} required defaultValue={String(value)} />;
+    if (fieldId === "weekly_budget") return <><input className={weeklyBudgetError ? "field-invalid" : ""} type="number" {...(minimumWeeklyBudgetAvailable ? { min: minimumWeeklyBudget } : {})} name={fieldId} required value={weeklyBudget} aria-invalid={Boolean(weeklyBudgetError)} aria-describedby="weekly-budget-help" onChange={(event) => setWeeklyBudget(event.target.value)} /><small id="weekly-budget-help" className={weeklyBudgetError ? "field-error" : ""} role={weeklyBudgetError ? "alert" : undefined}>{weeklyBudgetError || `Минимум Direct: ${minimumWeeklyBudget} ₽; это constraint, не recommendation.`}</small></>;
+    return <input type="number" min="1" name={fieldId} required defaultValue={String(value)} />;
+  };
   return <>
-    <ArtifactHead eyebrow="Шаг 3 · Human Decision Gate" title="Агент подготовил Campaign Strategy" copy="Безопасные поля уже предложены. Человек задаёт только период и денежные границы." />
-    <div className="decision-packet"><article><span>1</span><div><strong>Период размещения</strong><p>Укажите допустимое рекламное окно. До решения внешняя запись невозможна.</p></div></article><article><span>2</span><div><strong>Экономика кампании</strong><p>В реальном срезе недостаточно оснований изобретать бюджет и CPA. Зафиксируйте максимальную экспозицию.</p></div></article></div>
-    <form className="form two" onSubmit={submit}>
-      <label className="wide"><span>Бизнес-цель · подтверждена в Context</span><input name="goal" required readOnly value={existing.goal || contextGoal} /><small>Material change выполняется на шаге «Контекст», где заранее показан каскад invalidation.</small></label>
-      <label><span>География</span><select name="geography" defaultValue={existing.geography || "Россия"}><option>Россия</option><option>Москва</option><option>Санкт-Петербург</option></select></label>
-      <label><span>Посадочная страница</span><input type="url" name="landing_page" required defaultValue={existing.landing_page || site.url} /></label>
-      <label><span>Дата начала</span><input type="date" name="period_start" required defaultValue={existing.period_start || ""} /></label>
-      <label><span>Дата окончания</span><input type="date" name="period_end" required defaultValue={existing.period_end || ""} /></label>
-      <label><span>Недельный бюджет, ₽</span><input className={weeklyBudgetError ? "field-invalid" : ""} type="number" min={minimumWeeklyBudget} name="weekly_budget_rub" required value={weeklyBudget} aria-invalid={Boolean(weeklyBudgetError)} aria-describedby="weekly-budget-help" onChange={(event) => setWeeklyBudget(event.target.value)} /><small id="weekly-budget-help" className={weeklyBudgetError ? "field-error" : ""} role={weeklyBudgetError ? "alert" : undefined}>{weeklyBudgetError || `Минимум Direct для RUB сейчас: ${minimumWeeklyBudget} ₽ в неделю.`}</small></label>
-      <label><span>Целевой CPA, ₽</span><input type="number" min="1" name="target_cpa_rub" required defaultValue={existing.target_cpa_rub || ""} /></label>
-      <Field wide label="Основное сообщение" name="message" value={existing.message || model.value} />
-      <div className="wide"><Actions revision={payload.revision} label="Принять критические решения" disabled={Boolean(weeklyBudgetError)} back={back} submit /></div>
+    <ArtifactHead eyebrow="Шаг 3 · одно approval" title="Фиксированный Campaign Strategy questionnaire" copy="Все 11 полей всегда идут в одном порядке. Агент рекомендует только доказуемое; business-owned пробелы остаются подготовленными решениями без defaults." />
+    {existing.strategy_revision_id && <div className="material-impact"><strong>До material Strategy change</strong><p>Будет создана новая immutable Strategy revision, Recommendation Set детерминированно регенерируется, Campaign Drafts и shortlist очистятся, confirmation останется заблокированным до завершения пересчёта. Пробелы и техническая нормализация не запускают каскад.</p></div>}
+    <form className="strategy-form" onSubmit={submit}>
+      <ol className="strategy-questionnaire" aria-label="Campaign Strategy questionnaire">
+        {fields.map((item: Record<string, any>, index: number) => <li key={item.field_id} data-strategy-field={item.field_id}>
+          <header><span>{index + 1}</span><strong>{strategyFieldLabels[item.field_id] || item.field_id}</strong><code>{item.field_id}</code></header>
+          <StrategyRecommendation field={item} />
+          <div className="strategy-answer"><span>Утверждаемое значение</span>{inputFor(item.field_id)}</div>
+        </li>)}
+      </ol>
+      <footer className="actions"><span>Ревизия {payload.revision} · questionnaire {questionnaire.contract_version}</span><button type="button" className="secondary" onClick={back}>Назад</button><button type="submit" disabled={Boolean(weeklyBudgetError) || fields.length !== 11}>Утвердить всю Campaign Strategy</button></footer>
     </form>
   </>;
 }
@@ -460,7 +520,7 @@ function ViabilityDisclosure({ score, delta }: { score: Record<string, any> | un
   </section>;
 }
 
-function ConfirmationStep({ payload, apply, back, editStrategy }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; back: () => void; editStrategy: () => void }) {
+function ConfirmationStep({ payload, apply, busy, back, editStrategy }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; busy: boolean; back: () => void; editStrategy: () => void }) {
   const [confirmed, setConfirmed] = useState(false);
   const campaign = payload.state.campaign;
   if (campaign) {
@@ -474,12 +534,15 @@ function ConfirmationStep({ payload, apply, back, editStrategy }: { payload: Pay
   const draft = payload.state.draft || {};
   const strategy = payload.state.strategy || {};
   const budgetBlocked = payload.write_readiness.blockers.some((item) => item.includes("Недельный бюджет"));
+  const period = strategyAnswer(strategy, "period") || {};
+  const weeklyBudget = strategyAnswer(strategy, "weekly_budget");
+  const landingPage = strategyAnswer(strategy, "landing_page");
   return <>
     <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Создать реальную кампанию с выключенными показами" copy="Это единственное критическое решение: после подтверждения модуль выполнит официальный Direct API-контур и проверит non-serving readback." badge={ready ? "READY" : "FAIL CLOSED"} />
-    <div className="context-strip"><Metric label="Кампания" value={draft.campaign_name} copy={payload.context.direct.account} /><Metric label="Экспозиция" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy={`${strategy.period_start} — ${strategy.period_end}`} /><Metric label="Посадочная" value={strategy.landing_page} copy="Search only · сети выключены" /></div>
+    <div className="context-strip"><Metric label="Кампания" value={draft.campaign_name} copy={payload.context.direct.account} /><Metric label="Экспозиция" value={`${weeklyBudget} ₽ / неделю`} copy={`${period.start_date} — ${period.end_date}`} /><Metric label="Посадочная" value={String(landingPage || "—")} copy="Search only · сети выключены" /></div>
     <div className="confirmation"><p className="eyebrow">Обещание безопасности</p><h3>Показы и списания не начнутся</h3><p>Campaigns.add → безусловный suspend → readback SUSPENDED → группа → фраза → объявление → модерация → повторный readback SUSPENDED. Campaigns.resume отсутствует.</p></div>
     {!ready && <ul className="blockers">{payload.write_readiness.blockers.map((item, index) => <li key={item}><span>{index + 1}</span>{item}</li>)}</ul>}
     {ready && <div className="decision-confirm"><input aria-label="Подтверждаю создание реальной кампании" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю создание реальной кампании</strong><small>Кампания появится в аккаунте {payload.context.direct.account}, но показы останутся выключенными.</small></span></div>}
-    <footer className="actions"><span>Ревизия {payload.revision} · production write</span><button type="button" className="secondary" onClick={budgetBlocked ? editStrategy : back}>{budgetBlocked ? "Исправить Strategy" : "Назад"}</button><button type="button" disabled={!ready || !confirmed} onClick={() => void apply("confirm_creation", undefined, { confirmation: "CREATE_NON_SERVING_CAMPAIGN" })}>Создать с выключенными показами</button></footer>
+    <footer className="actions"><span>Ревизия {payload.revision} · production write</span><button type="button" className="secondary" disabled={busy} onClick={budgetBlocked ? editStrategy : back}>{budgetBlocked ? "Исправить Strategy" : "Назад"}</button><button type="button" disabled={busy || !ready || !confirmed} onClick={() => void apply("confirm_creation", undefined, { confirmation: "CREATE_NON_SERVING_CAMPAIGN" })}>Создать с выключенными показами</button></footer>
   </>;
 }

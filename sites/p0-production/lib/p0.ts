@@ -3,6 +3,7 @@ import {
   hasDuplicateCampaignName,
 } from "./campaign-draft.ts";
 import { fingerprintDirectProjection } from "./campaign-fanout.ts";
+import { strategyAnswerValue } from "./campaign-strategy.ts";
 import { minimumWeeklyBudgetRub, validateWeeklyBudgetRub } from "./direct-limits.ts";
 import {
   createSuspendedCampaign,
@@ -699,7 +700,7 @@ async function createExternalOutcome({
     throw new Error("Direct write account не прошёл точный API binding preflight.");
   }
   if (!state.strategy) throw new Error("Campaign Strategy отсутствует.");
-  validateWeeklyBudgetRub(state.strategy.weekly_budget_rub, limits.minimum_weekly_budget_rub);
+  validateWeeklyBudgetRub(strategyAnswerValue(state.strategy, "weekly_budget"), limits.minimum_weekly_budget_rub);
   const campaignName = String(projection.direct.campaign.Name ?? "");
   const recovery = await findRecoverableExecution(key, config.account, projection);
   let executionId: string;
