@@ -1,6 +1,10 @@
 import { env } from "cloudflare:workers";
 import { buildAdTitle } from "./ad-copy";
 import {
+  buildAnalyticsEvidence,
+  type AnalyticsEvidenceBundle,
+} from "./analytics-evidence";
+import {
   inferDecisionMakers,
   inferOffer,
   isUnprocessedAudience,
@@ -105,8 +109,15 @@ type BusinessModel = {
   };
   field_evidence: Record<
     string,
-    { confidence: string; source_url: string; quote: string; owner_confirmed?: boolean }
+    {
+      confidence: string;
+      source_url: string;
+      quote: string;
+      owner_confirmed?: boolean;
+      owner_confirmed_at?: string;
+    }
   >;
+  analysis_evidence?: AnalyticsEvidenceBundle;
 };
 
 type Context = {
@@ -120,6 +131,7 @@ type Context = {
 
 function migrateDocument(state: P0Document) {
   let changed = false;
+  let modelChanged = false;
   let previousProduct = "";
   const model = state.business_model;
   const site = state.site_analysis;
@@ -139,12 +151,14 @@ function migrateDocument(state: P0Document) {
       productEvidence.quote = supportingEvidence?.text ?? site.description;
       productEvidence.source_url = supportingEvidence?.url ?? site.url;
       delete productEvidence.owner_confirmed;
+      delete productEvidence.owner_confirmed_at;
       model.research.agent = "GPT_SITES_EVIDENCE_RESEARCH_V3";
       const correction = "product: агент превратил название бренда в конкретное рекламируемое предложение; проверьте формулировку";
       if (!model.assumptions.includes(correction)) model.assumptions.push(correction);
       model.missing_questions = model.missing_questions.filter((item) => !item.includes("предложение"));
       if (!model.research.completed_fields.includes("product")) model.research.completed_fields.push("product");
       changed = true;
+      modelChanged = true;
     }
   }
 
@@ -157,14 +171,18 @@ function migrateDocument(state: P0Document) {
       model.audience = inferred;
       audienceEvidence.confidence = "MEDIUM";
       delete audienceEvidence.owner_confirmed;
+      delete audienceEvidence.owner_confirmed_at;
       if (model.research.agent !== "GPT_SITES_EVIDENCE_RESEARCH_V3") {
         model.research.agent = "GPT_SITES_EVIDENCE_RESEARCH_V2";
       }
       const correction = "audience: агент выделил роли из evidence; проверьте соответствие реальному решению о покупке";
       if (!model.assumptions.includes(correction)) model.assumptions.push(correction);
       changed = true;
+      modelChanged = true;
     }
   }
+
+  if (modelChanged && model) delete model.analysis_evidence;
 
   const draft = state.draft;
   const strategy = state.strategy;
@@ -493,6 +511,7 @@ async function readCampaignCatalog() {
   const campaigns = payload.result.Campaigns;
   return {
     account,
+    observed_at: now(),
     total: campaigns.length,
     names: campaigns
       .filter((item) => item.Status !== "ARCHIVED")
@@ -543,11 +562,33 @@ async function readMetrika() {
   if (!response.ok) throw new Error(`Яндекс Метрика вернула HTTP ${response.status}.`);
   const payload = (await response.json()) as {
     data?: Array<{ metrics?: number[] }>;
+    sampled?: boolean;
+    contains_sensitive_data?: boolean;
+    sample_share?: number;
+    sample_size?: number;
+    sample_space?: number;
+    data_lag?: number;
   };
   if (!Array.isArray(payload.data)) throw new Error("Ответ Метрики некорректен.");
   const visits = payload.data.reduce((sum, row) => sum + Number(row.metrics?.[0] ?? 0), 0);
   const goals = payload.data.reduce((sum, row) => sum + Number(row.metrics?.[1] ?? 0), 0);
-  return { counter, goal, period_start: start, period_end: end, visits, goals };
+  return {
+    counter,
+    goal,
+    period_start: start,
+    period_end: end,
+    visits,
+    goals,
+    observed_at: now(),
+    sampling: {
+      sampled: payload.sampled === true,
+      contains_sensitive_data: payload.contains_sensitive_data === true,
+      sample_share: Number(payload.sample_share ?? 1),
+      sample_size: Number(payload.sample_size ?? payload.data.length),
+      sample_space: Number(payload.sample_space ?? payload.data.length),
+      data_lag: Number(payload.data_lag ?? 0),
+    },
+  };
 }
 
 async function readContext(): Promise<Context> {
@@ -560,14 +601,24 @@ async function readContext(): Promise<Context> {
     directResult.status === "fulfilled" && limitsResult.status === "fulfilled"
       ? {
           ready: true,
+          inventory_ready: true,
           access: "REAL_API_READ",
           account: directResult.value.account,
           campaigns_total: directResult.value.total,
+          observed_at: directResult.value.observed_at,
           minimum_weekly_budget_rub: limitsResult.value.minimum_weekly_budget_rub,
         }
       : {
           ready: false,
+          inventory_ready: directResult.status === "fulfilled",
           access: "REAL_API_READ",
+          ...(directResult.status === "fulfilled"
+            ? {
+                account: directResult.value.account,
+                campaigns_total: directResult.value.total,
+                observed_at: directResult.value.observed_at,
+              }
+            : {}),
           blockers: [
             ...(directResult.status === "rejected" ? [errorMessage(directResult.reason)] : []),
             ...(limitsResult.status === "rejected" ? [errorMessage(limitsResult.reason)] : []),
@@ -580,6 +631,9 @@ async function readContext(): Promise<Context> {
           access: "REAL_API_READ",
           counter_connected: true,
           goal_connected: true,
+          counter_id: metrikaResult.value.counter,
+          goal_id: metrikaResult.value.goal,
+          observed_at: metrikaResult.value.observed_at,
         }
       : { ready: false, access: "REAL_API_READ", blockers: [errorMessage(metrikaResult.reason)] };
   return {
@@ -599,6 +653,11 @@ async function readContext(): Promise<Context> {
             display_metrics: {
               visits: String(metrikaResult.value.visits),
               goal_visits: String(metrikaResult.value.goals),
+            },
+            provenance: {
+              source_kind: "METRIKA_REPORTS_API",
+              observed_at: metrikaResult.value.observed_at,
+              sampling: metrikaResult.value.sampling,
             },
           }
         : null,
@@ -777,7 +836,7 @@ function bestOfferEvidence(rows: Array<{ text: string; url: string }>) {
   ]);
 }
 
-function inferModel(site: SiteAnalysis, context: Context): BusinessModel {
+async function inferModel(site: SiteAnalysis, context: Context): Promise<BusinessModel> {
   const rows = evidenceRows(site);
   const productEvidence = bestOfferEvidence(rows);
   const brand = brandFromSite(site);
@@ -851,7 +910,7 @@ function inferModel(site: SiteAnalysis, context: Context): BusinessModel {
   const sources = ["PUBLIC_FIRST_PARTY_SITE"];
   if (context.direct.ready === true) sources.push("DIRECT_REAL_ACCOUNT");
   if (context.metrika.ready === true) sources.push("METRIKA_REAL_COUNTER");
-  return {
+  const model: BusinessModel = {
     product: facts.product.value,
     audience: facts.audience.value,
     value: facts.value.value,
@@ -881,6 +940,12 @@ function inferModel(site: SiteAnalysis, context: Context): BusinessModel {
       ]),
     ),
   };
+  model.analysis_evidence = await buildAnalyticsEvidence({
+    site: site as unknown as Record<string, unknown>,
+    model: model as unknown as Record<string, unknown>,
+    context: context as unknown as Record<string, unknown>,
+  });
+  return model;
 }
 
 function writeReadiness(state: P0Document, context: Context) {
@@ -903,12 +968,20 @@ function writeReadiness(state: P0Document, context: Context) {
 
 export async function overview(key: string) {
   const [stored, context] = await Promise.all([loadState(key), readContext()]);
+  const analysisEvidence = stored.state.site_analysis && stored.state.business_model
+    ? await buildAnalyticsEvidence({
+        site: stored.state.site_analysis as unknown as Record<string, unknown>,
+        model: stored.state.business_model as unknown as Record<string, unknown>,
+        context: context as unknown as Record<string, unknown>,
+      })
+    : null;
   return {
     module: "P0_PRODUCTION",
     environment: "PRODUCTION",
     test_scenario: false,
     ...stored,
     context,
+    analysis_evidence: analysisEvidence,
     write_readiness: writeReadiness(stored.state, context),
   };
 }
@@ -926,12 +999,13 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
     const site = await researchSite(String(payload.url ?? ""));
     const context = await readContext();
     state.site_analysis = site;
-    state.business_model = inferModel(site, context);
+    state.business_model = await inferModel(site, context);
     state.strategy = null;
     state.draft = null;
   } else if (action === "save_business_model") {
     if (!state.business_model) throw new Error("Сначала исследуйте сайт.");
     const value = payload.value as Record<string, unknown>;
+    const ownerConfirmedAt = now();
     for (const field of ["product", "audience", "value", "qualified_result", "exclusions"]) {
       const text = cleanText(String(value?.[field] ?? ""), 1_000);
       if (!text) throw new Error(`Поле ${field} требует подтверждённого значения.`);
@@ -940,11 +1014,19 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
         ...state.business_model.field_evidence[field],
         confidence: "OWNER_CONFIRMED",
         owner_confirmed: true,
+        owner_confirmed_at: ownerConfirmedAt,
       };
     }
     state.business_model.source = "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION";
     state.business_model.assumptions = [];
     state.business_model.missing_questions = [];
+    if (!state.site_analysis) throw new Error("Evidence snapshot потерял first-party site analysis.");
+    const context = await readContext();
+    state.business_model.analysis_evidence = await buildAnalyticsEvidence({
+      site: state.site_analysis as unknown as Record<string, unknown>,
+      model: state.business_model as unknown as Record<string, unknown>,
+      context: context as unknown as Record<string, unknown>,
+    });
     state.strategy = null;
     state.draft = null;
   } else if (action === "save_strategy") {

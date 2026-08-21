@@ -12,6 +12,7 @@ type Payload = {
   updated_at: string;
   state: Record<string, any>;
   context: Record<string, any>;
+  analysis_evidence?: Record<string, any> | null;
   write_readiness: { ready: boolean; blockers: string[] };
 };
 
@@ -86,7 +87,10 @@ export default function P0Client() {
           ...extra,
         }),
       });
-      const next = { ...payload, ...result } as Payload;
+      const refreshedEvidence = ["analyze_site", "save_business_model"].includes(action)
+        ? result.state?.business_model?.analysis_evidence || payload.analysis_evidence
+        : payload.analysis_evidence;
+      const next = { ...payload, ...result, analysis_evidence: refreshedEvidence } as Payload;
       setPayload(next);
       setStep(currentStep(next));
     } catch (reason) {
@@ -211,16 +215,72 @@ function Evidence({ model, field }: { model: Record<string, any>; field: string 
   return <small className={`evidence ${String(item.confidence || "LOW").toLowerCase()}`}><strong>{confidenceLabel(item.confidence || "LOW")}</strong>{item.quote ? ` · «${String(item.quote).slice(0, 180)}»` : ""}</small>;
 }
 
+function sourceStatusLabel(value: string) {
+  return { VERIFIED: "Проверено", PARTIAL: "Частично", UNAVAILABLE: "Нет данных" }[value] || value;
+}
+
+function evidenceStatusLabel(value: string) {
+  return {
+    EVIDENCE_READY_WITH_GAPS: "Готово с пробелами",
+    BLOCKED_UNKNOWN: "Нужны критические факты",
+  }[value] || value;
+}
+
+function evidenceValue(value: unknown) {
+  if (value === null || value === undefined || value === "") return "—";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function EvidenceClaimDisclosure({ claim, records }: { claim: Record<string, any>; records: Record<string, any>[] }) {
+  const linkedRecords = records.filter((record) => (claim.evidence_ids || []).includes(record.evidence_id));
+  return <details className="evidence-claim">
+    <summary><strong>{claim.predicate}</strong><span>{claim.confidence?.tier}</span></summary>
+    <div className="evidence-claim-body">
+      <p>{evidenceValue(claim.value).slice(0, 360)}</p>
+      <code>{claim.claim_id}</code>
+      {linkedRecords.map((record) => <section key={record.evidence_id}>
+        <div><strong>{record.source_kind}</strong><span>{record.observed_at || "as_of unavailable"}</span></div>
+        {record.raw?.quote && <blockquote>«{record.raw.quote}»</blockquote>}
+        <code>{evidenceValue(record.source_locator)}</code>
+        <code>{record.extraction?.method} · {record.raw?.sha256}</code>
+      </section>)}
+    </div>
+  </details>;
+}
+
+function AnalyticsEvidencePanel({ evidence }: { evidence: Record<string, any> }) {
+  const summary = evidence.summary || {};
+  const confidence = evidence.confidence || {};
+  const sources = Array.isArray(evidence.sources) ? evidence.sources : [];
+  const claims = Array.isArray(evidence.claims) ? evidence.claims : [];
+  const records = Array.isArray(evidence.evidence) ? evidence.evidence : [];
+  const uncertainties = Array.isArray(evidence.material_uncertainties) ? evidence.material_uncertainties : [];
+  const blockers = Array.isArray(summary.hard_blockers) ? summary.hard_blockers : [];
+  const prelaunchCost = evidence.prelaunch_cost || {};
+  return <section className="evidence-overview" aria-labelledby="evidence-overview-title">
+    <header><div><p className="eyebrow">Versioned evidence snapshot</p><h3 id="evidence-overview-title">Краткая сводка аналитики</h3><p>Факты раскрываются до claim и source locator; score и hard blockers не смешиваются.</p></div><strong className={String(evidence.recommendation_status || "").toLowerCase()}>{evidenceStatusLabel(evidence.recommendation_status)}</strong></header>
+    <div className="evidence-kpis"><Metric label="Источники" value={`${summary.sources_verified || 0} проверено · ${summary.sources_partial || 0} частично`} copy={`${summary.sources_unavailable || 0} недоступно из ${summary.sources_total || 0}`} /><Metric label="Claims" value={String(summary.claims_supported || 0)} copy="Каждый связан с Evidence Record" /><Metric label="Стоимость до запуска" value={prelaunchCost.status === "HISTORICAL_FIRST_PARTY" ? "First-party history" : "Недоступна"} copy={prelaunchCost.reason || "Wordstat не является CPC forecast"} /></div>
+    <dl className="confidence-vector"><div><dt>Качество</dt><dd>{confidence.source_quality || "UNKNOWN"}</dd></div><div><dt>Свежесть</dt><dd>{confidence.freshness || "UNKNOWN"}</dd></div><div><dt>Согласованность</dt><dd>{confidence.consistency || "NOT_EVALUATED"}</dd></div><div><dt>Покрытие</dt><dd>{confidence.coverage || "UNKNOWN"}</dd></div></dl>
+    <div className="evidence-source-grid">{sources.map((source: Record<string, any>) => <details key={source.source_id} className={`evidence-source ${String(source.status || "").toLowerCase()}`}><summary><span /><div><strong>{source.title}</strong><small>{sourceStatusLabel(source.status)}</small></div></summary><div className="evidence-source-body">{source.facts?.length > 0 && <ul>{source.facts.map((fact: string) => <li key={fact}>{fact}</li>)}</ul>}{source.limitations?.length > 0 && <ul className="limitations">{source.limitations.map((item: string) => <li key={item}>{item}</li>)}</ul>}<code>{source.source_kind} · {source.observed_at || "as_of unavailable"}</code></div></details>)}</div>
+    {blockers.length > 0 && <div className="evidence-blockers"><strong>Hard blockers оцениваются отдельно от score</strong><ul>{blockers.map((item: string) => <li key={item}>{item}</li>)}</ul></div>}
+    {uncertainties.length > 0 && <div className="evidence-uncertainty"><strong>Неопределённость раскрыта, а не заполнена догадкой</strong><ul>{uncertainties.slice(0, 4).map((item: string) => <li key={item}>{item}</li>)}</ul></div>}
+    <details className="evidence-index"><summary>Evidence index · {claims.length} claims · {records.length} records</summary><div>{claims.map((claim: Record<string, any>) => <EvidenceClaimDisclosure key={claim.claim_id} claim={claim} records={records} />)}</div></details>
+    <footer><code>{String(evidence.snapshot_id || "").slice(0, 28)}…</code><span>as of {evidence.as_of}</span><span>{evidence.schema_version}</span></footer>
+  </section>;
+}
+
 function ModelStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>) => Promise<void>; back: () => void }) {
   const model = payload.state.business_model || {};
   const research = model.research || {};
+  const analyticsEvidence = payload.analysis_evidence || model.analysis_evidence || null;
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
     void apply("save_business_model", Object.fromEntries(["product", "audience", "value", "qualified_result", "exclusions"].map((name) => [name, fieldValue(form, name)])));
   }
   return <>
-    <ArtifactHead eyebrow="Шаг 2 · агентное исследование" title="Агент уже собрал модель бизнеса" copy="Исправьте только неверную гипотезу или факт, которого действительно нет в разрешённых источниках." badge="AGENT RESEARCH" />
+    <ArtifactHead eyebrow="Шаг 2 · агентное исследование" title="Агент уже собрал модель бизнеса" copy="Сначала — краткая сводка, затем раскрываемые доказательства. Исправьте только неверную гипотезу или факт, которого действительно нет в разрешённых источниках." badge="AGENT RESEARCH" />
+    {analyticsEvidence && <AnalyticsEvidencePanel evidence={analyticsEvidence} />}
     <div className="research-strip"><Metric label="Исследовано" value={`${research.pages_analyzed || 1} страниц`} copy="First-party public HTTPS" /><Metric label="Источники" value={String(research.sources?.length || 0)} copy={(research.sources || []).join(" · ")} /><Metric label="Сделано агентом" value={`${research.completed_fields?.length || 0} / 5 полей`} copy="Человеку — подтверждение и разногласия" /></div>
     {model.assumptions?.length > 0 && <div className="assumption"><strong>Где нужна проверка</strong><span>{model.assumptions.join(" · ")}</span></div>}
     <form className="form two" onSubmit={submit}>
