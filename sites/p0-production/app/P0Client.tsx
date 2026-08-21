@@ -17,6 +17,12 @@ type Payload = {
     allowed_commands: string[];
   };
   context: Record<string, any>;
+  context_preflight: { ready: boolean; blockers: string[]; maximum_age_ms: number };
+  context_change_policy: {
+    affected_steps: Array<{ id: string; label: string }>;
+    normalization_only_changes_invalidate: boolean;
+    confirmation_requires_recomputation: boolean;
+  };
   analysis_evidence?: Record<string, any> | null;
   revision_history?: Array<Record<string, any>>;
   write_readiness: { ready: boolean; blockers: string[] };
@@ -67,7 +73,13 @@ export default function P0Client() {
   async function apply(action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) {
     if (!payload) return;
     setError("");
-    setBusy(action === "analyze_site" ? "Агент исследует first-party страницы и реальные подключения…" : "Сохраняю production-ревизию…");
+    setBusy(
+      action === "analyze_site"
+        ? "Проверяю точные API bindings и исследую безопасный first-party target…"
+        : action === "confirm_context_goal"
+          ? "Сохраняю решение владельца и начинаю полную аналитику…"
+          : "Сохраняю production-ревизию…",
+    );
     try {
       const result = await request("/api/p0", {
         method: "POST",
@@ -122,7 +134,7 @@ export default function P0Client() {
       <header className="topbar">
         <Link className="brand" href="/"><span>M</span>MOX-ADV</Link>
         <nav aria-label="Основная навигация"><Link className="active" href="/">Стратегия</Link><span>Production Module · P0</span></nav>
-        <div className="ready"><i />Система готова</div>
+        <div className={`ready ${payload.context_preflight.ready ? "" : "blocked"}`}><i />{payload.context_preflight.ready ? "API bindings подтверждены" : "Preflight заблокирован"}</div>
       </header>
 
       <main className="page">
@@ -145,15 +157,15 @@ export default function P0Client() {
           <aside className="agent-pane">
             <div className="agent-head"><span>AI</span><div><strong>Агент кампании</strong><small>GPT Sites · production-only</small></div></div>
             <section className="agent-message"><strong>{steps[step]?.label}</strong><p>{[
-              "Проверяю реальные API и сам исследую сайт.",
+              "Проверяю точные API bindings, исследую безопасный сайт и предлагаю одну provisional бизнес-цель.",
               "Показываю готовую модель с доказательствами и уверенностью.",
               "Готовлю Strategy; владелец задаёт только денежные и временные границы.",
               "Компилирую точную publish projection без молчаливых полей.",
               "Внешняя запись остаётся закрытой, пока production gates не готовы.",
             ][step]}</p></section>
             <section className="connections"><h3>Подключённые данные</h3>
-              <Connection label="Яндекс Директ" ready={direct.ready === true} detail={direct.ready ? `${direct.account} · ${direct.campaigns_total} кампаний` : direct.blockers?.[0]} />
-              <Connection label="Яндекс Метрика" ready={metrika.ready === true} detail={metrika.ready ? "Счётчик и цель читаются через API" : metrika.blockers?.[0]} />
+              <Connection label="Яндекс Директ" ready={direct.ready === true} detail={direct.ready ? `${direct.account} · binding подтверждён · ${direct.campaigns_total} кампаний` : direct.blockers?.[0]} />
+              <Connection label="Яндекс Метрика" ready={metrika.ready === true} detail={metrika.ready ? `Счётчик ${metrika.counter_id} · цель ${metrika.goal_id} · API` : metrika.blockers?.[0]} />
               <Connection label="Последний реальный срез" ready={Boolean(performance)} detail={performance ? `${performance.period_start} — ${performance.period_end} · ${performance.display_metrics.goal_visits} целей` : "Нет подтверждённого среза"} />
             </section>
             <section className="write-boundary"><span>Готовность внешней записи</span><strong>{payload.write_readiness.ready ? "Готова к подтверждению" : "Заблокирована"}</strong><small>{payload.write_readiness.ready ? "Реальный Direct API · показы останутся выключенными" : payload.write_readiness.blockers[0]}</small></section>
@@ -188,14 +200,38 @@ function Actions({ revision, label, disabled, back, submit }: { revision: number
 
 function ContextStep({ payload, busy, apply }: { payload: Payload; busy: boolean; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void> }) {
   const analysis = payload.state.site_analysis;
-  function submit(event: FormEvent<HTMLFormElement>) {
+  const contextState = payload.state.context_state;
+  const goal = contextState?.business_goal_decision?.value || contextState?.provisional_business_goal?.value || "";
+  const preflight = payload.context_preflight;
+  function submitResearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void apply("analyze_site", undefined, { url: fieldValue(event.currentTarget, "url") });
   }
+  function submitGoal(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void apply("confirm_context_goal", undefined, {
+      confirmation: "CONFIRM_CONTEXT_GOAL",
+      goal: fieldValue(event.currentTarget, "goal"),
+    });
+  }
   return <>
-    <ArtifactHead eyebrow="Шаг 1 · production preflight" title="Реальный контекст до создания" copy="Агент начинает с разрешённых источников и не перекладывает безопасное исследование на человека." />
-    <div className="context-strip"><Metric label="Директ" value={payload.context.direct.ready ? payload.context.direct.account : "Не готов"} copy={payload.context.direct.ready ? `${payload.context.direct.campaigns_total} кампаний прочитано` : payload.context.direct.blockers?.[0]} /><Metric label="Метрика" value={payload.context.metrika.ready ? "Реальная цель подключена" : "Не готова"} copy={payload.context.metrika.ready ? "Production API подтвердил подключение" : payload.context.metrika.blockers?.[0]} /><Metric label="Сайт" value={analysis ? analysis.title || analysis.url : "Нужен реальный URL"} copy={analysis ? `${analysis.research?.pages_analyzed || 1} first-party страниц исследовано` : "Scope первого P0 задаёт владелец"} /></div>
-    <form className="form" onSubmit={submit}><label className="wide"><span>Публичный сайт бизнеса</span><input type="text" inputMode="url" name="url" required defaultValue={analysis?.url || ""} placeholder="example.ru или https://example.ru/" /><small>Можно указать домен без https:// — модуль добавит его автоматически.</small></label><div className="agent-work"><strong>Что агент сделает сам</strong><p>Обойдёт до шести релевантных first-party страниц, сопоставит их с Директом и Метрикой, заполнит модель и приложит доказательства.</p></div><Actions revision={payload.revision} label="Исследовать и собрать модель" disabled={busy} submit /></form>
+    <ArtifactHead eyebrow="Шаг 1 · production preflight" title="Контекст и provisional бизнес-цель" copy="До полной аналитики модуль проверяет точные official API bindings, безопасно исследует first-party target и просит одно явное решение владельца." badge={preflight.ready ? "BINDINGS VERIFIED" : "FAIL CLOSED"} />
+    <div className="context-strip"><Metric label="Директ" value={payload.context.direct.ready ? payload.context.direct.account : "Не готов"} copy={payload.context.direct.ready ? `clients.get подтвердил account · ${payload.context.direct.campaigns_total} кампаний` : preflight.blockers[0]} /><Metric label="Метрика" value={payload.context.metrika.ready ? `Счётчик ${payload.context.metrika.counter_id}` : "Не готова"} copy={payload.context.metrika.ready ? `Цель ${payload.context.metrika.goal_id} подтверждена Management API` : preflight.blockers[0]} /><Metric label="Сайт" value={analysis ? analysis.title || analysis.url : "Нужен публичный HTTPS URL"} copy={analysis ? `${analysis.research?.pages_analyzed || 1} first-party страниц · bounded research` : "Private/local targets и unsafe redirects отклоняются"} /></div>
+    {!preflight.ready && <div className="preflight-blocked"><strong>Продолжение заблокировано</strong><ul>{preflight.blockers.map((item) => <li key={item}>{item}</li>)}</ul><small>Credentials остаются только server-side и не передаются в этот state.</small></div>}
+    <form className="form" onSubmit={submitResearch}>
+      <label className="wide"><span>Публичный first-party сайт бизнеса</span><input type="text" inputMode="url" name="url" required defaultValue={analysis?.url || ""} placeholder="example.ru или https://example.ru/" /><small>HTTPS добавляется технически; credentials, private/local/link-local targets, unsafe redirects и превышение лимитов отклоняются до исследования.</small></label>
+      {analysis && <div className="material-impact"><strong>До material Context change</strong><p>Будут затронуты: {payload.context_change_policy.affected_steps.map((item) => item.label).join(" → ")}. Confirmation заблокируется до пересчёта. Пробелы и техническая URL-нормализация сами по себе ничего не инвалидируют.</p></div>}
+      <div className="agent-work"><strong>Что агент сделает сам до полной аналитики</strong><p>Проверит exact account/counter/goal authority через official APIs, обойдёт не более шести bounded first-party страниц и предложит ровно одну evidence-grounded цель.</p></div>
+      <Actions revision={payload.revision} label={analysis ? "Повторно проверить Context" : "Проверить Context и предложить цель"} disabled={busy || !preflight.ready} submit />
+    </form>
+    {contextState && <form key={`${payload.revision}-${contextState.status}`} className="goal-decision" onSubmit={submitGoal}>
+      <header><div><p className="eyebrow">Одна provisional бизнес-цель</p><h3>{contextState.status === "GOAL_CONFIRMED" ? "Решение владельца сохранено" : "Подтвердите или исправьте до полной аналитики"}</h3></div><strong>{contextState.status === "GOAL_CONFIRMED" ? "OWNER CONFIRMED" : "PROVISIONAL"}</strong></header>
+      <label><span>Бизнес-цель</span><textarea name="goal" required maxLength={500} defaultValue={goal} /></label>
+      <blockquote>{contextState.provisional_business_goal.rationale}</blockquote>
+      {contextState.status === "GOAL_CONFIRMED" && <div className="material-impact"><strong>Перед изменением подтверждённой цели</strong><p>Material edit затронет: {payload.context_change_policy.affected_steps.map((item) => item.label).join(" → ")}. Техническая нормализация пробелов не создаёт invalidation.</p></div>}
+      {contextState.last_material_change && <p className="invalidation-note">Downstream lineage сохранён в audit history; Strategy, Recommendation Set, Campaign Drafts, shortlist и confirmation инвалидированы.</p>}
+      <Actions revision={payload.revision} label={contextState.status === "GOAL_CONFIRMED" ? "Сохранить Context goal" : "Подтвердить цель и продолжить анализ"} disabled={busy || !preflight.ready} submit />
+    </form>}
   </>;
 }
 
@@ -295,6 +331,7 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
   const model = payload.state.business_model || {};
   const site = payload.state.site_analysis || {};
   const existing = payload.state.strategy || {};
+  const contextGoal = payload.state.context_state?.business_goal_decision?.value || `Получать: ${model.qualified_result}`;
   const minimumWeeklyBudget = Number(payload.context.direct?.minimum_weekly_budget_rub || 1);
   const [weeklyBudget, setWeeklyBudget] = useState(String(existing.weekly_budget_rub || ""));
   const weeklyBudgetError = weeklyBudgetValidationMessage(weeklyBudget, minimumWeeklyBudget);
@@ -308,7 +345,7 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
     <ArtifactHead eyebrow="Шаг 3 · Human Decision Gate" title="Агент подготовил Campaign Strategy" copy="Безопасные поля уже предложены. Человек задаёт только период и денежные границы." />
     <div className="decision-packet"><article><span>1</span><div><strong>Период размещения</strong><p>Укажите допустимое рекламное окно. До решения внешняя запись невозможна.</p></div></article><article><span>2</span><div><strong>Экономика кампании</strong><p>В реальном срезе недостаточно оснований изобретать бюджет и CPA. Зафиксируйте максимальную экспозицию.</p></div></article></div>
     <form className="form two" onSubmit={submit}>
-      <label className="wide"><span>Бизнес-цель</span><input name="goal" required defaultValue={existing.goal || `Получать: ${model.qualified_result}`} /></label>
+      <label className="wide"><span>Бизнес-цель · подтверждена в Context</span><input name="goal" required readOnly value={existing.goal || contextGoal} /><small>Material change выполняется на шаге «Контекст», где заранее показан каскад invalidation.</small></label>
       <label><span>География</span><select name="geography" defaultValue={existing.geography || "Россия"}><option>Россия</option><option>Москва</option><option>Санкт-Петербург</option></select></label>
       <label><span>Посадочная страница</span><input type="url" name="landing_page" required defaultValue={existing.landing_page || site.url} /></label>
       <label><span>Дата начала</span><input type="date" name="period_start" required defaultValue={existing.period_start || ""} /></label>

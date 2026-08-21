@@ -17,37 +17,13 @@ import {
   type P0Context,
   type P0Document,
   type P0StoredRow,
-  type PageEvidence,
-  type SiteAnalysis,
 } from "./p0-application.ts";
-import { normalizePublicHttpsUrl, requirePublicHttpsUrl } from "./site-url.ts";
+import { researchPublicFirstPartySite } from "./site-research.ts";
 import { cleanText } from "./text.ts";
-
-const MAX_SITE_BYTES = 5_000_000;
-const MAX_SITE_PAGES = 6;
-const RESEARCH_TERMS = [
-  "about",
-  "product",
-  "service",
-  "solution",
-  "particip",
-  "partner",
-  "price",
-  "tariff",
-  "registration",
-  "become",
-  "visitor",
-  "client",
-  "faq",
-  "contact",
-  "услов",
-  "участ",
-  "партнер",
-  "регистра",
-  "посетител",
-  "клиент",
-  "контакт",
-];
+import {
+  verifyDirectAccountBinding,
+  verifyMetrikaCounterBinding,
+} from "./yandex-context.ts";
 
 type ExecutionRow = {
   execution_id: string;
@@ -85,6 +61,28 @@ function directWriteConfig() {
     token: runtime.YANDEX_DIRECT_OAUTH_TOKEN ?? "",
     account: runtime.YANDEX_DIRECT_CLIENT_LOGIN ?? "",
   };
+}
+
+async function readDirectBinding() {
+  const config = directWriteConfig();
+  return verifyDirectAccountBinding(
+    { token: config.token, expectedAccount: config.account },
+    fetch,
+    now,
+  );
+}
+
+async function readMetrikaBinding() {
+  const runtime = runtimeEnv();
+  return verifyMetrikaCounterBinding(
+    {
+      token: runtime.YANDEX_METRICA_OAUTH_TOKEN ?? "",
+      expectedCounterId: runtime.YANDEX_METRICA_COUNTER_ID ?? "",
+      expectedGoalId: runtime.YANDEX_METRICA_GOAL_ID ?? "",
+    },
+    fetch,
+    now,
+  );
 }
 
 async function beginExecution(
@@ -261,6 +259,9 @@ async function readCampaignCatalog() {
   if (payload.error || !Array.isArray(payload.result?.Campaigns)) {
     throw new Error("Ответ Яндекс Директа не соответствует read-only контракту.");
   }
+  if (payload.result.LimitedBy !== undefined) {
+    throw new Error("Direct campaign inventory preflight частичен: API ограничил результат.");
+  }
   const campaigns = payload.result.Campaigns;
   return {
     account,
@@ -345,50 +346,55 @@ async function readMetrika() {
 }
 
 async function readContext(): Promise<P0Context> {
-  const [directResult, limitsResult, metrikaResult] = await Promise.allSettled([
+  const [directBindingResult, directResult, limitsResult, metrikaBindingResult, metrikaResult] = await Promise.allSettled([
+    readDirectBinding(),
     readCampaignCatalog(),
     readCurrencyLimits(),
+    readMetrikaBinding(),
     readMetrika(),
   ]);
-  const direct =
-    directResult.status === "fulfilled" && limitsResult.status === "fulfilled"
-      ? {
-          ready: true,
-          inventory_ready: true,
-          access: "REAL_API_READ",
-          account: directResult.value.account,
-          campaigns_total: directResult.value.total,
-          observed_at: directResult.value.observed_at,
-          minimum_weekly_budget_rub: limitsResult.value.minimum_weekly_budget_rub,
-        }
-      : {
-          ready: false,
-          inventory_ready: directResult.status === "fulfilled",
-          access: "REAL_API_READ",
-          ...(directResult.status === "fulfilled"
-            ? {
-                account: directResult.value.account,
-                campaigns_total: directResult.value.total,
-                observed_at: directResult.value.observed_at,
-              }
-            : {}),
-          blockers: [
-            ...(directResult.status === "rejected" ? [errorMessage(directResult.reason)] : []),
-            ...(limitsResult.status === "rejected" ? [errorMessage(limitsResult.reason)] : []),
-          ],
-        };
-  const metrika =
-    metrikaResult.status === "fulfilled"
-      ? {
-          ready: true,
-          access: "REAL_API_READ",
-          counter_connected: true,
-          goal_connected: true,
-          counter_id: metrikaResult.value.counter,
-          goal_id: metrikaResult.value.goal,
-          observed_at: metrikaResult.value.observed_at,
-        }
-      : { ready: false, access: "REAL_API_READ", blockers: [errorMessage(metrikaResult.reason)] };
+  const directReady = directBindingResult.status === "fulfilled"
+    && directResult.status === "fulfilled"
+    && limitsResult.status === "fulfilled"
+    && directBindingResult.value.account === directResult.value.account;
+  const direct = directReady
+    ? {
+        ready: true,
+        inventory_ready: true,
+        ...directBindingResult.value,
+        campaigns_total: directResult.value.total,
+        minimum_weekly_budget_rub: limitsResult.value.minimum_weekly_budget_rub,
+      }
+    : {
+        ready: false,
+        inventory_ready: directResult.status === "fulfilled",
+        authority: directBindingResult.status === "fulfilled" ? directBindingResult.value.authority : "UNVERIFIED",
+        access: "YANDEX_DIRECT_API_V501",
+        ...(directBindingResult.status === "fulfilled" ? directBindingResult.value : {}),
+        ...(directResult.status === "fulfilled" ? { campaigns_total: directResult.value.total } : {}),
+        blockers: [
+          ...(directBindingResult.status === "rejected" ? [errorMessage(directBindingResult.reason)] : []),
+          ...(directResult.status === "rejected" ? [errorMessage(directResult.reason)] : []),
+          ...(limitsResult.status === "rejected" ? [errorMessage(limitsResult.reason)] : []),
+          ...(directBindingResult.status === "fulfilled" && directResult.status === "fulfilled"
+            && directBindingResult.value.account !== directResult.value.account
+            ? ["Direct advertiser account binding не совпадает с campaign inventory"]
+            : []),
+        ],
+      };
+  const metrikaReady = metrikaBindingResult.status === "fulfilled" && metrikaResult.status === "fulfilled";
+  const metrika = metrikaReady
+    ? { ready: true, ...metrikaBindingResult.value }
+    : {
+        ready: false,
+        authority: metrikaBindingResult.status === "fulfilled" ? metrikaBindingResult.value.authority : "UNVERIFIED",
+        access: "YANDEX_METRIKA_MANAGEMENT_AND_REPORTS_API",
+        ...(metrikaBindingResult.status === "fulfilled" ? metrikaBindingResult.value : {}),
+        blockers: [
+          ...(metrikaBindingResult.status === "rejected" ? [errorMessage(metrikaBindingResult.reason)] : []),
+          ...(metrikaResult.status === "rejected" ? [errorMessage(metrikaResult.reason)] : []),
+        ],
+      };
   return {
     environment: "PRODUCTION",
     test_scenario: false,
@@ -417,138 +423,35 @@ async function readContext(): Promise<P0Context> {
   };
 }
 
-function normalizeHost(hostname: string) {
-  return hostname.toLowerCase().replace(/^www\./, "");
+async function resolveHostname(hostname: string) {
+  const responses = await Promise.all(["A", "AAAA"].map(async (type) => {
+    const query = new URLSearchParams({ name: hostname, type });
+    const response = await fetch(`https://cloudflare-dns.com/dns-query?${query}`, {
+      headers: { Accept: "application/dns-json" },
+      redirect: "error",
+    });
+    if (!response.ok) throw new Error("DNS safety preflight недоступен.");
+    const payload = await response.json() as {
+      Status?: number;
+      Answer?: Array<{ type?: number; data?: string }>;
+    };
+    if (payload.Status !== 0 && payload.Status !== 3) throw new Error("DNS safety preflight вернул ошибку.");
+    const expectedType = type === "A" ? 1 : 28;
+    return (payload.Answer ?? [])
+      .filter((item) => item.type === expectedType)
+      .map((item) => String(item.data ?? ""))
+      .filter(Boolean);
+  }));
+  return responses.flat();
 }
 
-function firstParty(base: string, candidate: string) {
-  return candidate === base || candidate.endsWith(`.${base}`);
-}
-
-function extractMatches(source: string, pattern: RegExp, maximum: number) {
-  const values: string[] = [];
-  for (const match of source.matchAll(pattern)) {
-    const value = cleanText(match[1] ?? "", 1_000);
-    if (value && !values.includes(value)) values.push(value);
-    if (values.length >= maximum) break;
-  }
-  return values;
-}
-
-async function fetchPage(rawUrl: string): Promise<{ page: PageEvidence; links: string[] }> {
-  const requested = normalizePublicHttpsUrl(rawUrl);
-  const response = await fetch(requested, {
-    headers: {
-      "User-Agent": "MOX-ADV-GPT-Sites/1.0",
-      Accept: "text/html,application/xhtml+xml",
-    },
-    redirect: "follow",
+async function researchSite(rawUrl: string) {
+  return researchPublicFirstPartySite(rawUrl, {
+    fetch,
+    resolveHostname,
+    now,
   });
-  if (!response.ok) throw new Error(`Сайт вернул HTTP ${response.status}.`);
-  const finalUrl = requirePublicHttpsUrl(response.url);
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!/text\/html|application\/xhtml\+xml/i.test(contentType)) {
-    throw new Error("Страница не вернула HTML.");
-  }
-  const html = await response.text();
-  if (new TextEncoder().encode(html).byteLength > MAX_SITE_BYTES) {
-    throw new Error("HTML страницы превышает безопасный размер.");
-  }
-  const title = extractMatches(html, /<title[^>]*>([\s\S]*?)<\/title>/gi, 1)[0] ?? "";
-  const descriptions = extractMatches(
-    html,
-    /<meta[^>]+(?:name|property)=["'](?:description|og:description)["'][^>]+content=["']([^"']*)["'][^>]*>/gi,
-    2,
-  );
-  const headings = extractMatches(html, /<h[12][^>]*>([\s\S]*?)<\/h[12]>/gi, 20);
-  const links = extractMatches(html, /<a[^>]+href=["']([^"']+)["'][^>]*>/gi, 500);
-  const body = cleanText(
-    html
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " "),
-    8_000,
-  );
-  return {
-    page: {
-      url: finalUrl.toString(),
-      title,
-      description: descriptions[0] ?? "",
-      headings: headings.slice(0, 10),
-      forms_detected: (html.match(/<form\b/gi) ?? []).length,
-      text_excerpt: body,
-    },
-    links,
-  };
 }
-
-function rankedLinks(baseUrl: string, links: string[]) {
-  const base = new URL(baseUrl);
-  const baseHost = normalizeHost(base.hostname);
-  const scores = new Map<string, number>();
-  for (const href of links) {
-    if (/^(mailto:|tel:|javascript:)/i.test(href) || /privacy|cookie|login|logout|\.pdf|\.zip/i.test(href)) {
-      continue;
-    }
-    let candidate: URL;
-    try {
-      candidate = new URL(href, base);
-    } catch {
-      continue;
-    }
-    const candidateHost = normalizeHost(candidate.hostname);
-    if (candidate.protocol !== "https:" || !firstParty(baseHost, candidateHost)) continue;
-    candidate.search = "";
-    candidate.hash = "";
-    if (candidate.toString().replace(/\/$/, "") === base.toString().replace(/\/$/, "")) continue;
-    const haystack = `${candidate.pathname} ${candidate.search}`.toLowerCase();
-    let score = RESEARCH_TERMS.reduce((total, term) => total + (haystack.includes(term) ? 3 : 0), 0);
-    if (candidateHost !== baseHost) score += 6;
-    if (/terms.*particip|услов.*участ/.test(haystack)) score += 10;
-    if (/become|стать-участ/.test(haystack)) score += 8;
-    if (/participants|partner-country|list/.test(haystack)) score -= 4;
-    if (score > 0) scores.set(candidate.toString(), Math.max(score, scores.get(candidate.toString()) ?? -100));
-  }
-  return [...scores.entries()].sort((a, b) => b[1] - a[1]).map(([url]) => url);
-}
-
-async function researchSite(rawUrl: string): Promise<SiteAnalysis> {
-  const entry = await fetchPage(rawUrl);
-  const entryHost = normalizeHost(new URL(entry.page.url).hostname);
-  const pages = [entry.page];
-  const attempted = new Set<string>();
-  let candidates = rankedLinks(entry.page.url, entry.links);
-  while (candidates.length && pages.length < MAX_SITE_PAGES) {
-    const candidate = candidates.shift()!;
-    if (attempted.has(candidate)) continue;
-    attempted.add(candidate);
-    try {
-      const result = await fetchPage(candidate);
-      const pageHost = normalizeHost(new URL(result.page.url).hostname);
-      if (!firstParty(entryHost, pageHost) || pages.some((item) => item.url === result.page.url)) continue;
-      pages.push(result.page);
-      candidates = [
-        ...rankedLinks(result.page.url, result.links).filter((item) => !attempted.has(item)),
-        ...candidates,
-      ];
-    } catch {
-      // Secondary pages are best-effort; the entry page remains authoritative.
-    }
-  }
-  return {
-    ...entry.page,
-    fetched_at: now(),
-    forms_detected: pages.reduce((sum, page) => sum + page.forms_detected, 0),
-    text_excerpt: cleanText(pages.map((page) => page.text_excerpt).join(" "), 8_000),
-    pages,
-    research: {
-      pages_analyzed: pages.length,
-      links_discovered: entry.links.length,
-      scope: "FIRST_PARTY_PUBLIC_HTTPS",
-    },
-  };
-}
-
 
 async function ensureTables() {
   const db = runtimeEnv().DB;
@@ -633,7 +536,14 @@ async function createExternalOutcome({
 }) {
   const config = directWriteConfig();
   if (!config.token || !config.account) throw new Error("Direct production credentials не настроены.");
-  const [catalog, limits] = await Promise.all([readCampaignCatalog(), readCurrencyLimits()]);
+  const [binding, catalog, limits] = await Promise.all([
+    readDirectBinding(),
+    readCampaignCatalog(),
+    readCurrencyLimits(),
+  ]);
+  if (binding.account !== config.account || catalog.account !== binding.account) {
+    throw new Error("Direct write account не прошёл точный API binding preflight.");
+  }
   if (!state.strategy) throw new Error("Campaign Strategy отсутствует.");
   validateWeeklyBudgetRub(state.strategy.weekly_budget_rub, limits.minimum_weekly_budget_rub);
   const campaignName = String(projection.direct.campaign.Name ?? "");

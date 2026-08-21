@@ -70,13 +70,34 @@ function context() {
     direct: {
       ready: true,
       inventory_ready: true,
+      authority: "VERIFIED",
+      access: "YANDEX_DIRECT_API_V501",
       account: "owner-account",
+      binding: {
+        expected_account: "owner-account",
+        api_account: "owner-account",
+        matched: true,
+      },
       campaigns_total: 1,
       minimum_weekly_budget_rub: 300,
       observed_at: "2026-08-21T10:00:00.000Z",
     },
     metrika: {
       ready: true,
+      authority: "VERIFIED",
+      access: "YANDEX_METRIKA_MANAGEMENT_AND_REPORTS_API",
+      counter_id: "424242",
+      goal_id: "1717",
+      binding: {
+        expected_counter_id: "424242",
+        api_counter_id: "424242",
+        matched: true,
+      },
+      goal_binding: {
+        expected_goal_id: "1717",
+        api_goal_id: "1717",
+        matched: true,
+      },
       observed_at: "2026-08-21T10:00:00.000Z",
     },
     campaign_catalog: { total: 1, active: [] },
@@ -160,7 +181,7 @@ function ownerModel(state) {
 
 function strategyValue() {
   return {
-    goal: "Получать заявки на участие",
+    goal: "Получать заявки на участие через сайт",
     geography: "Москва",
     period_start: "2026-09-01",
     period_end: "2026-10-01",
@@ -194,20 +215,37 @@ test("one query/command contract drives and persists the current five-step path"
     url: "https://owner.example/",
   });
   assert.equal(result.revision, 1);
+  assert.equal(result.workflow.current_step, 0);
+  assert.equal(result.state.business_model, null);
+  assert.equal(result.state.context_state.status, "GOAL_PROVISIONAL");
+  assert.equal(result.state.context_state.facts.direct.account, "owner-account");
+  assert.equal(result.state.context_state.facts.metrika.counter_id, "424242");
+  assert.equal(result.state.context_state.provisional_business_goal.value, "Получать заявки на участие через сайт");
+  assert.match(result.state.context_state.provisional_business_goal.rationale, /заявк|участ/u);
+  assert.equal(result.workflow.allowed_commands.includes("confirm_context_goal"), true);
+
+  let restarted = new P0Application({ store, adapters: adapters() });
+  result = await restarted.query("owner");
+  assert.equal(result.revision, 1);
+  assert.equal(result.state.context_state.status, "GOAL_PROVISIONAL");
+
+  result = await restarted.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: result.state.context_state.provisional_business_goal.value,
+  });
+  assert.equal(result.revision, 2);
   assert.equal(result.workflow.current_step, 1);
+  assert.equal(result.state.context_state.status, "GOAL_CONFIRMED");
+  assert.equal(result.state.context_state.business_goal_decision.decision, "CONFIRMED");
   assert.match(result.state.business_model.analysis_evidence.snapshot_id, /^sha256:[a-f0-9]{64}$/);
 
   const persistedSnapshotId = result.state.business_model.analysis_evidence.snapshot_id;
-  const changedContext = context();
-  changedContext.direct.observed_at = "2026-08-22T10:00:00.000Z";
-  changedContext.direct.campaigns_total = 99;
-  const restarted = new P0Application({
-    store,
-    adapters: adapters({ readContext: async () => changedContext }),
-  });
+  restarted = new P0Application({ store, adapters: adapters() });
   result = await restarted.query("owner");
-  assert.equal(result.revision, 1);
-  assert.equal(result.workflow.current_step, 1);
+  assert.equal(result.revision, 2);
+  assert.equal(result.state.context_state.business_goal_decision.value, "Получать заявки на участие через сайт");
   assert.equal(result.analysis_evidence.snapshot_id, persistedSnapshotId);
 
   result = await restarted.command("owner", {
@@ -239,7 +277,7 @@ test("one query/command contract drives and persists the current five-step path"
       ad_text: draft.ad_text,
     },
   });
-  assert.equal(result.revision, 4);
+  assert.equal(result.revision, 5);
   assert.equal(result.workflow.current_step, 4);
   assert.equal(result.state.draft.strategy_revision_id, result.state.strategy.strategy_revision_id);
   assert.equal(result.state.draft.publish_fingerprint.length, 64);
@@ -253,8 +291,179 @@ test("one query/command contract drives and persists the current five-step path"
     (error) => error instanceof P0ApplicationError && error.code === "P0_PUBLISH_BLOCKED",
   );
   const afterBlockedWrite = await restarted.query("owner");
-  assert.equal(afterBlockedWrite.revision, 4);
+  assert.equal(afterBlockedWrite.revision, 5);
   assert.equal(afterBlockedWrite.state.campaign, null);
+});
+
+test("Context preflight fails closed for stale, partial or mismatched exact API binding", async (t) => {
+  const cases = [
+    {
+      name: "mismatched Direct account",
+      mutate(value) { value.direct.binding.api_account = "other-account"; value.direct.binding.matched = false; },
+      code: "P0_CONTEXT_PREFLIGHT_BLOCKED",
+    },
+    {
+      name: "partial Metrika binding",
+      mutate(value) { value.metrika.goal_binding = null; },
+      code: "P0_CONTEXT_PREFLIGHT_BLOCKED",
+    },
+    {
+      name: "stale preflight",
+      mutate(value) { value.direct.observed_at = "2026-08-21T09:00:00.000Z"; },
+      code: "P0_CONTEXT_PREFLIGHT_BLOCKED",
+    },
+  ];
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const { directory, store } = await fixture();
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const value = context();
+      item.mutate(value);
+      const application = new P0Application({ store, adapters: adapters({ readContext: async () => value }) });
+      await assert.rejects(
+        application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/" }),
+        (error) => error instanceof P0ApplicationError && error.code === item.code,
+      );
+      assert.equal((await store.load("owner")).revision, 0);
+    });
+  }
+});
+
+test("client context and persisted Context facts exclude injected credentials", async (t) => {
+  const { directory, store } = await fixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const value = context();
+  value.direct.oauth_token = "direct-secret";
+  value.metrika.token = "metrika-secret";
+  const application = new P0Application({ store, adapters: adapters({ readContext: async () => value }) });
+  let result = await application.query("owner");
+  assert.doesNotMatch(JSON.stringify(result), /direct-secret|metrika-secret/u);
+  result = await application.command("owner", {
+    action: "analyze_site",
+    expected_revision: result.revision,
+    url: "https://owner.example/",
+  });
+  assert.doesNotMatch((await store.load("owner")).value_json, /direct-secret|metrika-secret/u);
+});
+
+test("the owner explicitly corrects the one provisional goal and the decision survives restart", async (t) => {
+  const { directory, store, application } = await fixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let result = await application.query("owner");
+  result = await application.command("owner", {
+    action: "analyze_site",
+    expected_revision: result.revision,
+    url: "https://owner.example/",
+  });
+  assert.equal(result.state.business_model, null);
+  await assert.rejects(
+    application.command("owner", {
+      action: "confirm_context_goal",
+      expected_revision: result.revision,
+      goal: "Увеличивать квалифицированные обращения",
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_CONTEXT_GOAL_CONFIRMATION_REQUIRED",
+  );
+  assert.equal((await store.load("owner")).revision, result.revision);
+  result = await application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: "  Увеличивать   квалифицированные обращения  ",
+  });
+  assert.equal(result.state.context_state.business_goal_decision.value, "Увеличивать квалифицированные обращения");
+  assert.equal(result.state.context_state.business_goal_decision.decision, "CORRECTED");
+  const restarted = new P0Application({ store, adapters: adapters() });
+  result = await restarted.query("owner");
+  assert.equal(result.state.context_state.business_goal_decision.value, "Увеличивать квалифицированные обращения");
+  assert.equal(result.workflow.current_step, 1);
+});
+
+test("a material Context change names and invalidates downstream lineage while normalization-only input does not", async (t) => {
+  const { directory, store, application } = await fixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let result = await application.query("owner");
+  result = await application.command("owner", { action: "analyze_site", expected_revision: result.revision, url: "owner.example" });
+  result = await application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: "Получать заявки на участие через сайт",
+  });
+  result = await application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
+  result = await application.command("owner", { action: "save_strategy", expected_revision: result.revision, value: strategyValue() });
+  const draft = result.state.recommendation_set.drafts.find((candidate) => candidate.visibility === "VISIBLE");
+  result = await application.command("owner", {
+    action: "save_draft",
+    expected_revision: result.revision,
+    value: {
+      draft_id: draft.draft_id,
+      campaign_name: draft.campaign_name,
+      group_name: draft.group_name,
+      keyword: draft.keyword,
+      negative_keywords: draft.negative_keywords,
+      ad_title: draft.ad_title,
+      ad_text: draft.ad_text,
+    },
+  });
+  const lineage = {
+    strategy: result.state.strategy.strategy_revision_id,
+    draft: result.state.draft.draft_revision_id,
+    shortlist: result.state.shortlist.shortlist_revision_id,
+  };
+  const staleContext = context();
+  staleContext.metrika.observed_at = "2026-08-21T09:00:00.000Z";
+  const staleApplication = new P0Application({ store, adapters: adapters({ readContext: async () => staleContext }) });
+  await assert.rejects(
+    staleApplication.command("owner", {
+      action: "confirm_creation",
+      expected_revision: result.revision,
+      confirmation: "CREATE_NON_SERVING_CAMPAIGN",
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_CONTEXT_PREFLIGHT_BLOCKED",
+  );
+  assert.equal((await store.load("owner")).revision, result.revision);
+
+  result = await application.command("owner", {
+    action: "analyze_site",
+    expected_revision: result.revision,
+    url: "https://owner.example/",
+  });
+  assert.equal(result.state.strategy.strategy_revision_id, lineage.strategy);
+  assert.equal(result.state.draft.draft_revision_id, lineage.draft);
+  assert.equal(result.state.shortlist.shortlist_revision_id, lineage.shortlist);
+  assert.equal(result.state.context_state.last_material_change, null);
+
+  const changedResearch = adapters({
+    async researchSite(url) {
+      const site = await adapters().researchSite(url);
+      site.description = "Новая услуга для другого результата.";
+      site.pages[0].description = site.description;
+      return site;
+    },
+  });
+  const changedApplication = new P0Application({ store, adapters: changedResearch });
+  result = await changedApplication.command("owner", {
+    action: "analyze_site",
+    expected_revision: result.revision,
+    url: "https://owner.example/",
+  });
+  assert.equal(result.workflow.current_step, 0);
+  assert.equal(result.state.strategy, null);
+  assert.equal(result.state.recommendation_set, null);
+  assert.equal(result.state.draft, null);
+  assert.equal(result.state.shortlist, null);
+  assert.equal(result.workflow.allowed_commands.includes("confirm_creation"), false);
+  assert.deepEqual(result.state.context_state.last_material_change.affected_steps, [
+    "campaign_strategy",
+    "recommendation_set",
+    "campaign_drafts",
+    "shortlist",
+    "confirmation",
+  ]);
+  assert.equal(result.state.context_state.last_material_change.previous_lineage.strategy_revision_id, lineage.strategy);
+  assert.equal(result.state.context_state.last_material_change.previous_lineage.draft_revision_id, lineage.draft);
+  assert.equal(result.state.context_state.last_material_change.previous_lineage.shortlist_revision_id, lineage.shortlist);
 });
 
 test("compare-and-swap rejects a stale tab without changing the persisted document", async (t) => {

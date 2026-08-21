@@ -35,16 +35,79 @@ import { normalizePublicHttpsUrl } from "./site-url.ts";
 import { cleanText } from "./text.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.0.0";
+export const P0_APPLICATION_CONTRACT_VERSION = "1.1.0";
 export const P0_DOCUMENT_SCHEMA = "p0-application-document-v1";
+export const P0_CONTEXT_SCHEMA = "p0-context-v1";
+export const P0_CONTEXT_PREFLIGHT_MAX_AGE_MS = 5 * 60_000;
+
+export type P0ContextState = {
+  schema_version: typeof P0_CONTEXT_SCHEMA;
+  status: "GOAL_PROVISIONAL" | "GOAL_CONFIRMED";
+  facts: {
+    direct: {
+      account: string;
+      client_id: string;
+      campaigns_total: number;
+      minimum_weekly_budget_rub: number | null;
+      observed_at: string;
+      source_kind: "YANDEX_DIRECT_API_V501";
+    };
+    metrika: {
+      counter_id: string;
+      goal_id: string;
+      observed_at: string;
+      source_kind: "YANDEX_METRIKA_MANAGEMENT_AND_REPORTS_API";
+    };
+    site: {
+      url: string;
+      title: string;
+      pages_analyzed: number;
+      fetched_at: string;
+      source_kind: "PUBLIC_FIRST_PARTY_HTTPS";
+    };
+  };
+  provisional_business_goal: {
+    value: string;
+    rationale: string;
+    proposed_at: string;
+    source_url: string;
+  };
+  business_goal_decision: {
+    value: string;
+    provisional_value: string;
+    decision: "CONFIRMED" | "CORRECTED";
+    decided_at: string;
+    owner_confirmed: true;
+  } | null;
+  material_fingerprint: string;
+  last_material_change: {
+    affected_steps: ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"];
+    invalidated_at: string;
+    previous_lineage: {
+      strategy_revision_id: string | null;
+      recommendation_set_id: string | null;
+      draft_revision_id: string | null;
+      shortlist_revision_id: string | null;
+      publish_fingerprint: string | null;
+    };
+  } | null;
+};
 
 export type P0Document = {
   schema_version: typeof P0_DOCUMENT_SCHEMA;
+  context_state: P0ContextState | null;
   site_analysis: SiteAnalysis | null;
   business_model: BusinessModel | null;
   strategy: Record<string, unknown> | null;
   recommendation_set: CampaignRecommendationSet | null;
   draft: Record<string, unknown> | null;
+  shortlist: {
+    schema_version: "p0-shortlist-v1";
+    shortlist_revision_id: string;
+    strategy_revision_id: string;
+    draft_revision_ids: string[];
+    updated_at: string;
+  } | null;
   external_write_intent: {
     strategy_revision_id: string;
     draft_revision_id: string;
@@ -167,6 +230,9 @@ const WORKFLOW_STEPS = [
 
 export const P0_COMMAND_TRUTH_TABLE = {
   analyze_site: (state: P0Document) => !state.campaign && !state.external_write_intent,
+  confirm_context_goal: (state: P0Document) => Boolean(
+    state.context_state && state.site_analysis && !state.campaign && !state.external_write_intent,
+  ),
   save_business_model: (state: P0Document) => Boolean(
     state.site_analysis && state.business_model && !state.campaign && !state.external_write_intent,
   ),
@@ -178,7 +244,12 @@ export const P0_COMMAND_TRUTH_TABLE = {
   save_draft: (state: P0Document) => Boolean(
     state.strategy && state.recommendation_set && !state.campaign && !state.external_write_intent,
   ),
-  confirm_creation: (state: P0Document) => Boolean(state.draft?.publish_projection && !state.campaign),
+  confirm_creation: (state: P0Document) => Boolean(
+    state.draft?.publish_projection
+    && state.shortlist?.draft_revision_ids.includes(String(state.draft.draft_revision_id ?? ""))
+    && (!state.context_state || state.context_state.status === "GOAL_CONFIRMED")
+    && !state.campaign,
+  ),
   reset: (state: P0Document) => !state.campaign && !state.external_write_intent,
 } as const;
 
@@ -197,11 +268,13 @@ function fail(code: string, message: string): never {
 function emptyDocument(): P0Document {
   return {
     schema_version: P0_DOCUMENT_SCHEMA,
+    context_state: null,
     site_analysis: null,
     business_model: null,
     strategy: null,
     recommendation_set: null,
     draft: null,
+    shortlist: null,
     external_write_intent: null,
     campaign: null,
   };
@@ -222,6 +295,160 @@ function requiredInput(value: unknown, label: string, maximum: number) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Неизвестная ошибка";
+}
+
+function stringList(value: unknown) {
+  return Array.isArray(value)
+    ? value.map((item) => cleanText(String(item ?? ""), 500)).filter(Boolean).slice(0, 20)
+    : [];
+}
+
+function sanitizeContext(input: P0Context): P0Context {
+  const direct = record(input.direct);
+  const directBinding = record(direct.binding);
+  const metrika = record(input.metrika);
+  const metrikaBinding = record(metrika.binding);
+  const goalBinding = record(metrika.goal_binding);
+  const catalog = record(input.campaign_catalog);
+  const performance = record(input.performance);
+  const metrics = record(performance.display_metrics);
+  const provenance = record(performance.provenance);
+  const sampling = record(provenance.sampling);
+  return {
+    environment: "PRODUCTION",
+    test_scenario: false,
+    direct: {
+      ready: direct.ready === true,
+      inventory_ready: direct.inventory_ready === true,
+      authority: cleanText(String(direct.authority ?? ""), 50),
+      access: cleanText(String(direct.access ?? ""), 100),
+      account: cleanText(String(direct.account ?? ""), 255),
+      client_id: cleanText(String(direct.client_id ?? ""), 100),
+      binding: {
+        expected_account: cleanText(String(directBinding.expected_account ?? ""), 255),
+        api_account: cleanText(String(directBinding.api_account ?? ""), 255),
+        matched: directBinding.matched === true,
+      },
+      campaigns_total: Number(direct.campaigns_total ?? 0),
+      minimum_weekly_budget_rub: Number(direct.minimum_weekly_budget_rub),
+      observed_at: cleanText(String(direct.observed_at ?? ""), 100),
+      blockers: stringList(direct.blockers),
+    },
+    metrika: {
+      ready: metrika.ready === true,
+      authority: cleanText(String(metrika.authority ?? ""), 50),
+      access: cleanText(String(metrika.access ?? ""), 100),
+      counter_id: cleanText(String(metrika.counter_id ?? ""), 100),
+      goal_id: cleanText(String(metrika.goal_id ?? ""), 100),
+      binding: {
+        expected_counter_id: cleanText(String(metrikaBinding.expected_counter_id ?? ""), 100),
+        api_counter_id: cleanText(String(metrikaBinding.api_counter_id ?? ""), 100),
+        matched: metrikaBinding.matched === true,
+      },
+      goal_binding: {
+        expected_goal_id: cleanText(String(goalBinding.expected_goal_id ?? ""), 100),
+        api_goal_id: cleanText(String(goalBinding.api_goal_id ?? ""), 100),
+        matched: goalBinding.matched === true,
+      },
+      observed_at: cleanText(String(metrika.observed_at ?? ""), 100),
+      blockers: stringList(metrika.blockers),
+    },
+    campaign_catalog: input.campaign_catalog
+      ? {
+          total: Number(catalog.total ?? 0),
+          active: Array.isArray(catalog.active)
+            ? catalog.active.slice(0, 20).map((item) => {
+                const campaign = record(item);
+                return {
+                  campaign_id: cleanText(String(campaign.campaign_id ?? ""), 100),
+                  name: cleanText(String(campaign.name ?? ""), 255),
+                  state: cleanText(String(campaign.state ?? ""), 50),
+                  status: cleanText(String(campaign.status ?? ""), 50),
+                };
+              })
+            : [],
+        }
+      : null,
+    performance: input.performance
+      ? {
+          period_start: cleanText(String(performance.period_start ?? ""), 20),
+          period_end: cleanText(String(performance.period_end ?? ""), 20),
+          display_metrics: {
+            visits: cleanText(String(metrics.visits ?? ""), 100),
+            goal_visits: cleanText(String(metrics.goal_visits ?? ""), 100),
+          },
+          provenance: {
+            source_kind: cleanText(String(provenance.source_kind ?? ""), 100),
+            observed_at: cleanText(String(provenance.observed_at ?? ""), 100),
+            sampling: {
+              sampled: sampling.sampled === true,
+              contains_sensitive_data: sampling.contains_sensitive_data === true,
+              sample_share: Number(sampling.sample_share ?? 1),
+              sample_size: Number(sampling.sample_size ?? 0),
+              sample_space: Number(sampling.sample_space ?? 0),
+              data_lag: Number(sampling.data_lag ?? 0),
+            },
+          },
+        }
+      : null,
+  };
+}
+
+function observationIsFresh(value: unknown, nowValue: string) {
+  const observed = Date.parse(String(value ?? ""));
+  const current = Date.parse(nowValue);
+  if (!Number.isFinite(observed) || !Number.isFinite(current)) return false;
+  const age = current - observed;
+  return age >= -60_000 && age <= P0_CONTEXT_PREFLIGHT_MAX_AGE_MS;
+}
+
+export function contextPreflightBlockers(context: P0Context, nowValue: string) {
+  const direct = record(context.direct);
+  const directBinding = record(direct.binding);
+  const metrika = record(context.metrika);
+  const metrikaBinding = record(metrika.binding);
+  const goalBinding = record(metrika.goal_binding);
+  const blockers: string[] = [];
+  if (
+    direct.ready !== true
+    || direct.inventory_ready !== true
+    || !Number.isFinite(Number(direct.campaigns_total))
+    || !Number.isFinite(Number(direct.minimum_weekly_budget_rub))
+  ) blockers.push("Direct API preflight недоступен или частичен");
+  if (direct.authority !== "VERIFIED" || direct.access !== "YANDEX_DIRECT_API_V501") {
+    blockers.push("Direct read authority не подтверждена официальным API");
+  }
+  if (
+    !String(directBinding.expected_account ?? "")
+    || directBinding.expected_account !== directBinding.api_account
+    || directBinding.matched !== true
+    || direct.account !== directBinding.api_account
+  ) {
+    blockers.push("Direct advertiser account binding не совпадает");
+  }
+  if (!observationIsFresh(direct.observed_at, nowValue)) blockers.push("Direct API preflight устарел");
+  if (metrika.ready !== true) blockers.push("Metrika API preflight недоступен или частичен");
+  if (metrika.authority !== "VERIFIED" || metrika.access !== "YANDEX_METRIKA_MANAGEMENT_AND_REPORTS_API") {
+    blockers.push("Metrika read authority не подтверждена официальным API");
+  }
+  if (
+    !String(metrikaBinding.expected_counter_id ?? "")
+    || metrikaBinding.expected_counter_id !== metrikaBinding.api_counter_id
+    || metrikaBinding.matched !== true
+    || metrika.counter_id !== metrikaBinding.api_counter_id
+  ) {
+    blockers.push("Metrika counter binding не совпадает");
+  }
+  if (
+    !String(goalBinding.expected_goal_id ?? "")
+    || goalBinding.expected_goal_id !== goalBinding.api_goal_id
+    || goalBinding.matched !== true
+    || metrika.goal_id !== goalBinding.api_goal_id
+  ) {
+    blockers.push("Metrika goal binding не совпадает");
+  }
+  if (!observationIsFresh(metrika.observed_at, nowValue)) blockers.push("Metrika API preflight устарел");
+  return [...new Set(blockers)];
 }
 
 function evidenceRows(site: SiteAnalysis) {
@@ -253,6 +480,138 @@ function bestOfferEvidence(rows: Array<{ text: string; url: string }>) {
 
 function brandFromSite(site: SiteAnalysis) {
   return cleanText(site.title.split(/\s[|—–-]\s/)[0] || "", 200);
+}
+
+async function sha256(value: unknown) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((item) => item.toString(16).padStart(2, "0")).join("");
+}
+
+function persistedContextFacts(site: SiteAnalysis, context: P0Context): P0ContextState["facts"] {
+  const direct = record(context.direct);
+  const metrika = record(context.metrika);
+  const minimum = Number(direct.minimum_weekly_budget_rub);
+  return {
+    direct: {
+      account: cleanText(String(direct.account ?? ""), 255),
+      client_id: cleanText(String(direct.client_id ?? ""), 100),
+      campaigns_total: Number(direct.campaigns_total ?? 0),
+      minimum_weekly_budget_rub: Number.isFinite(minimum) ? minimum : null,
+      observed_at: cleanText(String(direct.observed_at ?? ""), 100),
+      source_kind: "YANDEX_DIRECT_API_V501",
+    },
+    metrika: {
+      counter_id: cleanText(String(metrika.counter_id ?? ""), 100),
+      goal_id: cleanText(String(metrika.goal_id ?? ""), 100),
+      observed_at: cleanText(String(metrika.observed_at ?? ""), 100),
+      source_kind: "YANDEX_METRIKA_MANAGEMENT_AND_REPORTS_API",
+    },
+    site: {
+      url: site.url,
+      title: cleanText(site.title, 500),
+      pages_analyzed: site.pages.length,
+      fetched_at: site.fetched_at,
+      source_kind: "PUBLIC_FIRST_PARTY_HTTPS",
+    },
+  };
+}
+
+function providerMaterialFacts(context: P0Context) {
+  const direct = record(context.direct);
+  const metrika = record(context.metrika);
+  return {
+    direct: {
+      account: String(direct.account ?? ""),
+      client_id: String(direct.client_id ?? ""),
+      campaigns_total: Number(direct.campaigns_total ?? 0),
+      minimum_weekly_budget_rub: Number(direct.minimum_weekly_budget_rub),
+    },
+    metrika: {
+      counter_id: String(metrika.counter_id ?? ""),
+      goal_id: String(metrika.goal_id ?? ""),
+    },
+  };
+}
+
+function persistedProviderMaterialFacts(facts: P0ContextState["facts"]) {
+  return {
+    direct: {
+      account: facts.direct.account,
+      client_id: facts.direct.client_id,
+      campaigns_total: facts.direct.campaigns_total,
+      minimum_weekly_budget_rub: facts.direct.minimum_weekly_budget_rub,
+    },
+    metrika: {
+      counter_id: facts.metrika.counter_id,
+      goal_id: facts.metrika.goal_id,
+    },
+  };
+}
+
+async function contextMaterialFingerprint(site: SiteAnalysis, context: P0Context) {
+  return sha256({
+    providers: providerMaterialFacts(context),
+    site: {
+      url: site.url,
+      title: cleanText(site.title, 500),
+      description: cleanText(site.description, 1_000),
+      headings: site.headings.map((item) => cleanText(item, 1_000)),
+      forms_detected: site.forms_detected,
+      pages: site.pages.map((page) => ({
+        url: page.url,
+        title: cleanText(page.title, 500),
+        description: cleanText(page.description, 1_000),
+        headings: page.headings.map((item) => cleanText(item, 1_000)),
+        forms_detected: page.forms_detected,
+        text_excerpt: cleanText(page.text_excerpt, 8_000),
+      })),
+    },
+  });
+}
+
+function provisionalBusinessGoal(site: SiteAnalysis, proposedAt: string) {
+  const rows = evidenceRows(site);
+  const resultEvidence = bestEvidence(rows, [
+    "оставьте заявку", "заявк", "стать участник", "particip", "submit", "register", "регистра", "купить", "заказать",
+  ]);
+  const quote = cleanText(resultEvidence?.text ?? site.description ?? site.text_excerpt, 240);
+  let value = "Получать квалифицированные обращения через сайт";
+  if (/участ|particip/iu.test(quote)) value = "Получать заявки на участие через сайт";
+  else if (/регистра|register/iu.test(quote)) value = "Получать завершённые регистрации через сайт";
+  else if (/купить|заказ|purchase|order/iu.test(quote)) value = "Получать заказы через сайт";
+  return {
+    value,
+    rationale: quote ? `Основание: на сайте указано «${quote}».` : "Основание: на first-party сайте найдено целевое контактное действие.",
+    proposed_at: proposedAt,
+    source_url: resultEvidence?.url ?? site.url,
+  };
+}
+
+function previousLineage(state: P0Document) {
+  return {
+    strategy_revision_id: state.strategy ? String(state.strategy.strategy_revision_id ?? "") || null : null,
+    recommendation_set_id: state.recommendation_set?.recommendation_set_id ?? null,
+    draft_revision_id: state.draft ? String(state.draft.draft_revision_id ?? "") || null : null,
+    shortlist_revision_id: state.shortlist?.shortlist_revision_id ?? null,
+    publish_fingerprint: state.draft ? String(state.draft.publish_fingerprint ?? "") || null : null,
+  };
+}
+
+function invalidationRecord(state: P0Document, invalidatedAt: string): P0ContextState["last_material_change"] {
+  return {
+    affected_steps: ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"],
+    invalidated_at: invalidatedAt,
+    previous_lineage: previousLineage(state),
+  };
+}
+
+function invalidateContextDownstream(state: P0Document) {
+  state.strategy = null;
+  state.recommendation_set = null;
+  state.draft = null;
+  state.shortlist = null;
+  state.external_write_intent = null;
 }
 
 async function inferModel(site: SiteAnalysis, context: P0Context): Promise<BusinessModel> {
@@ -370,11 +729,25 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
   let changed = version !== P0_DOCUMENT_SCHEMA;
   if (changed) state.schema_version = P0_DOCUMENT_SCHEMA;
 
+  if (state.context_state) {
+    if (state.context_state.schema_version !== P0_CONTEXT_SCHEMA) {
+      fail("P0_CONTEXT_SCHEMA_UNSUPPORTED", "Persisted Context использует неподдерживаемую схему.");
+    }
+    if (!state.site_analysis || state.context_state.facts.site.url !== state.site_analysis.url) {
+      lineageError("Context facts не связаны с first-party site analysis.");
+    }
+    if (state.context_state.status === "GOAL_CONFIRMED" && !state.context_state.business_goal_decision?.value) {
+      lineageError("Context помечен подтверждённым без решения владельца по бизнес-цели.");
+    }
+  }
   if ((state.campaign || state.external_write_intent) && !state.draft) {
     lineageError("external write не связан с Campaign Draft.");
   }
   if (state.draft && (!state.strategy || !state.business_model)) {
     lineageError("Campaign Draft не связан с Campaign Strategy и моделью бизнеса.");
+  }
+  if (state.shortlist && !state.draft) {
+    lineageError("shortlist не связан с Campaign Draft.");
   }
   if (state.recommendation_set && !state.strategy) {
     lineageError("Recommendation Set не связан с Campaign Strategy.");
@@ -383,7 +756,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     lineageError("Campaign Strategy не связана с моделью бизнеса.");
   }
 
-  for (const key of ["site_analysis", "business_model", "strategy", "recommendation_set", "draft", "external_write_intent", "campaign"] as const) {
+  for (const key of ["context_state", "site_analysis", "business_model", "strategy", "recommendation_set", "draft", "shortlist", "external_write_intent", "campaign"] as const) {
     if (!(key in state)) {
       state[key] = null as never;
       changed = true;
@@ -518,6 +891,22 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
       } as typeof recommendationSet.drafts[number];
       changed = true;
     }
+    if (!state.shortlist) {
+      state.shortlist = {
+        schema_version: "p0-shortlist-v1",
+        shortlist_revision_id: `p0-shortlist-r${Math.max(1, revision)}`,
+        strategy_revision_id: String(strategy.strategy_revision_id ?? ""),
+        draft_revision_ids: [String(draft.draft_revision_id ?? "")],
+        updated_at: updatedAt,
+      };
+      changed = true;
+    }
+    if (
+      state.shortlist.strategy_revision_id !== strategy.strategy_revision_id
+      || !state.shortlist.draft_revision_ids.includes(String(draft.draft_revision_id ?? ""))
+    ) {
+      lineageError("shortlist ссылается на другую Strategy или Draft revision.");
+    }
   }
 
   if (state.external_write_intent && state.draft && strategy) {
@@ -552,7 +941,7 @@ function currentStep(state: P0Document) {
   if (state.draft?.publish_projection) return 4;
   if (state.strategy) return 3;
   if (state.business_model?.source === "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION") return 2;
-  if (state.site_analysis) return 1;
+  if (state.business_model) return 1;
   return 0;
 }
 
@@ -568,6 +957,20 @@ function workflow(state: P0Document) {
     maximum_reachable_step: currentStep(state),
     allowed_commands: allowedCommands(state),
     transition_contract: P0_APPLICATION_CONTRACT_VERSION,
+  };
+}
+
+function contextChangePolicy() {
+  return {
+    affected_steps: [
+      { id: "campaign_strategy", label: "Стратегия кампании" },
+      { id: "recommendation_set", label: "Recommendation Set" },
+      { id: "campaign_drafts", label: "Campaign Drafts" },
+      { id: "shortlist", label: "shortlist" },
+      { id: "confirmation", label: "Подтверждение" },
+    ],
+    normalization_only_changes_invalidate: false,
+    confirmation_requires_recomputation: true,
   };
 }
 
@@ -628,11 +1031,31 @@ export class P0Application {
     return rows.slice(0, 50).map((row) => summarizeP0Revision(row, currentRevision));
   }
 
-  private writeReadiness(state: P0Document, context: P0Context) {
+  private assertContextPreflight(context: P0Context, timestamp: string) {
+    const blockers = contextPreflightBlockers(context, timestamp);
+    if (blockers.length) fail("P0_CONTEXT_PREFLIGHT_BLOCKED", blockers[0]);
+  }
+
+  private assertPersistedBindings(state: P0Document, context: P0Context) {
+    if (!state.context_state) return;
+    if (JSON.stringify(persistedProviderMaterialFacts(state.context_state.facts)) !== JSON.stringify(providerMaterialFacts(context))) {
+      fail("P0_CONTEXT_PREFLIGHT_CHANGED", "Подключения или исходные Context facts изменились. Повторите шаг «Контекст».");
+    }
+  }
+
+  private writeReadiness(state: P0Document, context: P0Context, timestamp: string) {
     const configuration = this.adapters.externalWriteConfiguration();
-    const blockers = [...configuration.blockers];
+    const blockers = [...configuration.blockers, ...contextPreflightBlockers(context, timestamp)];
     if (!configuration.ready && blockers.length === 0) blockers.push("Direct production credentials не настроены");
     if (context.direct.ready !== true) blockers.push("Текущий аккаунт Директа не прошёл production preflight");
+    if (state.context_state?.status !== "GOAL_CONFIRMED") blockers.push("Provisional бизнес-цель ещё не подтверждена владельцем");
+    if (
+      state.context_state
+      && String(context.direct.account ?? "") !== state.context_state.facts.direct.account
+    ) blockers.push("Текущий Direct account не совпадает с сохранённым Context binding");
+    if (configuration.account && state.context_state && configuration.account !== state.context_state.facts.direct.account) {
+      blockers.push("Direct write account не совпадает с подтверждённым Context binding");
+    }
     const minimumBudget = Number(context.direct.minimum_weekly_budget_rub);
     if (Number.isFinite(minimumBudget) && state.strategy) {
       try {
@@ -642,13 +1065,18 @@ export class P0Application {
       }
     }
     if (!state.draft?.publish_projection) blockers.push("Campaign Draft ещё не зафиксирован");
+    if (!state.shortlist?.draft_revision_ids.includes(String(state.draft?.draft_revision_id ?? ""))) {
+      blockers.push("shortlist требует пересчёта после Context change");
+    }
     blockers.push(...campaignDraftPublishBlockers(state.draft));
     if (state.campaign) blockers.push("Кампания по этой ревизии уже создана");
     return { ready: blockers.length === 0, blockers };
   }
 
   async query(key: string) {
-    const [stored, context] = await Promise.all([this.load(key), this.adapters.readContext()]);
+    const [stored, rawContext] = await Promise.all([this.load(key), this.adapters.readContext()]);
+    const context = sanitizeContext(rawContext);
+    const timestamp = this.adapters.now();
     const analysisEvidence = stored.state.business_model?.analysis_evidence ?? null;
     const viewState = structuredClone(stored.state);
     return {
@@ -660,9 +1088,15 @@ export class P0Application {
       state: viewState,
       workflow: workflow(viewState),
       context,
+      context_preflight: {
+        ready: contextPreflightBlockers(context, timestamp).length === 0,
+        blockers: contextPreflightBlockers(context, timestamp),
+        maximum_age_ms: P0_CONTEXT_PREFLIGHT_MAX_AGE_MS,
+      },
+      context_change_policy: contextChangePolicy(),
       analysis_evidence: analysisEvidence,
       revision_history: await this.history(key, stored.revision),
-      write_readiness: this.writeReadiness(viewState, context),
+      write_readiness: this.writeReadiness(viewState, context, timestamp),
     };
   }
 
@@ -689,13 +1123,66 @@ export class P0Application {
     let persistedRevision = current.revision;
 
     if (action === "analyze_site") {
-      const site = await this.adapters.researchSite(String(payload.url ?? ""));
-      const context = await this.adapters.readContext();
-      state.site_analysis = site;
-      state.business_model = await inferModel(site, context);
-      state.strategy = null;
-      state.recommendation_set = null;
-      state.draft = null;
+      const timestamp = this.adapters.now();
+      const context = sanitizeContext(await this.adapters.readContext());
+      this.assertContextPreflight(context, timestamp);
+      const requestedUrl = normalizePublicHttpsUrl(String(payload.url ?? "")).toString();
+      const site = await this.adapters.researchSite(requestedUrl);
+      const fingerprint = await contextMaterialFingerprint(site, context);
+      const previousContext = state.context_state;
+      const normalizationOnly = previousContext?.material_fingerprint === fingerprint;
+      if (normalizationOnly && previousContext) {
+        // Keep the exact persisted evidence/provenance; a technical re-entry only advances document revision.
+      } else {
+        state.site_analysis = site;
+        const hasPreviousContext = Boolean(previousContext || state.business_model || state.strategy || state.draft || state.shortlist);
+        const lastMaterialChange = hasPreviousContext ? invalidationRecord(state, timestamp) : null;
+        state.context_state = {
+          schema_version: P0_CONTEXT_SCHEMA,
+          status: "GOAL_PROVISIONAL",
+          facts: persistedContextFacts(site, context),
+          provisional_business_goal: provisionalBusinessGoal(site, timestamp),
+          business_goal_decision: null,
+          material_fingerprint: fingerprint,
+          last_material_change: lastMaterialChange,
+        };
+        state.business_model = null;
+        invalidateContextDownstream(state);
+      }
+    } else if (action === "confirm_context_goal") {
+      if (payload.confirmation !== "CONFIRM_CONTEXT_GOAL") {
+        fail("P0_CONTEXT_GOAL_CONFIRMATION_REQUIRED", "Нужно явно подтвердить или исправить provisional бизнес-цель.");
+      }
+      if (!state.context_state || !state.site_analysis) {
+        fail("P0_PREREQUISITE_MISSING", "Сначала проверьте Context и исследуйте first-party сайт.");
+      }
+      const timestamp = this.adapters.now();
+      const context = sanitizeContext(await this.adapters.readContext());
+      this.assertContextPreflight(context, timestamp);
+      this.assertPersistedBindings(state, context);
+      const goal = requiredInput(payload.goal, "Бизнес-цель", 500);
+      const previousDecision = state.context_state.business_goal_decision;
+      const changedConfirmedGoal = Boolean(previousDecision && previousDecision.value !== goal);
+      if (changedConfirmedGoal) {
+        state.context_state.last_material_change = invalidationRecord(state, timestamp);
+        invalidateContextDownstream(state);
+      }
+      const provisionalValue = state.context_state.provisional_business_goal.value;
+      state.context_state = {
+        ...state.context_state,
+        status: "GOAL_CONFIRMED",
+        facts: persistedContextFacts(state.site_analysis, context),
+        business_goal_decision: {
+          value: goal,
+          provisional_value: provisionalValue,
+          decision: goal === provisionalValue ? "CONFIRMED" : "CORRECTED",
+          decided_at: timestamp,
+          owner_confirmed: true,
+        },
+      };
+      if (!state.business_model) {
+        state.business_model = await inferModel(state.site_analysis, context);
+      }
     } else if (action === "save_business_model") {
       if (!state.business_model) fail("P0_PREREQUISITE_MISSING", "Сначала исследуйте сайт.");
       const value = record(payload.value);
@@ -715,7 +1202,9 @@ export class P0Application {
       state.business_model.assumptions = [];
       state.business_model.missing_questions = [];
       if (!state.site_analysis) fail("P0_EVIDENCE_LINEAGE_INVALID", "Evidence snapshot потерял first-party site analysis.");
-      const context = await this.adapters.readContext();
+      const context = sanitizeContext(await this.adapters.readContext());
+      this.assertContextPreflight(context, ownerConfirmedAt);
+      this.assertPersistedBindings(state, context);
       state.business_model.analysis_evidence = await buildAnalyticsEvidence({
         site: state.site_analysis as unknown as Record<string, unknown>,
         model: state.business_model as unknown as Record<string, unknown>,
@@ -724,9 +1213,14 @@ export class P0Application {
       state.strategy = null;
       state.recommendation_set = null;
       state.draft = null;
+      state.shortlist = null;
     } else if (action === "save_strategy") {
       if (!state.business_model) fail("P0_PREREQUISITE_MISSING", "Сначала подтвердите модель бизнеса.");
       const value = record(payload.value);
+      const confirmedContextGoal = state.context_state?.business_goal_decision?.value;
+      if (confirmedContextGoal && cleanText(String(value.goal ?? ""), 500) !== confirmedContextGoal) {
+        fail("P0_CONTEXT_GOAL_CHANGED", "Измените бизнес-цель на шаге «Контекст», чтобы показать и применить каскад invalidation.");
+      }
       const required = ["goal", "geography", "period_start", "period_end", "landing_page", "weekly_budget_rub", "target_cpa_rub", "message"];
       if (required.some((field) => String(value[field] ?? "").trim() === "")) {
         fail("P0_STRATEGY_INVALID", "Критические решения Campaign Strategy заполнены не полностью.");
@@ -749,6 +1243,7 @@ export class P0Application {
         generatedAt: approvedAt,
       });
       state.draft = null;
+      state.shortlist = null;
     } else if (action === "save_draft") {
       const value = record(payload.value);
       if (!state.strategy || !state.business_model) {
@@ -784,7 +1279,9 @@ export class P0Application {
       let scoreEvidence = state.business_model.analysis_evidence;
       if (!scoreEvidence) {
         if (!state.site_analysis) fail("P0_EVIDENCE_LINEAGE_INVALID", "Scoring требует first-party Analytics Evidence Snapshot.");
-        const scoringContext = await this.adapters.readContext();
+        const scoringContext = sanitizeContext(await this.adapters.readContext());
+        this.assertContextPreflight(scoringContext, this.adapters.now());
+        this.assertPersistedBindings(state, scoringContext);
         scoreEvidence = await buildAnalyticsEvidence({
           site: state.site_analysis as unknown as Record<string, unknown>,
           model: state.business_model as unknown as Record<string, unknown>,
@@ -815,10 +1312,21 @@ export class P0Application {
         score_delta: explainScoreDelta(generated.viability_score, currentDraft.viability_score, changedPointers),
       };
       recommendationSet.drafts = rescored.map((item) => item.draft_id === draftId ? state.draft as typeof item : item);
+      state.shortlist = {
+        schema_version: "p0-shortlist-v1",
+        shortlist_revision_id: `p0-shortlist-r${current.revision + 1}`,
+        strategy_revision_id: String(state.strategy.strategy_revision_id ?? ""),
+        draft_revision_ids: [String(state.draft.draft_revision_id ?? "")],
+        updated_at: editedAt,
+      };
     } else if (action === "confirm_creation") {
       if (payload.confirmation !== "CREATE_NON_SERVING_CAMPAIGN") {
         fail("P0_CONFIRMATION_REQUIRED", "Нужно точное подтверждение создания реальной кампании с выключенными показами.");
       }
+      const preflightAt = this.adapters.now();
+      const preflightContext = sanitizeContext(await this.adapters.readContext());
+      this.assertContextPreflight(preflightContext, preflightAt);
+      this.assertPersistedBindings(state, preflightContext);
       if (state.campaign) fail("P0_EXTERNAL_OUTCOME_EXISTS", "Кампания по этой ревизии уже создана.");
       const projection = state.draft?.publish_projection as DirectProjection | undefined;
       if (!projection) fail("P0_DRAFT_MISSING", "Campaign Draft не готов к созданию.");
@@ -827,6 +1335,9 @@ export class P0Application {
       const configuration = this.adapters.externalWriteConfiguration();
       if (!configuration.ready) {
         fail("P0_WRITE_NOT_READY", configuration.blockers[0] ?? "Direct production credentials не настроены.");
+      }
+      if (state.context_state && configuration.account !== state.context_state.facts.direct.account) {
+        fail("P0_CONTEXT_ACCOUNT_MISMATCH", "Direct write account не совпадает с подтверждённым Context binding.");
       }
       if (!state.external_write_intent) {
         const strategyRevisionId = String(state.strategy?.strategy_revision_id ?? "");
@@ -869,7 +1380,8 @@ export class P0Application {
     if (!await this.store.compareAndSwap(key, persistedRevision, next)) {
       fail("P0_REVISION_CONFLICT", "P0 изменился в другой вкладке. Обновите страницу.");
     }
-    const context = await this.adapters.readContext();
+    const context = sanitizeContext(await this.adapters.readContext());
+    const responseAt = this.adapters.now();
     return {
       contract: contractMetadata("command"),
       module: "P0_PRODUCTION",
@@ -880,9 +1392,15 @@ export class P0Application {
       state,
       workflow: workflow(state),
       context,
+      context_preflight: {
+        ready: contextPreflightBlockers(context, responseAt).length === 0,
+        blockers: contextPreflightBlockers(context, responseAt),
+        maximum_age_ms: P0_CONTEXT_PREFLIGHT_MAX_AGE_MS,
+      },
+      context_change_policy: contextChangePolicy(),
       analysis_evidence: state.business_model?.analysis_evidence ?? null,
       revision_history: await this.history(key, next.revision),
-      write_readiness: this.writeReadiness(state, context),
+      write_readiness: this.writeReadiness(state, context, responseAt),
     };
   }
 }
