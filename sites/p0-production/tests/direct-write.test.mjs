@@ -56,10 +56,8 @@ function successfulFetcher(calls, adId = "401") {
     if (key === "campaigns.get") {
       campaignGetCalls += 1;
       const campaign = campaignGetCalls === 1
-        ? { Id: 101, State: "OFF", Status: "DRAFT" }
-        : campaignGetCalls === 2
-          ? { Id: 101, State: "OFF", Status: "MODERATION" }
-          : { Id: 101, State: "SUSPENDED", Status: "MODERATION" };
+        ? { Id: 101, State: "SUSPENDED", Status: "DRAFT" }
+        : { Id: 101, State: "SUSPENDED", Status: "MODERATION" };
       return jsonResponse({ Campaigns: [campaign] });
     }
     if (key === "ads.add") {
@@ -94,6 +92,10 @@ test("creates a real-shape Direct graph and ends owner-suspended after moderatio
   ]);
   assert.equal(calls.some((call) => call.method === "resume"), false);
   assert.equal(calls.filter((call) => call.method === "suspend").length, 1);
+  assert.deepEqual(
+    calls.slice(0, 4).map((call) => `${call.service}.${call.method}`),
+    ["campaigns.add", "campaigns.suspend", "campaigns.get", "adgroups.add"],
+  );
   assert.equal(
     calls[0].params.Campaigns[0].UnifiedCampaign.BiddingStrategy.Network.BiddingStrategyType,
     "SERVING_OFF",
@@ -152,8 +154,11 @@ test("confirms non-serving containment after a downstream failure", async () => 
     if (service === "campaigns" && body.method === "add") {
       return jsonResponse({ AddResults: [{ Id: 101 }] });
     }
+    if (service === "campaigns" && body.method === "suspend") {
+      return jsonResponse({ SuspendResults: [{ Id: 101 }] });
+    }
     if (service === "campaigns" && body.method === "get") {
-      return jsonResponse({ Campaigns: [{ Id: 101, State: "OFF", Status: "DRAFT" }] });
+      return jsonResponse({ Campaigns: [{ Id: 101, State: "SUSPENDED", Status: "DRAFT" }] });
     }
     if (service === "adgroups" && body.method === "add") {
       return jsonResponse({ AddResults: [{ Errors: [{ Code: 5002, Message: "Группа отклонена" }] }] });
@@ -171,6 +176,37 @@ test("confirms non-serving containment after a downstream failure", async () => 
     },
   );
   assert.equal(calls.includes("campaigns.resume"), false);
+});
+
+test("blocks every child write until Direct confirms explicit SUSPENDED state", async () => {
+  const calls = [];
+  const fetcher = async (url, init) => {
+    const body = JSON.parse(String(init.body));
+    const service = new URL(url).pathname.split("/").at(-1);
+    calls.push(`${service}.${body.method}`);
+    if (service === "campaigns" && body.method === "add") {
+      return jsonResponse({ AddResults: [{ Id: 101 }] });
+    }
+    if (service === "campaigns" && body.method === "suspend") {
+      return jsonResponse({ SuspendResults: [{ Id: 101 }] });
+    }
+    if (service === "campaigns" && body.method === "get") {
+      return jsonResponse({ Campaigns: [{ Id: 101, State: "OFF", Status: "DRAFT" }] });
+    }
+    throw new Error(`Unexpected child write ${service}.${body.method}`);
+  };
+
+  await assert.rejects(
+    () => createSuspendedCampaign({ token: "secret", account: "moxstudio" }, projection(), fetcher),
+    (error) => {
+      assert.ok(error instanceof DirectWriteError);
+      assert.equal(error.code, "P0_EXPLICIT_SUSPEND_NOT_CONFIRMED");
+      assert.equal(error.partial.containment, "NON_SERVING_CONFIRMED");
+      return true;
+    },
+  );
+  assert.deepEqual(calls, ["campaigns.add", "campaigns.suspend", "campaigns.get", "campaigns.get"]);
+  assert.equal(calls.some((call) => call.startsWith("adgroups.")), false);
 });
 
 test("preserves a known Campaigns.add rejection without false reconciliation", async () => {

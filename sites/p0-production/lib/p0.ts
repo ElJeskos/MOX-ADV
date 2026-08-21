@@ -17,6 +17,16 @@ import {
   isCampaignNameWithGeography,
   isLegacySearchName,
 } from "./campaign-draft";
+import {
+  buildCampaignRecommendationSet,
+  campaignDraftPublishBlockers,
+  fingerprintDirectProjection,
+  type CampaignRecommendationSet,
+} from "./campaign-fanout";
+import {
+  explainScoreDelta,
+  scoreCampaignDrafts,
+} from "./campaign-viability";
 import { minimumWeeklyBudgetRub, validateWeeklyBudgetRub } from "./direct-limits";
 import {
   createSuspendedCampaign,
@@ -24,6 +34,10 @@ import {
   type DirectProjection,
 } from "./direct-write";
 import { mustHoldAccountLock } from "./execution-safety";
+import {
+  summarizeP0Revision,
+  type P0RevisionSummary,
+} from "./revision-history";
 import { normalizePublicHttpsUrl, requirePublicHttpsUrl } from "./site-url";
 
 const MAX_SITE_BYTES = 5_000_000;
@@ -56,6 +70,7 @@ export type P0Document = {
   site_analysis: SiteAnalysis | null;
   business_model: BusinessModel | null;
   strategy: Record<string, unknown> | null;
+  recommendation_set: CampaignRecommendationSet | null;
   draft: Record<string, unknown> | null;
   campaign: Record<string, unknown> | null;
 };
@@ -129,7 +144,7 @@ type Context = {
   campaign_catalog: Record<string, unknown> | null;
 };
 
-function migrateDocument(state: P0Document) {
+async function migrateDocument(state: P0Document, revision: number, updatedAt: string) {
   let changed = false;
   let modelChanged = false;
   let previousProduct = "";
@@ -186,8 +201,37 @@ function migrateDocument(state: P0Document) {
 
   const draft = state.draft;
   const strategy = state.strategy;
+  if (strategy && model) {
+    if (!strategy.strategy_revision_id) {
+      strategy.strategy_revision_id = `campaign-strategy-r${Math.max(1, revision)}`;
+      strategy.approved_at = updatedAt;
+      changed = true;
+    }
+    if (
+      !state.recommendation_set
+      || state.recommendation_set.strategy_revision_id !== strategy.strategy_revision_id
+      || state.recommendation_set.schema_version !== "campaign-recommendation-set-v2"
+    ) {
+      state.recommendation_set = await buildCampaignRecommendationSet({
+        model: model as unknown as Record<string, unknown>,
+        strategy,
+        analyticsEvidence: model.analysis_evidence as unknown as Record<string, unknown> | undefined,
+        generatedAt: updatedAt,
+      });
+      changed = true;
+    }
+  }
   if (draft && strategy && model) {
     let draftChanged = false;
+    const baseline = state.recommendation_set?.drafts.find((item) => item.visibility === "VISIBLE");
+    if (!draft.draft_id && baseline) {
+      draft.draft_id = baseline.draft_id;
+      draft.draft_revision_id = `${baseline.draft_id}-r${Math.max(1, revision)}`;
+      draft.strategy_revision_id = strategy.strategy_revision_id;
+      draft.capability_profile_id = state.recommendation_set?.capability_profile.profile_id;
+      changed = true;
+      draftChanged = true;
+    }
     const names = buildCampaignNames(model.product, strategy.geography, model.qualified_result);
     if (
       isLegacySearchName(draft.campaign_name)
@@ -208,13 +252,30 @@ function migrateDocument(state: P0Document) {
       changed = true;
       draftChanged = true;
     }
-    if ((draft.publish_projection as Record<string, unknown> | undefined)?.schema_version !== "p0-direct-projection-v2" || previousProduct || draftChanged) {
+    if ((draft.publish_projection as Record<string, unknown> | undefined)?.schema_version !== "p0-direct-projection-v3" || previousProduct || draftChanged) {
       draft.publish_projection = buildPublishProjection(
         model as unknown as Record<string, unknown>,
         strategy,
         draft,
       );
       changed = true;
+    }
+    const projection = draft.publish_projection as Record<string, unknown> | undefined;
+    const recommendationSet = state.recommendation_set;
+    if (projection && recommendationSet) {
+      const publishFingerprint = await fingerprintDirectProjection(projection);
+      if (draft.publish_fingerprint !== publishFingerprint) {
+        draft.publish_fingerprint = publishFingerprint;
+        changed = true;
+      }
+      const generatedIndex = recommendationSet.drafts.findIndex((item) => item.draft_id === draft.draft_id);
+      if (generatedIndex >= 0 && recommendationSet.drafts[generatedIndex].draft_revision_id !== draft.draft_revision_id) {
+        recommendationSet.drafts[generatedIndex] = {
+          ...recommendationSet.drafts[generatedIndex],
+          ...draft,
+        } as typeof recommendationSet.drafts[number];
+        changed = true;
+      }
     }
   }
   return changed;
@@ -231,6 +292,7 @@ function emptyDocument(): P0Document {
     site_analysis: null,
     business_model: null,
     strategy: null,
+    recommendation_set: null,
     draft: null,
     campaign: null,
   };
@@ -281,6 +343,11 @@ async function ensureState(key: string) {
     .run();
   await db
     .prepare(
+      "CREATE TABLE IF NOT EXISTS p0_state_revisions (user_key TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY (user_key, revision))",
+    )
+    .run();
+  await db
+    .prepare(
       "CREATE TABLE IF NOT EXISTS p0_executions (execution_id TEXT PRIMARY KEY, user_key TEXT NOT NULL, account_key TEXT NOT NULL, status TEXT NOT NULL, campaign_id TEXT, projection_json TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
     )
     .run();
@@ -293,41 +360,72 @@ async function ensureState(key: string) {
     .prepare("SELECT revision, updated_at, value_json FROM p0_state WHERE user_key = ?")
     .bind(key)
     .first<StateRow>();
-  if (existing) return existing;
-  const updatedAt = now();
+  let row = existing;
+  if (!row) {
+    const updatedAt = now();
+    const valueJson = JSON.stringify(emptyDocument());
+    await db
+      .prepare(
+        "INSERT INTO p0_state(user_key, revision, updated_at, value_json) VALUES (?, 0, ?, ?)",
+      )
+      .bind(key, updatedAt, valueJson)
+      .run();
+    row = { revision: 0, updated_at: updatedAt, value_json: valueJson };
+  }
   await db
     .prepare(
-      "INSERT INTO p0_state(user_key, revision, updated_at, value_json) VALUES (?, 0, ?, ?)",
+      "INSERT OR IGNORE INTO p0_state_revisions(user_key, revision, updated_at, value_json) VALUES (?, ?, ?, ?)",
     )
-    .bind(key, updatedAt, JSON.stringify(emptyDocument()))
+    .bind(key, Number(row.revision), String(row.updated_at), String(row.value_json))
     .run();
-  return { revision: 0, updated_at: updatedAt, value_json: JSON.stringify(emptyDocument()) };
+  return row;
+}
+
+async function readRevisionHistory(key: string, currentRevision: number): Promise<P0RevisionSummary[]> {
+  const result = await runtimeEnv()
+    .DB.prepare(
+      "SELECT revision, updated_at, value_json FROM p0_state_revisions WHERE user_key = ? ORDER BY revision DESC LIMIT 50",
+    )
+    .bind(key)
+    .all<StateRow>();
+  return result.results.map((row) => summarizeP0Revision(row, currentRevision));
 }
 
 async function loadState(key: string) {
   const row = await ensureState(key);
   const revision = Number(row.revision);
   const state = JSON.parse(String(row.value_json)) as P0Document;
-  if (migrateDocument(state)) return saveState(key, revision, state);
+  if (await migrateDocument(state, revision, String(row.updated_at))) return saveState(key, revision, state);
   return {
     revision,
     updated_at: String(row.updated_at),
     state,
+    revision_history: await readRevisionHistory(key, revision),
   };
 }
 
 async function saveState(key: string, expectedRevision: number, state: P0Document) {
   const updatedAt = now();
-  const result = await runtimeEnv()
-    .DB.prepare(
+  const nextRevision = expectedRevision + 1;
+  const valueJson = JSON.stringify(state);
+  const db = runtimeEnv().DB;
+  const [result] = await db.batch([
+    db.prepare(
       "UPDATE p0_state SET revision = revision + 1, updated_at = ?, value_json = ? WHERE user_key = ? AND revision = ?",
-    )
-    .bind(updatedAt, JSON.stringify(state), key, expectedRevision)
-    .run();
+    ).bind(updatedAt, valueJson, key, expectedRevision),
+    db.prepare(
+      "INSERT OR IGNORE INTO p0_state_revisions(user_key, revision, updated_at, value_json) SELECT user_key, revision, updated_at, value_json FROM p0_state WHERE user_key = ? AND revision = ? AND value_json = ?",
+    ).bind(key, nextRevision, valueJson),
+  ]);
   if (Number(result.meta.changes) !== 1) {
     throw new Error("P0 изменился в другой вкладке. Обновите страницу.");
   }
-  return { revision: expectedRevision + 1, updated_at: updatedAt, state };
+  return {
+    revision: nextRevision,
+    updated_at: updatedAt,
+    state,
+    revision_history: await readRevisionHistory(key, nextRevision),
+  };
 }
 
 function directWriteConfig() {
@@ -369,7 +467,11 @@ async function findRecoverableExecution(
   const storedProjection = JSON.parse(row.projection_json) as DirectProjection;
   const storedResult = JSON.parse(row.result_json) as Record<string, unknown>;
   const steps = Array.isArray(storedResult.steps) ? storedResult.steps : [];
-  if (storedProjection.direct.campaign.Name !== projection.direct.campaign.Name) return null;
+  const [storedFingerprint, requestedFingerprint] = await Promise.all([
+    fingerprintDirectProjection(storedProjection as unknown as Record<string, unknown>),
+    fingerprintDirectProjection(projection as unknown as Record<string, unknown>),
+  ]);
+  if (storedFingerprint !== requestedFingerprint) return null;
   const campaignOnly = steps.length === 1 && steps[0] === "CAMPAIGN_CREATED";
   const graphCreated = steps.includes("OBJECT_GRAPH_CREATED")
     && storedResult.ad_group_id
@@ -514,10 +616,10 @@ async function readCampaignCatalog() {
     observed_at: now(),
     total: campaigns.length,
     names: campaigns
-      .filter((item) => item.Status !== "ARCHIVED")
+      .filter((item) => item.State !== "ARCHIVED")
       .map((item) => cleanText(String(item.Name ?? ""), 255)),
     active: campaigns
-      .filter((item) => item.Status !== "ARCHIVED")
+      .filter((item) => item.State !== "ARCHIVED")
       .slice(0, 20)
       .map((item) => ({
         campaign_id: String(item.Id ?? ""),
@@ -962,6 +1064,7 @@ function writeReadiness(state: P0Document, context: Context) {
     }
   }
   if (!state.draft?.publish_projection) blockers.push("Campaign Draft ещё не зафиксирован");
+  blockers.push(...campaignDraftPublishBlockers(state.draft));
   if (state.campaign) blockers.push("Кампания по этой ревизии уже создана");
   return { ready: blockers.length === 0, blockers };
 }
@@ -975,14 +1078,36 @@ export async function overview(key: string) {
         context: context as unknown as Record<string, unknown>,
       })
     : null;
+  const viewState = structuredClone(stored.state);
+  if (analysisEvidence && viewState.business_model && viewState.strategy && viewState.recommendation_set) {
+    const scored = await scoreCampaignDrafts({
+      drafts: viewState.recommendation_set.drafts,
+      model: viewState.business_model as unknown as Record<string, unknown>,
+      strategy: viewState.strategy,
+      analyticsEvidence: analysisEvidence as unknown as Record<string, unknown>,
+      scoredAt: analysisEvidence.as_of,
+    });
+    viewState.recommendation_set.drafts = scored;
+    viewState.recommendation_set.analytics_evidence_snapshot_id = analysisEvidence.snapshot_id;
+    viewState.recommendation_set.coverage = {
+      ...viewState.recommendation_set.coverage,
+      visible_drafts: scored.filter((draft) => draft.visibility === "VISIBLE").length,
+      hidden_drafts: scored.filter((draft) => draft.visibility === "HIDDEN").length,
+    };
+    if (viewState.draft) {
+      const selected = scored.find((draft) => draft.draft_id === viewState.draft?.draft_id);
+      if (selected) viewState.draft = { ...viewState.draft, ...selected };
+    }
+  }
   return {
     module: "P0_PRODUCTION",
     environment: "PRODUCTION",
     test_scenario: false,
     ...stored,
+    state: viewState,
     context,
     analysis_evidence: analysisEvidence,
-    write_readiness: writeReadiness(stored.state, context),
+    write_readiness: writeReadiness(viewState, context),
   };
 }
 
@@ -1001,6 +1126,7 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
     state.site_analysis = site;
     state.business_model = await inferModel(site, context);
     state.strategy = null;
+    state.recommendation_set = null;
     state.draft = null;
   } else if (action === "save_business_model") {
     if (!state.business_model) throw new Error("Сначала исследуйте сайт.");
@@ -1028,8 +1154,10 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
       context: context as unknown as Record<string, unknown>,
     });
     state.strategy = null;
+    state.recommendation_set = null;
     state.draft = null;
   } else if (action === "save_strategy") {
+    if (!state.business_model) throw new Error("Сначала подтвердите модель бизнеса.");
     const value = payload.value as Record<string, unknown>;
     const required = ["goal", "geography", "period_start", "period_end", "landing_page", "weekly_budget_rub", "target_cpa_rub", "message"];
     if (required.some((field) => String(value?.[field] ?? "").trim() === "")) {
@@ -1038,28 +1166,98 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
     const landing = normalizePublicHttpsUrl(String(value.landing_page));
     const limits = await readCurrencyLimits();
     validateWeeklyBudgetRub(value.weekly_budget_rub, limits.minimum_weekly_budget_rub);
-    state.strategy = { ...value, landing_page: landing.toString(), source: "OWNER_APPROVED_REAL_BUSINESS_INPUT" };
+    const approvedAt = now();
+    state.strategy = {
+      ...value,
+      landing_page: landing.toString(),
+      source: "OWNER_APPROVED_REAL_BUSINESS_INPUT",
+      strategy_revision_id: `campaign-strategy-r${expectedRevision + 1}`,
+      approved_at: approvedAt,
+    };
+    state.recommendation_set = await buildCampaignRecommendationSet({
+      model: state.business_model as unknown as Record<string, unknown>,
+      strategy: state.strategy,
+      analyticsEvidence: state.business_model?.analysis_evidence as unknown as Record<string, unknown> | undefined,
+      generatedAt: approvedAt,
+    });
     state.draft = null;
   } else if (action === "save_draft") {
     const value = payload.value as Record<string, unknown>;
     if (!state.strategy || !state.business_model) throw new Error("Сначала подтвердите модель и Strategy.");
-    const normalized = {
+    const draftId = requiredInput(value?.draft_id, "Campaign Draft", 255);
+    const recommendationSet = state.recommendation_set;
+    const generated = recommendationSet?.drafts.find((item) => item.draft_id === draftId);
+    if (!recommendationSet || !generated || generated.visibility !== "VISIBLE") {
+      throw new Error("Выбранный Campaign Draft не принадлежит текущей Strategy revision.");
+    }
+    const normalized: Record<string, unknown> = {
       campaign_name: requiredInput(value?.campaign_name, "Название кампании", 255),
       group_name: requiredInput(value?.group_name, "Название группы", 255),
       keyword: requiredInput(value?.keyword, "Ключевая фраза", 4_096),
       negative_keywords: requiredInput(value?.negative_keywords, "Минус-фразы", 1_000),
       ad_title: requiredInput(value?.ad_title, "Заголовок объявления", 56),
       ad_text: requiredInput(value?.ad_text, "Текст объявления", 81),
+      draft_id: draftId,
+      draft_revision_id: `${draftId}-r${expectedRevision + 1}`,
+      strategy_revision_id: state.strategy.strategy_revision_id,
+      capability_profile_id: recommendationSet.capability_profile.profile_id,
     };
-    state.draft = {
+    const projection = buildPublishProjection(
+      state.business_model as unknown as Record<string, unknown>,
+      state.strategy,
+      normalized,
+    ) as unknown as Record<string, unknown>;
+    const editableFields = [
+      "campaign_name",
+      "group_name",
+      "keyword",
+      "negative_keywords",
+      "ad_title",
+      "ad_text",
+    ] as const;
+    const changedPointers = editableFields
+      .filter((field) => String(generated[field] ?? "") !== String(normalized[field] ?? ""))
+      .map((field) => `/draft/${field}`);
+    let scoreEvidence = state.business_model.analysis_evidence;
+    if (!scoreEvidence) {
+      if (!state.site_analysis) throw new Error("Scoring требует first-party Analytics Evidence Snapshot.");
+      const scoringContext = await readContext();
+      scoreEvidence = await buildAnalyticsEvidence({
+        site: state.site_analysis as unknown as Record<string, unknown>,
+        model: state.business_model as unknown as Record<string, unknown>,
+        context: scoringContext as unknown as Record<string, unknown>,
+      });
+      state.business_model.analysis_evidence = scoreEvidence;
+    }
+    const editedAt = now();
+    const editedDraft = {
+      ...generated,
       ...normalized,
       source: "OWNER_REVIEWED_PUBLISH_PROJECTION",
-      publish_projection: buildPublishProjection(
-        state.business_model as unknown as Record<string, unknown>,
-        state.strategy,
-        normalized,
+      edited_at: editedAt,
+      publish_projection: projection,
+      publish_fingerprint: await fingerprintDirectProjection(projection),
+    } as typeof generated;
+    const rescored = await scoreCampaignDrafts({
+      drafts: recommendationSet.drafts.map((item) => item.draft_id === draftId ? editedDraft : item),
+      model: state.business_model as unknown as Record<string, unknown>,
+      strategy: state.strategy,
+      analyticsEvidence: scoreEvidence as unknown as Record<string, unknown>,
+      scoredAt: editedAt,
+    });
+    const currentDraft = rescored.find((item) => item.draft_id === draftId);
+    if (!currentDraft) throw new Error("Пересчёт Campaign Draft не вернул выбранную ревизию.");
+    state.draft = {
+      ...currentDraft,
+      score_delta: explainScoreDelta(
+        generated.viability_score,
+        currentDraft.viability_score,
+        changedPointers,
       ),
     };
+    recommendationSet.drafts = rescored.map((item) =>
+      item.draft_id === draftId ? state.draft as typeof item : item
+    );
   } else if (action === "confirm_creation") {
     if (payload.confirmation !== "CREATE_NON_SERVING_CAMPAIGN") {
       throw new Error("Нужно точное подтверждение создания реальной кампании с выключенными показами.");
@@ -1067,6 +1265,8 @@ export async function applyAction(key: string, payload: Record<string, unknown>)
     if (state.campaign) throw new Error("Кампания по этой ревизии уже создана.");
     const projection = state.draft?.publish_projection as DirectProjection | undefined;
     if (!projection) throw new Error("Campaign Draft не готов к созданию.");
+    const publishBlockers = campaignDraftPublishBlockers(state.draft);
+    if (publishBlockers.length) throw new Error(publishBlockers[0]);
     const config = directWriteConfig();
     if (!config.token || !config.account) throw new Error("Direct production credentials не настроены.");
     const [catalog, limits] = await Promise.all([readCampaignCatalog(), readCurrencyLimits()]);

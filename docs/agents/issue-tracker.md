@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and PRDs for this repository live as GitHub issues in `ElJeskos/MOX-ADV`.
+Issues and specs for this repository live as GitHub issues in `ElJeskos/MOX-ADV`.
 Use the `gh` CLI for all operations.
 
 ## Conventions
@@ -53,3 +53,16 @@ The `wayfinder` skill uses one issue as a map and child issues as tickets.
 - **Claim**: Run `gh issue edit <number> --add-assignee @me`.
   Claiming is the session's first write.
 - **Resolve**: Comment with the answer, close the ticket, and append a context pointer with its link to the map's Decisions-so-far section.
+
+## Classical delivery handoff
+
+Wayfinder is planning-only in this repository. Its map and children resolve decisions; they do not form the implementation backlog. A `wayfinder:task` is limited to prerequisite work that unblocks a decision.
+
+When a map has no open in-scope decisions or fog:
+
+1. Run `to-spec` on the map issue to publish one implementation-ready spec.
+2. Run `to-tickets` on the accepted spec to publish approved vertical implementation slices with native blockers and `ready-for-agent`.
+3. Run `implement` for one frontier ticket per fresh session.
+4. Verify acceptance criteria and close the ticket manually after implementation so blocked tickets can enter the frontier.
+
+Implementation tickets reference the spec, not the Wayfinder map, and never carry `wayfinder:*` labels. Do not put execution overrides in Wayfinder map Notes. See `docs/agents/delivery-workflow.md` for the complete stage boundaries and short paths.

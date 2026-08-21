@@ -15,6 +15,11 @@ See `docs/agents/triage-labels.md`.
 This is a single-context repository with `CONTEXT.md` and `docs/adr/` at the repository root.
 See `docs/agents/domain.md`.
 
+### Delivery workflow
+
+Use the planning-only sequence `Wayfinder → to-spec → to-tickets → implement`, with one implementation ticket per fresh session.
+See `docs/agents/delivery-workflow.md`.
+
 ### Integration interaction boundaries
 
 - Work with Yandex Direct and Yandex Metrica exclusively through their APIs; their browser-based personal cabinets are out of bounds.

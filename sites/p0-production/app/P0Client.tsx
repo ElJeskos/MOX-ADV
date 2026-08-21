@@ -3,8 +3,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- API payloads are validated server-side and intentionally revisioned. */
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { buildAdText, buildAdTitle } from "../lib/ad-copy";
-import { buildCampaignNames } from "../lib/campaign-draft";
 import { weeklyBudgetValidationMessage } from "../lib/direct-limits";
 
 type Payload = {
@@ -13,6 +11,7 @@ type Payload = {
   state: Record<string, any>;
   context: Record<string, any>;
   analysis_evidence?: Record<string, any> | null;
+  revision_history?: Array<Record<string, any>>;
   write_readiness: { ready: boolean; blockers: string[] };
 };
 
@@ -329,32 +328,89 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
 }
 
 function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>) => Promise<void>; back: () => void }) {
-  const model = payload.state.business_model || {};
-  const strategy = payload.state.strategy || {};
   const existing = payload.state.draft || {};
-  const participation = /участ|participant/i.test(model.qualified_result || "");
-  const names = buildCampaignNames(model.product, strategy.geography, model.qualified_result);
-  const adTitle = buildAdTitle(existing.ad_title || model.product);
-  const adText = buildAdText(existing.ad_text || strategy.message, model.product, participation);
+  const recommendationSet = payload.state.recommendation_set || {};
+  const drafts = Array.isArray(recommendationSet.drafts) ? recommendationSet.drafts : [];
+  const visibleDrafts = drafts
+    .filter((item: Record<string, any>) => item.visibility === "VISIBLE")
+    .sort((left: Record<string, any>, right: Record<string, any>) =>
+      Number(left.viability_score?.rank || 999) - Number(right.viability_score?.rank || 999)
+      || String(left.draft_id).localeCompare(String(right.draft_id))
+    );
+  const hiddenDrafts = drafts
+    .filter((item: Record<string, any>) => item.visibility === "HIDDEN")
+    .sort((left: Record<string, any>, right: Record<string, any>) =>
+      Number(left.viability_score?.rank || 999) - Number(right.viability_score?.rank || 999)
+      || String(left.draft_id).localeCompare(String(right.draft_id))
+    );
+  const revisionHistory = (Array.isArray(payload.revision_history) ? payload.revision_history : [])
+    .filter((item: Record<string, any>) => item.strategy_revision_id || item.draft_revision_id);
+  const [selectedDraftId, setSelectedDraftId] = useState(String(existing.draft_id || visibleDrafts[0]?.draft_id || ""));
+  const generated = visibleDrafts.find((item: Record<string, any>) => item.draft_id === selectedDraftId) || visibleDrafts[0] || existing;
+  const selected = existing.draft_id === generated.draft_id ? { ...generated, ...existing } : generated;
+  const profile = recommendationSet.capability_profile || {};
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
-    const value = Object.fromEntries(["campaign_name", "group_name", "keyword", "negative_keywords", "ad_title", "ad_text"].map((name) => [name, fieldValue(form, name)]));
+    const value = {
+      draft_id: String(selected.draft_id || ""),
+      ...Object.fromEntries(["campaign_name", "group_name", "keyword", "negative_keywords", "ad_title", "ad_text"].map((name) => [name, fieldValue(form, name)])),
+    };
     void apply("save_draft", value);
   }
   return <>
-    <ArtifactHead eyebrow="Шаг 4 · Campaign Draft" title="Точная publish projection" copy="Агент подготовил все поддерживаемые поля. Ничего не будет молча отброшено." />
-    <div className="context-strip"><Metric label="Цель" value={strategy.goal} copy={model.qualified_result} /><Metric label="Бюджет" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy="Канал: поиск Яндекс Директа · сети выключены" /><Metric label="Безопасный финиш" value="Показы выключены" copy="State = OFF / SUSPENDED · resume отсутствует" /></div>
-    <form className="form two" onSubmit={submit}>
-      <label><span>Название кампании</span><input name="campaign_name" required defaultValue={existing.campaign_name || names.campaignName} /></label>
-      <label><span>Название группы объявлений</span><input name="group_name" required defaultValue={existing.group_name || names.groupName} /></label>
-      <label className="wide"><span>Ключевая фраза</span><input name="keyword" required defaultValue={existing.keyword || `${model.product}${participation ? " стать участником" : ""}`.toLowerCase()} /></label>
-      <label className="wide"><span>Минус-фразы</span><input name="negative_keywords" required defaultValue={existing.negative_keywords || "бесплатно, вакансии, посетитель, билет"} /></label>
-      <label className="wide"><span>Заголовок объявления</span><input name="ad_title" maxLength={56} required defaultValue={adTitle} /><small>До 56 символов.</small></label>
-      <Field wide label="Текст объявления" name="ad_text" maxLength={81} value={adText}><small>До 81 символа; слова не обрезаются.</small></Field>
-      <div className="wide"><Actions revision={payload.revision} label="Зафиксировать проекцию" back={back} submit /></div>
-    </form>
+    <ArtifactHead eyebrow="Шаг 4 · Campaign Drafts" title="Детерминированный fan-out Strategy" copy="Одна immutable Strategy revision дала несколько существенно различающихся полных проекций. Варианты с EVIDENCE_GAP доступны для review, но не входят в shortlist и не могут быть опубликованы." />
+    <div className="context-strip"><Metric label="Покрытие" value={`${recommendationSet.coverage?.visible_drafts || visibleDrafts.length} review · ${recommendationSet.coverage?.hidden_drafts || hiddenDrafts.length} скрыт`} copy={`${recommendationSet.coverage?.publishable_drafts || 0} доступно для publish; каждый кандидат имеет terminal disposition`} /><Metric label="Direct-профиль" value="Unified · Search" copy={`${profile.search_strategy || "WB_MAXIMUM_CLICKS"} · Network ${profile.network_strategy || "SERVING_OFF"}`} /><Metric label="Безопасный финиш" value="Только SUSPENDED" copy="Явный suspend подтверждается до дочерних записей" /></div>
+    <section className="draft-canvas" aria-label="Варианты Campaign Draft">
+      {visibleDrafts.map((item: Record<string, any>) => <button type="button" key={item.draft_id} className={item.draft_id === selected.draft_id ? "selected" : ""} aria-pressed={item.draft_id === selected.draft_id} onClick={() => setSelectedDraftId(item.draft_id)}>
+        <span className="draft-card-head"><b>{item.variant?.kind === "CONTROL" ? "BASELINE" : "IMPROVEMENT"}</b><em>{item.viability_score?.score ?? "—"}<small>/100</small></em></span>
+        <strong>{item.dimensions?.keyword_cluster}</strong>
+        <p>{item.dimensions?.offer}</p>
+        <small>{item.viability_score?.rank ? `Rank ${item.viability_score.rank} · диапазон ${item.viability_score.score_lower}–${item.viability_score.score_upper}` : "Score заблокирован hard eligibility"}</small>
+        <small>{item.market_evidence_status === "EVIDENCE_GAP" ? "REVIEW ONLY · demand evidence отсутствует" : item.market_evidence_status}</small>
+      </button>)}
+    </section>
+    {hiddenDrafts.length > 0 && <details className="hidden-drafts"><summary>Скрытые варианты · {hiddenDrafts.length}</summary><ul>{hiddenDrafts.map((item: Record<string, any>) => <li key={item.draft_id}><strong>{item.dimensions?.keyword_cluster}</strong><span>{item.viability_score?.score ?? "—"}/100 · {item.suppression_reason}</span></li>)}</ul></details>}
+    {revisionHistory.length > 0 && <details className="hidden-drafts revision-history"><summary>История Strategy и Draft · {revisionHistory.length}</summary><ul>{revisionHistory.map((item: Record<string, any>) => <li key={item.revision}><strong>Ревизия {item.revision} · {item.status}</strong><span>{item.strategy_revision_id}{item.draft_revision_id ? ` · ${item.draft_revision_id}` : " · Draft ещё не зафиксирован"}{item.publish_fingerprint ? ` · ${String(item.publish_fingerprint).slice(0, 12)}…` : ""}</span></li>)}</ul></details>}
+    {selected?.draft_id && <form key={selected.draft_id} className="form two" onSubmit={submit}>
+      <div className="wide draft-lineage"><strong>{selected.variant?.kind === "CONTROL" ? "Базовый comparator" : selected.variant?.hypothesis?.changed_family}</strong><span>{selected.strategy_revision_id} · {String(selected.publish_fingerprint || "").slice(0, 18)}…</span><small>{selected.publish_eligibility === "BLOCKED_EVIDENCE_GAP" ? "Publish заблокирован до допустимого demand evidence." : "Score v1 · не прогноз эффективности"}</small></div>
+      <ViabilityDisclosure score={selected.viability_score} delta={selected.score_delta} />
+      <label><span>Название кампании</span><input name="campaign_name" required defaultValue={selected.campaign_name} /></label>
+      <label><span>Название группы объявлений</span><input name="group_name" required defaultValue={selected.group_name} /></label>
+      <label className="wide"><span>Ключевая фраза</span><input name="keyword" required defaultValue={selected.keyword} /></label>
+      <label className="wide"><span>Минус-фразы</span><input name="negative_keywords" required defaultValue={selected.negative_keywords} /></label>
+      <label className="wide"><span>Заголовок объявления</span><input name="ad_title" maxLength={56} required defaultValue={selected.ad_title} /><small>До 56 символов.</small></label>
+      <Field wide label="Текст объявления" name="ad_text" maxLength={81} value={selected.ad_text}><small>До 81 символа; слова не обрезаются.</small></Field>
+      <div className="wide"><Actions revision={payload.revision} label="Выбрать и зафиксировать проекцию" back={back} submit /></div>
+    </form>}
   </>;
+}
+
+const viabilityDimensionLabels: Record<string, string> = {
+  demand: "Спрос",
+  cost: "Стоимость",
+  economics: "Экономика",
+  offer_audience_fit: "Соответствие",
+  direct_feasibility: "Direct",
+  measurement: "Измерение",
+  evidence_quality: "Evidence",
+};
+
+function ViabilityDisclosure({ score, delta }: { score: Record<string, any> | undefined; delta: Record<string, any> | undefined }) {
+  const blockers = Array.isArray(score?.eligibility?.blockers) ? score.eligibility.blockers : [];
+  if (!score || score.score === null || score.score === undefined) {
+    return <section className="wide viability-summary blocked"><strong>Viability score не рассчитан</strong><p>Hard eligibility или обязательный snapshot не пройден. Blocker нельзя компенсировать средним баллом.</p>{blockers.length > 0 && <ul>{blockers.map((item: Record<string, any>) => <li key={`${item.code}-${item.input_pointer}`}>{item.code}: {item.remediation}</li>)}</ul>}</section>;
+  }
+  const dimensions = Object.entries(score.dimensions || {}) as Array<[string, Record<string, any>]>;
+  const deltaValue = delta?.score?.delta;
+  return <section className="wide viability-summary" aria-labelledby="viability-score-title">
+    <header><div><p className="eyebrow">UNCALIBRATED POLICY V1</p><h3 id="viability-score-title"><strong>{score.score}</strong><span>/100</span></h3></div><div><b>Rank {score.rank}{score.tied_draft_ids?.length > 1 ? " · ничья" : ""}</b><small>Диапазон неопределённости {score.score_lower}–{score.score_upper}</small></div><em>Не прогноз эффективности</em></header>
+    <p>Детерминированный сравнительный приоритет eligible Campaign Drafts. Landing audit не участвует; hard blockers оцениваются отдельно.</p>
+    {typeof deltaValue === "number" && <div className="score-delta"><strong>После ручной правки: {deltaValue > 0 ? "+" : ""}{deltaValue} балл.</strong><span>Полный пересчёт на тех же frozen inputs и policy.</span></div>}
+    <div className="viability-bars">{dimensions.map(([name, item]) => <div key={name}><span>{viabilityDimensionLabels[name] || name}</span><i><b style={{ width: `${Math.max(0, Math.min(100, Number(item.value || 0)))}%` }} /></i><strong>{Math.round(Number(item.value || 0))}</strong><small>{Number(item.weight || 0) * 100}%</small></div>)}</div>
+    <details><summary>Почему такой балл · evidence и missing data</summary><div className="viability-detail"><p><strong>Missing dimensions:</strong> {score.explanation?.missing_dimensions?.length ? score.explanation.missing_dimensions.map((item: string) => viabilityDimensionLabels[item] || item).join(" · ") : "нет"}. Unknown получает midpoint 50 только для point score и расширяет bounds, а не становится наблюдаемым фактом.</p>{dimensions.map(([name, item]) => <section key={name}><strong>{viabilityDimensionLabels[name] || name} · {Number(item.weight || 0) * 100}% → {Number(item.weighted_points || 0).toFixed(2)} points</strong><ul>{(item.features || []).map((feature: Record<string, any>, index: number) => <li key={`${name}-${feature.rule}-${index}`}><span>{feature.rule}</span><b>{Math.round(Number(feature.value || 0))} · {feature.status}</b></li>)}</ul></section>)}</div></details>
+    <footer><code>{score.contract_version}</code><span>{String(score.fingerprints?.input || "").slice(0, 18)}…</span><span>landing_audit_used=false</span></footer>
+  </section>;
 }
 
 function ConfirmationStep({ payload, apply, back, editStrategy }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; back: () => void; editStrategy: () => void }) {
@@ -374,7 +430,7 @@ function ConfirmationStep({ payload, apply, back, editStrategy }: { payload: Pay
   return <>
     <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Создать реальную кампанию с выключенными показами" copy="Это единственное критическое решение: после подтверждения модуль выполнит официальный Direct API-контур и проверит non-serving readback." badge={ready ? "READY" : "FAIL CLOSED"} />
     <div className="context-strip"><Metric label="Кампания" value={draft.campaign_name} copy={payload.context.direct.account} /><Metric label="Экспозиция" value={`${strategy.weekly_budget_rub} ₽ / неделю`} copy={`${strategy.period_start} — ${strategy.period_end}`} /><Metric label="Посадочная" value={strategy.landing_page} copy="Search only · сети выключены" /></div>
-    <div className="confirmation"><p className="eyebrow">Обещание безопасности</p><h3>Показы и списания не начнутся</h3><p>Campaigns.add → readback OFF → группа → фраза → объявление → модерация → повторный non-serving readback. Campaigns.resume отсутствует.</p></div>
+    <div className="confirmation"><p className="eyebrow">Обещание безопасности</p><h3>Показы и списания не начнутся</h3><p>Campaigns.add → безусловный suspend → readback SUSPENDED → группа → фраза → объявление → модерация → повторный readback SUSPENDED. Campaigns.resume отсутствует.</p></div>
     {!ready && <ul className="blockers">{payload.write_readiness.blockers.map((item, index) => <li key={item}><span>{index + 1}</span>{item}</li>)}</ul>}
     {ready && <div className="decision-confirm"><input aria-label="Подтверждаю создание реальной кампании" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю создание реальной кампании</strong><small>Кампания появится в аккаунте {payload.context.direct.account}, но показы останутся выключенными.</small></span></div>}
     <footer className="actions"><span>Ревизия {payload.revision} · production write</span><button type="button" className="secondary" onClick={budgetBlocked ? editStrategy : back}>{budgetBlocked ? "Исправить Strategy" : "Назад"}</button><button type="button" disabled={!ready || !confirmed} onClick={() => void apply("confirm_creation", undefined, { confirmation: "CREATE_NON_SERVING_CAMPAIGN" })}>Создать с выключенными показами</button></footer>

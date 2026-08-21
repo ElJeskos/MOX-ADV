@@ -4,6 +4,11 @@ const JSONbig = JSONbigFactory({ useNativeBigInt: true });
 
 export type DirectProjection = {
   schema_version: string;
+  lineage: {
+    strategy_revision_id?: unknown;
+    draft_id?: unknown;
+    capability_profile_id?: unknown;
+  };
   business: Record<string, unknown>;
   safety: { must_end_non_serving: true; resume_allowed: false; network_serving: false };
   direct: {
@@ -208,6 +213,19 @@ async function ensureNonServing(config: DirectConfig, campaignId: string, fetche
   return campaign;
 }
 
+async function ensureExplicitlySuspended(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
+  let campaign = await campaignReadback(config, campaignId, fetcher);
+  if (campaign.State === "SUSPENDED") return campaign;
+  campaign = await suspendAndReadback(config, campaignId, fetcher);
+  if (campaign.State !== "SUSPENDED") {
+    throw new DirectWriteError(
+      "P0_EXPLICIT_SUSPEND_NOT_CONFIRMED",
+      "Direct не подтвердил явную остановку кампании до дочерних записей.",
+    );
+  }
+  return campaign;
+}
+
 async function ensureOwnerSuspendedAfterModeration(
   config: DirectConfig,
   campaignId: string,
@@ -276,7 +294,17 @@ export async function createSuspendedCampaign(
       await onProgress("CAMPAIGN_CREATED", result);
     }
 
-    await ensureNonServing(config, campaignId, fetcher);
+    if (result.recovered_existing === true) {
+      await ensureExplicitlySuspended(config, campaignId, fetcher);
+    } else {
+      const explicitlySuspended = await suspendAndReadback(config, campaignId, fetcher);
+      if (explicitlySuspended.State !== "SUSPENDED") {
+        throw new DirectWriteError(
+          "P0_EXPLICIT_SUSPEND_NOT_CONFIRMED",
+          "Direct не подтвердил явную остановку новой кампании до дочерних записей.",
+        );
+      }
+    }
     (result.steps as string[]).push("NON_SERVING_CONFIRMED");
     await onProgress("NON_SERVING_CONFIRMED", result);
 

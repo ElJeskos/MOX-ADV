@@ -198,6 +198,62 @@ body::before {
 .decision-confirm span, .decision-confirm strong, .decision-confirm small { display: block; }
 .decision-confirm small { margin-top: 4px; color: var(--muted); font-size: 9px; }
 
+.draft-canvas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 18px; }
+.draft-canvas button { min-height: 150px; padding: 15px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: white; text-align: left; }
+.draft-canvas button.selected { border-color: var(--green); box-shadow: 0 0 0 3px rgba(17,122,77,.1); background: var(--green-soft); }
+.draft-canvas button > span { color: var(--green-dark); font-size: 7px; font-weight: 800; letter-spacing: .09em; }
+.draft-canvas button > strong, .draft-canvas button > small { display: block; }
+.draft-canvas button > strong { margin-top: 9px; font-size: 12px; line-height: 1.35; }
+.draft-canvas button > p { min-height: 38px; margin: 7px 0; color: var(--muted); font-size: 8px; line-height: 1.45; }
+.draft-canvas button > small { color: var(--muted); font-size: 7px; }
+.hidden-drafts { margin-top: 10px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 8px; background: white; font-size: 8px; }
+.hidden-drafts summary { cursor: pointer; font-weight: 750; }
+.hidden-drafts ul { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+.hidden-drafts li { display: flex; justify-content: space-between; gap: 16px; color: var(--muted); }
+.hidden-drafts li strong { color: var(--ink); }
+.draft-lineage { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 11px 13px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.draft-lineage strong { font-size: 9px; }
+.draft-lineage span, .draft-lineage small { color: var(--muted); font-size: 7px; }
+.draft-lineage small { text-align: right; }
+.draft-card-head { display: flex; justify-content: space-between; align-items: flex-start; }
+.draft-card-head b { color: var(--green-dark); font-size: 7px; letter-spacing: .09em; }
+.draft-card-head em { display: flex; align-items: baseline; gap: 2px; color: var(--ink); font-size: 20px; font-style: normal; font-weight: 800; letter-spacing: -.04em; }
+.draft-card-head em small { color: var(--muted); font-size: 7px; letter-spacing: 0; }
+.draft-canvas button > small + small { margin-top: 4px; }
+
+.viability-summary { margin: 0; padding: 15px; border: 1px solid #acd1ba; border-radius: 9px; background: var(--green-soft); }
+.viability-summary.blocked { border-color: #e3b9b4; background: #fbe8e5; }
+.viability-summary.blocked > strong { font-size: 12px; }
+.viability-summary.blocked > p, .viability-summary.blocked li { color: var(--muted); font-size: 8px; line-height: 1.5; }
+.viability-summary > header { display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center; }
+.viability-summary > header h3 { display: flex; align-items: baseline; gap: 3px; margin: 2px 0 0; }
+.viability-summary > header h3 strong { font-size: 34px; letter-spacing: -.06em; }
+.viability-summary > header h3 span { color: var(--muted); font-size: 9px; }
+.viability-summary > header > div:nth-child(2) b, .viability-summary > header > div:nth-child(2) small { display: block; }
+.viability-summary > header > div:nth-child(2) b { font-size: 10px; }
+.viability-summary > header > div:nth-child(2) small { margin-top: 4px; color: var(--muted); font-size: 8px; }
+.viability-summary > header > em { padding: 6px 8px; border-radius: 999px; color: #7d5221; background: var(--amber-soft); font-size: 7px; font-style: normal; font-weight: 800; text-transform: uppercase; }
+.viability-summary > p { margin: 9px 0 0; color: var(--muted); font-size: 8px; line-height: 1.5; }
+.score-delta { display: flex; gap: 12px; margin-top: 9px; padding: 8px 10px; border-radius: 6px; background: white; font-size: 8px; }
+.score-delta span { color: var(--muted); }
+.viability-bars { display: grid; gap: 5px; margin-top: 12px; }
+.viability-bars > div { display: grid; grid-template-columns: 110px 1fr 26px 26px; gap: 8px; align-items: center; }
+.viability-bars span, .viability-bars strong, .viability-bars small { font-size: 7px; }
+.viability-bars small { color: var(--muted); text-align: right; }
+.viability-bars i { display: block; overflow: hidden; height: 5px; border-radius: 999px; background: #d7e5db; }
+.viability-bars i b { display: block; height: 100%; border-radius: inherit; background: var(--green); }
+.viability-summary > details { margin-top: 10px; border-top: 1px solid #c7dacd; }
+.viability-summary > details > summary { padding-top: 9px; cursor: pointer; color: var(--green-dark); font-size: 8px; font-weight: 750; }
+.viability-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 8px; }
+.viability-detail > p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 7px; line-height: 1.5; }
+.viability-detail section { padding: 8px; border-radius: 6px; background: white; }
+.viability-detail section > strong { font-size: 7px; }
+.viability-detail ul { display: grid; gap: 3px; margin: 6px 0 0; padding: 0; list-style: none; }
+.viability-detail li { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 6px; }
+.viability-detail li b { color: var(--ink); white-space: nowrap; }
+.viability-summary > footer { display: flex; gap: 10px; margin-top: 8px; color: var(--muted); font-size: 6px; }
+.viability-summary > footer code { margin-right: auto; }
+
 .actions { display: flex; gap: 9px; align-items: center; margin-top: 6px; padding-top: 17px; border-top: 1px solid var(--line); }
 .actions > span { margin-right: auto; color: var(--muted); font-size: 8px; }
 .actions button { min-height: 42px; padding: 0 18px; border: 1px solid var(--green); border-radius: 7px; color: white; background: var(--green); font-size: 11px; font-weight: 730; }

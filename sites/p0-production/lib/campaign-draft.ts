@@ -51,7 +51,12 @@ export function buildPublishProjection(
   if (!negativeKeywords.length) throw new Error("Нужна хотя бы одна минус-фраза.");
 
   return {
-    schema_version: "p0-direct-projection-v2",
+    schema_version: "p0-direct-projection-v3",
+    lineage: {
+      strategy_revision_id: draft.strategy_revision_id,
+      draft_id: draft.draft_id,
+      capability_profile_id: draft.capability_profile_id,
+    },
     business: {
       product: model.product,
       audience: model.audience,
@@ -73,6 +78,10 @@ export function buildPublishProjection(
           BiddingStrategy: {
             Search: {
               BiddingStrategyType: "WB_MAXIMUM_CLICKS",
+              PlacementTypes: {
+                SearchResults: "YES",
+                ProductGallery: "NO",
+              },
               WbMaximumClicks: {
                 WeeklySpendLimit: weeklyBudget * 1_000_000,
                 BidCeiling: bidCeilingRub * 1_000_000,
