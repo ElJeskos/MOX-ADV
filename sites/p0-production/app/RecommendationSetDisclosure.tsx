@@ -6,6 +6,7 @@ export function RecommendationSetDisclosure({ recommendationSet }: { recommendat
   const coverage = recommendationSet.coverage || {};
   const profile = recommendationSet.capability_profile || {};
   const playbook = recommendationSet.playbook_release || {};
+  const scoreContract = recommendationSet.score_contract || {};
   return <>
     <div className="context-strip">
       <div><span>Покрытие</span><strong>{coverage.generated_count ?? candidateAudit.length} generated</strong><small>{coverage.visible_count ?? 0} visible · {coverage.hidden_count ?? hiddenAudit.length} hidden · reconciliation {coverage.reconciliation?.generated_equals_visible_plus_hidden ? "OK" : "BLOCKED"}</small></div>
@@ -15,6 +16,7 @@ export function RecommendationSetDisclosure({ recommendationSet }: { recommendat
     <section className="recommendation-governance" aria-label="Capability и curated playbook Recommendation Set">
       <div><strong>Curated playbook</strong><code>{playbook.release_id || "BLOCKED_FAIL_CLOSED"}@{playbook.release_version || "—"}</code><small>{playbook.status} · {String(playbook.content_digest || "no digest").slice(0, 28)}…</small></div>
       <div><strong>Direct capability</strong><code>{profile.campaign_type} · {profile.ad_group_type} · {profile.criteria?.join("+")} · {profile.ad_type}</code><small>v501 exact account snapshot {recommendationSet.direct_capability_snapshot_id || "MISSING"} · Product Gallery OFF · Network SERVING_OFF</small></div>
+      <div><strong>Comparative score contract</strong><code>{scoreContract.version || "viability-score/1.0.0"}</code><small>18 demand · 12 cost · 20 economics · 18 fit · 12 Direct · 10 measurement · 10 evidence = 100% · unknown midpoint 50</small></div>
     </section>
     {hiddenAudit.length > 0 && <details className="hidden-drafts"><summary>Hidden candidate audit · {hiddenAudit.length}</summary><ul>{hiddenAudit.map((item: Record<string, any>) => <li key={item.candidate_id}><strong>{item.candidate_type}{item.playbook_rule_id ? ` · ${item.playbook_rule_id}` : ""}</strong><span>{item.reason_code}{item.draft_id ? ` · ${item.draft_id}` : ""}</span></li>)}</ul></details>}
   </>;
@@ -38,5 +40,81 @@ export function DraftPublicationBlockers({ draft }: { draft: Record<string, any>
   return <section className="wide viability-summary blocked" aria-label="Publication blockers">
     <strong>Publication заблокирована</strong>
     <ul>{blockers.map((item: Record<string, any>) => <li key={`${item.code}-${item.field_path || "draft"}`}>{item.code}: {item.message}{item.field_path ? ` · ${item.field_path}` : ""}</li>)}</ul>
+  </section>;
+}
+
+const viabilityDimensionLabels: Record<string, string> = {
+  demand: "Спрос",
+  cost: "Стоимость",
+  economics: "Экономика",
+  offer_audience_fit: "Offer–audience fit",
+  direct_feasibility: "Direct feasibility",
+  measurement_readiness: "Measurement readiness",
+  evidence_quality: "Evidence quality",
+};
+
+function scoreScopeLine(score: Record<string, any>) {
+  const frequency = score.scopes?.frequency || {};
+  const cost = score.scopes?.cost || {};
+  const frequencyScope = [
+    frequency.source,
+    frequency.method,
+    frequency.snapshot_batch_id,
+    frequency.operator_profiles?.join("+"),
+    frequency.region_ids?.join("+"),
+    frequency.devices?.join("+"),
+    frequency.declared_window,
+  ].filter(Boolean).join(" · ") || "scope unavailable";
+  const costScope = [
+    cost.source,
+    cost.scenario,
+    cost.currency,
+    cost.vat_treatment,
+    cost.as_of,
+    cost.sample_size ? JSON.stringify(cost.sample_size) : null,
+    cost.scope ? JSON.stringify(cost.scope) : null,
+  ].filter(Boolean).join(" · ") || "qualified source unavailable";
+  return <div className="score-scopes">
+    <p><strong>Frequency scope</strong> {frequency.status || "UNAVAILABLE"} · {frequency.semantics || "UNAVAILABLE_NOT_ZERO"} · {frequency.observed_unique_count ?? "unknown"} · {frequencyScope}</p>
+    <p><strong>Cost scope</strong> {cost.status || "UNAVAILABLE"} · {cost.semantics || "ONE QUALIFIED SOURCE; NOT AVERAGED"} · {costScope}</p>
+  </div>;
+}
+
+export function ViabilityScoreDisclosure({ score, delta }: { score: Record<string, any> | undefined; delta?: Record<string, any> }) {
+  if (!score) return <section className="wide viability-summary blocked"><strong>Comparative score contract отсутствует</strong></section>;
+  const blockers = Array.isArray(score.eligibility?.blockers) ? score.eligibility.blockers : [];
+  const requiredGaps = Array.isArray(score.evidence_gaps?.required) ? score.evidence_gaps.required : [];
+  const optionalGaps = Array.isArray(score.evidence_gaps?.optional) ? score.evidence_gaps.optional : [];
+  const dimensions = Object.entries(score.dimensions || {}) as Array<[string, Record<string, any>]>;
+  const deltaValue = delta?.score?.delta;
+  const ranking = score.ranking || {};
+  const visibility = score.visibility || {};
+  const gates = visibility.gates || {};
+  if (score.score === null || score.score === undefined) {
+    return <section className="wide viability-summary blocked" aria-label="Comparative viability score blocked">
+      <header><div><p className="eyebrow">UNCALIBRATED POLICY V1</p><h3>COMPARATIVE PRELAUNCH PRIORITY / NOT A PREDICTION</h3></div><em>{score.eligibility?.status || "BLOCKED"}</em></header>
+      <p>Hard eligibility и required EVIDENCE_GAP оценены до score. Blocker нельзя усреднить, обойти высоким баллом, добавить в shortlist или скрыть score-правилом.</p>
+      {blockers.length > 0 && <section><strong>Hard blockers</strong><ul>{blockers.map((item: Record<string, any>) => <li key={`${item.code}-${item.input_pointer}`}>{item.code}: {item.remediation} · {item.input_pointer}</li>)}</ul></section>}
+      {requiredGaps.length > 0 && <section><strong>Unresolved EVIDENCE_GAP</strong><ul>{requiredGaps.map((item: Record<string, any>) => <li key={`${item.code}-${item.input_pointer}`}>{item.code}: {item.description} · {item.input_pointer}</li>)}</ul></section>}
+      {scoreScopeLine(score)}
+      <footer><code>{score.contract_version}</code><span>{ranking.cohort_id}</span><span>rank отсутствует · {ranking.status}</span></footer>
+    </section>;
+  }
+  return <section className="wide viability-summary" aria-labelledby="viability-score-title">
+    <header><div><p className="eyebrow">COMPARATIVE PRELAUNCH PRIORITY / NOT A PREDICTION</p><h3 id="viability-score-title"><strong>{score.score}</strong><span>/100</span></h3></div><div><b>Rank {score.rank}{score.tied_draft_ids?.length > 1 ? " · semantic tie" : ""}</b><small>Sensitivity {score.score_lower}–{score.score_upper}</small></div><em>Не прогноз эффективности</em></header>
+    <p>Детерминированный сравнительный pre-launch priority только для exact Recommendation Set и capability cohort. Landing advisory, post-launch outcomes и calibration не участвуют.</p>
+    <div className="ranking-lineage"><strong>{ranking.cohort_id}</strong><span>{ranking.comparable_set_id}</span><small>{ranking.recommendation_set_id} · stable ID влияет только на display order</small></div>
+    {typeof deltaValue === "number" && <div className="score-delta"><strong>После ручной правки: {deltaValue > 0 ? "+" : ""}{deltaValue} балл.</strong><span>Полный пересчёт на тех же frozen policy inputs.</span></div>}
+    <div className="viability-bars">{dimensions.map(([name, item]) => <div key={name}><span>{viabilityDimensionLabels[name] || name}</span><i><b style={{ width: `${Math.max(0, Math.min(100, Number(item.value || 0)))}%` }} /></i><strong>{Math.round(Number(item.value || 0))}</strong><small>{item.weight_percent}% · {Number(item.weighted_contribution || 0).toFixed(2)} pt · {item.state}</small></div>)}</div>
+    {scoreScopeLine(score)}
+    <details><summary>Contributions, evidence pointers, unknown midpoint и sensitivity</summary><div className="viability-detail">
+      <p><strong>Sensitivity:</strong> unknown dimensions {score.sensitivity?.unknown_dimensions?.length ? score.sensitivity.unknown_dimensions.join(" · ") : "нет"}; midpoint 50; lower recomputes unknown dimensions at 0; upper at 100; known dimensions remain fixed.</p>
+      {optionalGaps.length > 0 && <p><strong>Optional unavailable inputs:</strong> {optionalGaps.map((item: Record<string, any>) => item.code).join(" · ")}. Они не являются fabricated evidence.</p>}
+      {dimensions.map(([name, item]) => <section key={name}><strong>{viabilityDimensionLabels[name] || name} · raw {item.value} · weight {item.weight_percent}% → {Number(item.weighted_contribution || 0).toFixed(2)} points · {item.state}</strong>
+        <ul>{(item.features || []).map((feature: Record<string, any>, index: number) => <li key={`${name}-${feature.rule}-${index}`}><span>{feature.rule} · {feature.input_pointers?.join(" · ")} · claims {feature.claim_ids?.join(", ") || "none"} · evidence {feature.evidence_ids?.join(", ") || "none"}</span><b>{feature.value} · {feature.status}{feature.midpoint_applied ? " · midpoint 50" : ""}</b></li>)}</ul>
+      </section>)}
+    </div></details>
+    <section className="score-threshold"><strong>Visibility decision · {visibility.reason || "REVIEW_VISIBLE"}</strong><p>{visibility.decision} · upper {gates.sensitivity_upper} &lt; 45: {String(gates.upper_below_threshold)} · evidence quality {gates.evidence_quality} ≥ 60: {String(gates.evidence_quality_sufficient)} · unresolved gap: {String(gates.unresolved_evidence_gap)} · structural reason: {gates.structural_reason || "none"}</p></section>
+    <footer><code>{score.contract_version}</code><span>{String(score.fingerprints?.input || "").slice(0, 24)}…</span><span>landing=false · post-launch=false · calibration=false</span></footer>
   </section>;
 }

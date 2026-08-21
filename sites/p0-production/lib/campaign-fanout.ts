@@ -286,7 +286,15 @@ function changedPointers(left: unknown, right: unknown, path = "/direct"): strin
 }
 
 export async function fingerprintDirectProjection(projection: Record<string, unknown>) {
-  return sha256(projection.direct);
+  const direct = projection.direct && typeof projection.direct === "object" && !Array.isArray(projection.direct)
+    ? projection.direct as Record<string, unknown>
+    : {};
+  const providerPublishSurface = Object.fromEntries(
+    ["campaign", "ad_group", "keyword", "ad", "sitelink_sets"]
+      .filter((field) => Object.hasOwn(direct, field))
+      .map((field) => [field, direct[field]]),
+  );
+  return sha256(providerPublishSurface);
 }
 
 export function evaluateCoreDirectCapability(snapshot?: DirectCapabilitySnapshot | null) {
@@ -797,7 +805,31 @@ export async function buildCampaignRecommendationSet({
     }
   }
 
+  const recommendationSetId = `recommendation-set-${(await sha256({
+    contract: FAN_OUT_CONTRACT,
+    strategy_revision_id: strategyRevisionId,
+    evidence_snapshot_id: analyticsEvidence?.snapshot_id ?? null,
+    capability_profile: `${CORE_DIRECT_CAPABILITY_PROFILE.profile_id}@${CORE_DIRECT_CAPABILITY_PROFILE.profile_version}`,
+    capability_snapshot_id: directCapabilitySnapshot?.snapshot_id ?? null,
+    playbook_release_digest: playbook.release?.content_digest ?? null,
+    exact_generated_candidates: compiled.map((draft) => ({
+      draft_id: draft.draft_id,
+      draft_revision_id: draft.draft_revision_id,
+      publish_fingerprint: draft.publish_fingerprint,
+      capability_profile_id: draft.capability_profile_id,
+      capability_profile_version: draft.capability_profile_version,
+      conditional_selection: draft.capability_selection,
+      structural_visibility: draft.visibility,
+      structural_reason: draft.suppression_reason,
+    })).sort((left, right) => left.draft_id.localeCompare(right.draft_id)),
+    non_draft_candidate_audit: candidateAudit.map((candidate) => ({
+      candidate_id: candidate.candidate_id,
+      visibility: candidate.visibility,
+      reason_code: candidate.reason_code,
+    })).sort((left, right) => left.candidate_id.localeCompare(right.candidate_id)),
+  })).slice("sha256:".length, "sha256:".length + 20)}`;
   const scored = await scoreCampaignDrafts({
+    recommendationSetId,
     drafts: compiled,
     model,
     strategy,
@@ -826,15 +858,6 @@ export async function buildCampaignRecommendationSet({
   const suppressedLeafIds = leafLedger.filter((leaf) => !representedLeafIds.has(leaf.leaf_id)).map((leaf) => leaf.leaf_id);
   const uncoveredLeafIds = leafLedger.filter((leaf) => !text(leaf.terminal_disposition)).map((leaf) => leaf.leaf_id);
   const generatedReconciles = generatedCount === candidateAudit.length && auditedDraftCount === scored.length;
-  const recommendationSetId = `recommendation-set-${(await sha256({
-    strategy_revision_id: strategyRevisionId,
-    evidence_snapshot_id: analyticsEvidence?.snapshot_id ?? null,
-    capability_profile: `${CORE_DIRECT_CAPABILITY_PROFILE.profile_id}@${CORE_DIRECT_CAPABILITY_PROFILE.profile_version}`,
-    capability_snapshot_id: directCapabilitySnapshot?.snapshot_id ?? null,
-    playbook_release_digest: playbook.release?.content_digest ?? null,
-    publish_fingerprints: scored.map((draft) => draft.publish_fingerprint),
-    candidate_audit: candidateAudit,
-  })).slice("sha256:".length, "sha256:".length + 20)}`;
   return {
     schema_version: "campaign-recommendation-set-v3",
     recommendation_set_id: recommendationSetId,
@@ -900,8 +923,22 @@ export async function buildCampaignRecommendationSet({
     score_contract: {
       version: "viability-score/1.0.0",
       status: "UNCALIBRATED_POLICY_V1",
-      semantics: "COMPARATIVE_PRELAUNCH_PRIORITY_NOT_A_FORECAST",
-      landing_audit_used: false,
+      semantics: "COMPARATIVE PRELAUNCH PRIORITY / NOT A PREDICTION",
+      weights_percent: {
+        demand: 18,
+        cost: 12,
+        economics: 20,
+        offer_audience_fit: 18,
+        direct_feasibility: 12,
+        measurement_readiness: 10,
+        evidence_quality: 10,
+      },
+      weight_sum_percent: 100,
+      optional_unknown_midpoint: 50,
+      sensitivity_unknown_dimension_values: [0, 100],
+      landing_advisory_used: false,
+      post_launch_inputs_used: false,
+      calibration_used: false,
     },
     drafts: scored,
   };

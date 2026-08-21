@@ -85,3 +85,77 @@ test("Recommendation Set UI distinguishes comparator and one-factor improvement 
   assert.match(blockers, /CONDITIONAL_CAPABILITY_EVIDENCE_MISSING/);
   assert.match(blockers, /\/direct\/keyword\/AutotargetingSettings/);
 });
+
+function scoreFixture(overrides = {}) {
+  const feature = { rule: "known-v1", input_pointers: ["/draft/market_evidence/frequency"], value: 80, status: "KNOWN", midpoint_applied: false, claim_ids: ["claim-demand"], evidence_ids: ["evidence-demand"] };
+  const dimension = (value, weight) => ({ state: "KNOWN", value, lower: value, upper: value, weight: weight / 100, weight_percent: weight, weighted_contribution: value * weight / 100, evidence_pointers: [{ input_pointer: "/draft/input", claim_ids: [], evidence_ids: [] }], features: [feature] });
+  return {
+    contract_version: "viability-score/1.0.0",
+    eligibility: { status: "ELIGIBLE", blockers: [] },
+    evidence_gaps: { status: "RESOLVED", required: [], optional: [{ code: "PRELAUNCH_COST_UNAVAILABLE" }] },
+    score: 72,
+    score_raw: 72,
+    score_lower: 62,
+    score_upper: 82,
+    rank: 1,
+    tied_draft_ids: ["draft-a", "draft-b"],
+    ranking: { status: "RANKED", recommendation_set_id: "recommendation-set-fixed", cohort_id: "capability-cohort:core", comparable_set_id: "comparable-set:core" },
+    dimensions: {
+      demand: dimension(80, 18),
+      cost: { ...dimension(50, 12), state: "UNKNOWN", lower: 0, upper: 100, features: [{ ...feature, rule: "unknown-cost-v1", status: "UNKNOWN", value: 50, midpoint_applied: true }] },
+      economics: dimension(70, 20),
+      offer_audience_fit: dimension(75, 18),
+      direct_feasibility: dimension(100, 12),
+      measurement_readiness: dimension(60, 10),
+      evidence_quality: dimension(80, 10),
+    },
+    scopes: {
+      frequency: { status: "AVAILABLE", semantics: "LOWER_BOUND_OBSERVED_TOP_ROWS", observed_unique_count: 67, source: "YANDEX_WORDSTAT_V1", method: "/v1/topRequests", snapshot_batch_id: "batch-1", operator_profiles: ["BROAD_CONTAINING"], region_ids: [225], devices: ["desktop"] },
+      cost: { status: "UNAVAILABLE", semantics: "ONE_QUALIFIED_PRELAUNCH_SOURCE; SOURCES_NOT_AVERAGED", source: null },
+    },
+    sensitivity: { unknown_dimensions: ["cost"] },
+    visibility: { reason: null, decision: "REVIEW_VISIBLE", gates: { sensitivity_upper: 82, upper_below_threshold: false, evidence_quality: 80, evidence_quality_sufficient: true, unresolved_evidence_gap: false, structural_reason: null } },
+    fingerprints: { input: `sha256:${"a".repeat(64)}` },
+    ...overrides,
+  };
+}
+
+test("score disclosure names comparative-not-predictive semantics, contributions, scopes, ties, cohort, sensitivity and threshold", async (t) => {
+  const { ViabilityScoreDisclosure } = await loadComponents(t);
+  const html = renderToStaticMarkup(React.createElement(ViabilityScoreDisclosure, { score: scoreFixture() }));
+  assert.match(html, /COMPARATIVE PRELAUNCH PRIORITY \/ NOT A PREDICTION/);
+  assert.match(html, /semantic tie/);
+  assert.match(html, /capability-cohort:core/);
+  assert.match(html, /comparable-set:core/);
+  assert.match(html, /Sensitivity 62–82/);
+  assert.match(html, /midpoint 50/);
+  assert.match(html, /lower recomputes unknown dimensions at 0/);
+  assert.match(html, /Спрос · raw 80 · weight 18% → 14.40 points · KNOWN/);
+  assert.match(html, /claim-demand/);
+  assert.match(html, /evidence-demand/);
+  assert.match(html, /LOWER_BOUND_OBSERVED_TOP_ROWS/);
+  assert.match(html, /YANDEX_WORDSTAT_V1/);
+  assert.match(html, /SOURCES_NOT_AVERAGED/);
+  assert.match(html, /upper 82 &lt; 45: false/);
+  assert.match(html, /landing=false · post-launch=false · calibration=false/);
+});
+
+test("blocked score disclosure keeps hard blockers and unresolved gaps separate and has no rank", async (t) => {
+  const { ViabilityScoreDisclosure } = await loadComponents(t);
+  const score = scoreFixture({
+    eligibility: { status: "BLOCKED_UNKNOWN", blockers: [{ code: "EVIDENCE_HARD_BLOCKER", remediation: "Resolve Direct evidence", input_pointer: "/analytics_evidence" }] },
+    evidence_gaps: { status: "UNRESOLVED", required: [{ code: "DEMAND_EVIDENCE_GAP", description: "Demand unavailable, not zero", input_pointer: "/draft/market_evidence_status" }], optional: [] },
+    score: null,
+    rank: null,
+    dimensions: null,
+    ranking: { status: "BLOCKED_EVIDENCE_GAP", cohort_id: "capability-cohort:core" },
+  });
+  const html = renderToStaticMarkup(React.createElement(ViabilityScoreDisclosure, { score }));
+  assert.match(html, /Hard eligibility и required EVIDENCE_GAP оценены до score/);
+  assert.match(html, /EVIDENCE_HARD_BLOCKER/);
+  assert.match(html, /Unresolved EVIDENCE_GAP/);
+  assert.match(html, /DEMAND_EVIDENCE_GAP/);
+  assert.match(html, /rank отсутствует/);
+  assert.match(html, /Frequency scope/);
+  assert.match(html, /Cost scope/);
+});

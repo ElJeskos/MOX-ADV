@@ -109,7 +109,7 @@ body::before {
 .context-strip span, .research-strip span { color: var(--muted); font-size: 8px; text-transform: uppercase; }
 .context-strip strong, .research-strip strong { margin-top: 9px; font-size: 14px; }
 .context-strip small, .research-strip small { margin-top: 6px; color: var(--muted); font-size: 7px; line-height: 1.5; }
-.recommendation-governance { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.recommendation-governance { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
 .recommendation-governance > div { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: white; }
 .recommendation-governance strong, .recommendation-governance code, .recommendation-governance small { display: block; overflow-wrap: anywhere; }
 .recommendation-governance strong { font-size: 8px; text-transform: uppercase; }
@@ -365,7 +365,7 @@ body::before {
 .score-delta { display: flex; gap: 12px; margin-top: 9px; padding: 8px 10px; border-radius: 6px; background: white; font-size: 8px; }
 .score-delta span { color: var(--muted); }
 .viability-bars { display: grid; gap: 5px; margin-top: 12px; }
-.viability-bars > div { display: grid; grid-template-columns: 110px 1fr 26px 26px; gap: 8px; align-items: center; }
+.viability-bars > div { display: grid; grid-template-columns: 130px 1fr 26px 130px; gap: 8px; align-items: center; }
 .viability-bars span, .viability-bars strong, .viability-bars small { font-size: 7px; }
 .viability-bars small { color: var(--muted); text-align: right; }
 .viability-bars i { display: block; overflow: hidden; height: 5px; border-radius: 999px; background: #d7e5db; }
@@ -377,9 +377,17 @@ body::before {
 .viability-detail section { padding: 8px; border-radius: 6px; background: white; }
 .viability-detail section > strong { font-size: 7px; }
 .viability-detail ul { display: grid; gap: 3px; margin: 6px 0 0; padding: 0; list-style: none; }
-.viability-detail li { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 6px; }
+.viability-detail li { display: flex; justify-content: space-between; gap: 8px; min-width: 0; color: var(--muted); font-size: 6px; }
+.viability-detail li span { min-width: 0; overflow-wrap: anywhere; }
 .viability-detail li b { color: var(--ink); white-space: nowrap; }
-.viability-summary > footer { display: flex; gap: 10px; margin-top: 8px; color: var(--muted); font-size: 6px; }
+.ranking-lineage { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; margin-top: 9px; padding: 8px 10px; border-radius: 6px; background: white; overflow-wrap: anywhere; }
+.ranking-lineage strong, .ranking-lineage span, .ranking-lineage small { font-size: 7px; }
+.ranking-lineage small { grid-column: 1 / -1; color: var(--muted); }
+.score-scopes { display: grid; gap: 4px; margin-top: 9px; padding: 8px 10px; border-radius: 6px; background: white; overflow-wrap: anywhere; }
+.score-scopes p, .score-threshold p { margin: 0; color: var(--muted); font-size: 7px; line-height: 1.5; }
+.score-threshold { margin-top: 9px; padding: 8px 10px; border: 1px solid #c7dacd; border-radius: 6px; overflow-wrap: anywhere; }
+.score-threshold strong { font-size: 7px; }
+.viability-summary > footer { display: flex; gap: 10px; min-width: 0; margin-top: 8px; color: var(--muted); font-size: 6px; overflow-wrap: anywhere; }
 .viability-summary > footer code { margin-right: auto; }
 
 .actions { display: flex; gap: 9px; align-items: center; margin-top: 6px; padding-top: 17px; border-top: 1px solid var(--line); }

@@ -1,6 +1,6 @@
 {
   "schema_version": "campaign-recommendation-set-v3",
-  "recommendation_set_id": "recommendation-set-eae5d625014af42e5d1e",
+  "recommendation_set_id": "recommendation-set-f567d5e328dcadeb7f90",
   "capability_profile": "direct-v501-unified-search-explicit-text@1.0.0",
   "playbook_release": "test-curated-release-default@1.0.0",
   "coverage": {

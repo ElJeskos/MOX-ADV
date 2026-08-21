@@ -637,7 +637,7 @@ test("Strategy and Model material changes cascade while technical normalization 
     strategy: result.state.strategy.strategy_revision_id,
     recommendation: result.state.recommendation_set.recommendation_set_id,
     draft: result.state.draft.draft_revision_id,
-    shortlist: result.state.shortlist.shortlist_revision_id,
+    shortlist: null,
     snapshot: result.state.analytics_evidence_snapshot.snapshot_id,
   };
 
@@ -654,7 +654,7 @@ test("Strategy and Model material changes cascade while technical normalization 
   assert.equal(result.state.strategy.strategy_revision_id, original.strategy);
   assert.equal(result.state.recommendation_set.recommendation_set_id, original.recommendation);
   assert.equal(result.state.draft.draft_revision_id, original.draft);
-  assert.equal(result.state.shortlist.shortlist_revision_id, original.shortlist);
+  assert.equal(result.state.shortlist, null);
 
   const tabA = await application.query("owner");
   const tabB = await application.query("owner");
@@ -860,10 +860,11 @@ test("one query/command contract drives and persists the current five-step path"
       expected_revision: result.revision,
       confirmation: "CREATE_NON_SERVING_CAMPAIGN",
     }),
-    (error) => error instanceof P0ApplicationError && error.code === "P0_PUBLISH_BLOCKED",
+    (error) => error instanceof P0ApplicationError && error.code === "P0_TRANSITION_INVALID",
   );
   const afterBlockedWrite = await restarted.query("owner");
   assert.equal(afterBlockedWrite.revision, 6);
+  assert.equal(afterBlockedWrite.state.shortlist, null);
   assert.equal(afterBlockedWrite.state.campaign, null);
 });
 
@@ -1220,7 +1221,7 @@ test("a material Context change names and invalidates downstream lineage while n
   const lineage = {
     strategy: result.state.strategy.strategy_revision_id,
     draft: result.state.draft.draft_revision_id,
-    shortlist: result.state.shortlist.shortlist_revision_id,
+    shortlist: null,
   };
   const staleContext = context();
   staleContext.metrika.observed_at = "2026-08-21T09:00:00.000Z";
@@ -1231,7 +1232,7 @@ test("a material Context change names and invalidates downstream lineage while n
       expected_revision: result.revision,
       confirmation: "CREATE_NON_SERVING_CAMPAIGN",
     }),
-    (error) => error instanceof P0ApplicationError && error.code === "P0_CONTEXT_PREFLIGHT_BLOCKED",
+    (error) => error instanceof P0ApplicationError && error.code === "P0_TRANSITION_INVALID",
   );
   assert.equal((await store.load("owner")).revision, result.revision);
 
@@ -1242,7 +1243,7 @@ test("a material Context change names and invalidates downstream lineage while n
   });
   assert.equal(result.state.strategy.strategy_revision_id, lineage.strategy);
   assert.equal(result.state.draft.draft_revision_id, lineage.draft);
-  assert.equal(result.state.shortlist.shortlist_revision_id, lineage.shortlist);
+  assert.equal(result.state.shortlist, null);
   assert.equal(result.state.context_state.last_material_change, null);
 
   const changedResearch = adapters({
@@ -1304,7 +1305,7 @@ test("compare-and-swap rejects a stale tab without changing the persisted docume
   assert.equal(current.state.site_analysis.url, "https://owner.example/");
 });
 
-test("legacy Sites state migrates with lineage before an external outcome survives restart", async (t) => {
+test("legacy Sites state migrates with lineage but cannot bypass current eligibility into an external write", async (t) => {
   const { directory, store } = await fixture();
   t.after(() => rm(directory, { recursive: true, force: true }));
   const legacy = {
@@ -1354,29 +1355,7 @@ test("legacy Sites state migrates with lineage before an external outcome surviv
     value_json: JSON.stringify(legacy),
   });
 
-  let dispatchRevision = null;
-  let application = new P0Application({
-    store,
-    adapters: adapters({
-      async createExternalOutcome({ projection }) {
-        const persisted = await store.load("owner");
-        const document = JSON.parse(persisted.value_json);
-        assert.equal(persisted.revision, 9);
-        assert.equal(document.external_write_intent.publish_fingerprint, document.draft.publish_fingerprint);
-        assert.equal(document.campaign, null);
-        dispatchRevision = persisted.revision;
-        return {
-          execution_id: "execution-1",
-          campaign_id: "9007199254740993",
-          campaign_state: "SUSPENDED",
-          moderation_status: "MODERATION",
-          spend_started: false,
-          status: "MODERATION_PENDING",
-          projection_schema_version: projection.schema_version,
-        };
-      },
-    }),
-  });
+  let application = new P0Application({ store, adapters: adapters() });
   let result = await application.query("owner");
   assert.equal(result.revision, 8);
   assert.equal(result.state.schema_version, P0_DOCUMENT_SCHEMA);
@@ -1386,34 +1365,21 @@ test("legacy Sites state migrates with lineage before an external outcome surviv
   assert.match(result.state.draft.publish_fingerprint, /^sha256:[a-f0-9]{64}$/u);
   assert.equal(result.revision_history.at(-1).revision, 7);
 
-  result = await application.command("owner", {
-    action: "confirm_creation",
-    expected_revision: result.revision,
-    confirmation: "CREATE_NON_SERVING_CAMPAIGN",
-  });
-  assert.equal(dispatchRevision, 9);
-  assert.equal(result.revision, 10);
-  assert.equal(result.state.campaign.campaign_state, "SUSPENDED");
-  assert.equal(result.state.campaign.spend_started, false);
-
+  assert.equal(result.state.shortlist, null);
+  assert.equal(result.workflow.allowed_commands.includes("confirm_creation"), false);
+  await assert.rejects(
+    application.command("owner", {
+      action: "confirm_creation",
+      expected_revision: result.revision,
+      confirmation: "CREATE_NON_SERVING_CAMPAIGN",
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_TRANSITION_INVALID",
+  );
   application = new P0Application({ store, adapters: adapters() });
   result = await application.query("owner");
-  assert.equal(result.revision, 10);
-  assert.equal(result.state.campaign.execution_id, "execution-1");
+  assert.equal(result.revision, 8);
+  assert.equal(result.state.campaign, null);
   assert.equal(result.state.draft.strategy_revision_id, result.state.strategy.strategy_revision_id);
-  assert.deepEqual(result.workflow.allowed_commands, []);
-
-  for (const action of ["analyze_site", "reset"]) {
-    await assert.rejects(
-      application.command("owner", {
-        action,
-        expected_revision: result.revision,
-        ...(action === "analyze_site" ? { url: "https://changed.example/" } : {}),
-      }),
-      (error) => error instanceof P0ApplicationError && error.code === "P0_TRANSITION_INVALID",
-    );
-  }
-  assert.equal((await application.query("owner")).revision, 10);
 });
 
 test("legacy state with an outcome but no Draft lineage is rejected explicitly", async (t) => {

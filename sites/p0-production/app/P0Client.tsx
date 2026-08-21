@@ -6,7 +6,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { weeklyBudgetValidationMessage } from "../lib/direct-limits";
 import { landingAdvisoryPriorities } from "../lib/landing-advisory";
 import { MarketEvidenceDisclosure } from "./MarketEvidenceDisclosure";
-import { DraftPublicationBlockers, DraftTreatmentDelta, DraftVariantLabel, RecommendationSetDisclosure } from "./RecommendationSetDisclosure";
+import { DraftPublicationBlockers, DraftTreatmentDelta, DraftVariantLabel, RecommendationSetDisclosure, ViabilityScoreDisclosure } from "./RecommendationSetDisclosure";
 
 type Payload = {
   contract: { name: string; version: string; document_schema: string };
@@ -479,6 +479,9 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   const [selectedDraftId, setSelectedDraftId] = useState(String(existing.draft_id || visibleDrafts[0]?.draft_id || ""));
   const generated = visibleDrafts.find((item: Record<string, any>) => item.draft_id === selectedDraftId) || visibleDrafts[0] || existing;
   const selected = existing.draft_id === generated.draft_id ? { ...generated, ...existing } : generated;
+  const selectedShortlistEligible = selected?.shortlist_eligible === true
+    && selected?.viability_score?.eligibility?.status === "ELIGIBLE"
+    && selected?.viability_score?.evidence_gaps?.status === "RESOLVED";
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -496,7 +499,9 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
         <span className="draft-card-head"><DraftVariantLabel draft={item} /><em>{item.viability_score?.score ?? "—"}<small>/100</small></em></span>
         <strong>{item.dimensions?.keyword_cluster}</strong>
         <p>{item.dimensions?.offer}</p>
-        <small>{item.viability_score?.rank ? `Rank ${item.viability_score.rank} · диапазон ${item.viability_score.score_lower}–${item.viability_score.score_upper}` : "Score заблокирован hard eligibility"}</small>
+        <small>COMPARATIVE PRELAUNCH PRIORITY · NOT A PREDICTION</small>
+        <small>{item.viability_score?.rank ? `Rank ${item.viability_score.rank}${item.viability_score?.tied_draft_ids?.length > 1 ? " · semantic tie" : ""} · sensitivity ${item.viability_score.score_lower}–${item.viability_score.score_upper}` : "Score и rank заблокированы до eligibility/evidence"}</small>
+        <small>{item.viability_score?.ranking?.cohort_id || "capability cohort unavailable"}</small>
         <small>{item.market_evidence_status === "EVIDENCE_GAP" ? "REVIEW ONLY · demand evidence отсутствует" : item.market_evidence_status}</small>
         <DraftTreatmentDelta draft={item} />
       </button>)}
@@ -506,43 +511,17 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
       <div className="wide draft-lineage"><strong>{selected.variant?.kind === "CONTROL" ? selected.variant?.control_basis?.kind : selected.variant?.hypothesis?.changed_family}</strong><span>{selected.strategy_revision_id} · {selected.draft_revision_id} · {String(selected.publish_fingerprint || "").slice(0, 18)}…</span><small>{selected.playbook_release_id}@{selected.playbook_release_version} · {selected.capability_profile_id}@{selected.capability_profile_version}</small></div>
       <DraftPublicationBlockers draft={selected} />
       {selected.market_evidence && <div className="wide"><MarketEvidenceDisclosure evidence={selected.market_evidence} context="draft" /></div>}
-      <ViabilityDisclosure score={selected.viability_score} delta={selected.score_delta} />
+      <ViabilityScoreDisclosure score={selected.viability_score} delta={selected.score_delta} />
       <label><span>Название кампании</span><input name="campaign_name" required defaultValue={selected.campaign_name} /></label>
       <label><span>Название группы объявлений</span><input name="group_name" required defaultValue={selected.group_name} /></label>
       <label className="wide"><span>Ключевая фраза</span><input name="keyword" required defaultValue={selected.keyword} /></label>
       <label className="wide"><span>Минус-фразы</span><input name="negative_keywords" required defaultValue={selected.negative_keywords} /></label>
       <label className="wide"><span>Заголовок объявления</span><input name="ad_title" maxLength={56} required defaultValue={selected.ad_title} /><small>До 56 символов.</small></label>
       <Field wide label="Текст объявления" name="ad_text" maxLength={81} value={selected.ad_text}><small>До 81 символа; слова не обрезаются.</small></Field>
-      <div className="wide"><Actions revision={payload.revision} label="Выбрать и зафиксировать проекцию" back={back} submit /></div>
+      {!selectedShortlistEligible && <div className="wide preflight-blocked"><strong>Review only</strong><p>Hard blocker или unresolved EVIDENCE_GAP нельзя обойти score, редактированием или добавлением в shortlist.</p></div>}
+      <div className="wide"><Actions revision={payload.revision} label={selectedShortlistEligible ? "Выбрать и зафиксировать проекцию" : "Сохранить review-правки без shortlist"} back={back} submit /></div>
     </form>}
   </>;
-}
-
-const viabilityDimensionLabels: Record<string, string> = {
-  demand: "Спрос",
-  cost: "Стоимость",
-  economics: "Экономика",
-  offer_audience_fit: "Соответствие",
-  direct_feasibility: "Direct",
-  measurement: "Измерение",
-  evidence_quality: "Evidence",
-};
-
-function ViabilityDisclosure({ score, delta }: { score: Record<string, any> | undefined; delta: Record<string, any> | undefined }) {
-  const blockers = Array.isArray(score?.eligibility?.blockers) ? score.eligibility.blockers : [];
-  if (!score || score.score === null || score.score === undefined) {
-    return <section className="wide viability-summary blocked"><strong>Viability score не рассчитан</strong><p>Hard eligibility или обязательный snapshot не пройден. Blocker нельзя компенсировать средним баллом.</p>{blockers.length > 0 && <ul>{blockers.map((item: Record<string, any>) => <li key={`${item.code}-${item.input_pointer}`}>{item.code}: {item.remediation}</li>)}</ul>}</section>;
-  }
-  const dimensions = Object.entries(score.dimensions || {}) as Array<[string, Record<string, any>]>;
-  const deltaValue = delta?.score?.delta;
-  return <section className="wide viability-summary" aria-labelledby="viability-score-title">
-    <header><div><p className="eyebrow">UNCALIBRATED POLICY V1</p><h3 id="viability-score-title"><strong>{score.score}</strong><span>/100</span></h3></div><div><b>Rank {score.rank}{score.tied_draft_ids?.length > 1 ? " · ничья" : ""}</b><small>Диапазон неопределённости {score.score_lower}–{score.score_upper}</small></div><em>Не прогноз эффективности</em></header>
-    <p>Детерминированный сравнительный приоритет eligible Campaign Drafts. Landing audit не участвует; hard blockers оцениваются отдельно.</p>
-    {typeof deltaValue === "number" && <div className="score-delta"><strong>После ручной правки: {deltaValue > 0 ? "+" : ""}{deltaValue} балл.</strong><span>Полный пересчёт на тех же frozen inputs и policy.</span></div>}
-    <div className="viability-bars">{dimensions.map(([name, item]) => <div key={name}><span>{viabilityDimensionLabels[name] || name}</span><i><b style={{ width: `${Math.max(0, Math.min(100, Number(item.value || 0)))}%` }} /></i><strong>{Math.round(Number(item.value || 0))}</strong><small>{Number(item.weight || 0) * 100}%</small></div>)}</div>
-    <details><summary>Почему такой балл · evidence и missing data</summary><div className="viability-detail"><p><strong>Missing dimensions:</strong> {score.explanation?.missing_dimensions?.length ? score.explanation.missing_dimensions.map((item: string) => viabilityDimensionLabels[item] || item).join(" · ") : "нет"}. Unknown получает midpoint 50 только для point score и расширяет bounds, а не становится наблюдаемым фактом.</p>{dimensions.map(([name, item]) => <section key={name}><strong>{viabilityDimensionLabels[name] || name} · {Number(item.weight || 0) * 100}% → {Number(item.weighted_points || 0).toFixed(2)} points</strong><ul>{(item.features || []).map((feature: Record<string, any>, index: number) => <li key={`${name}-${feature.rule}-${index}`}><span>{feature.rule}</span><b>{Math.round(Number(feature.value || 0))} · {feature.status}</b></li>)}</ul></section>)}</div></details>
-    <footer><code>{score.contract_version}</code><span>{String(score.fingerprints?.input || "").slice(0, 18)}…</span><span>landing_audit_used=false</span></footer>
-  </section>;
 }
 
 function ConfirmationStep({ payload, apply, busy, back, editStrategy }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; busy: boolean; back: () => void; editStrategy: () => void }) {

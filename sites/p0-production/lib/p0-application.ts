@@ -38,6 +38,7 @@ import {
 } from "./campaign-strategy.ts";
 import {
   explainScoreDelta,
+  recommendationSetRevisionId,
   scoreCampaignDrafts,
 } from "./campaign-viability.ts";
 import { validateWeeklyBudgetRub } from "./direct-limits.ts";
@@ -1247,21 +1248,31 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
       } as typeof recommendationSet.drafts[number];
       changed = true;
     }
-    if (!state.shortlist) {
-      state.shortlist = {
-        schema_version: "p0-shortlist-v1",
-        shortlist_revision_id: `p0-shortlist-r${Math.max(1, revision)}`,
-        strategy_revision_id: String(strategy.strategy_revision_id ?? ""),
-        draft_revision_ids: [String(draft.draft_revision_id ?? "")],
-        updated_at: updatedAt,
-      };
+    const draftScore = record(draft.viability_score);
+    const shortlistEligible = draft.shortlist_eligible === true
+      && record(draftScore.eligibility).status === "ELIGIBLE"
+      && record(draftScore.evidence_gaps).status === "RESOLVED"
+      && draft.visibility === "VISIBLE";
+    if (!shortlistEligible && state.shortlist) {
+      state.shortlist = null;
       changed = true;
-    }
-    if (
-      state.shortlist.strategy_revision_id !== strategy.strategy_revision_id
-      || !state.shortlist.draft_revision_ids.includes(String(draft.draft_revision_id ?? ""))
-    ) {
-      lineageError("shortlist ссылается на другую Strategy или Draft revision.");
+    } else if (shortlistEligible) {
+      if (!state.shortlist) {
+        state.shortlist = {
+          schema_version: "p0-shortlist-v1",
+          shortlist_revision_id: `p0-shortlist-r${Math.max(1, revision)}`,
+          strategy_revision_id: String(strategy.strategy_revision_id ?? ""),
+          draft_revision_ids: [String(draft.draft_revision_id ?? "")],
+          updated_at: updatedAt,
+        };
+        changed = true;
+      }
+      if (
+        state.shortlist.strategy_revision_id !== strategy.strategy_revision_id
+        || !state.shortlist.draft_revision_ids.includes(String(draft.draft_revision_id ?? ""))
+      ) {
+        lineageError("shortlist ссылается на другую Strategy или Draft revision.");
+      }
     }
   }
 
@@ -1828,8 +1839,11 @@ export class P0Application {
         publish_projection: projection,
         publish_fingerprint: await fingerprintDirectProjection(projection),
       } as typeof generated;
+      const exactDraftRevision = recommendationSet.drafts.map((item) => item.draft_id === draftId ? editedDraft : item);
+      const rescoredRecommendationSetId = await recommendationSetRevisionId(recommendationSet.recommendation_set_id, exactDraftRevision);
       const rescored = await scoreCampaignDrafts({
-        drafts: recommendationSet.drafts.map((item) => item.draft_id === draftId ? editedDraft : item),
+        recommendationSetId: rescoredRecommendationSetId,
+        drafts: exactDraftRevision,
         model: state.business_model as unknown as Record<string, unknown>,
         strategy: state.strategy,
         analyticsEvidence: scoreEvidence as unknown as Record<string, unknown>,
@@ -1841,14 +1855,36 @@ export class P0Application {
         ...currentDraft,
         score_delta: explainScoreDelta(generated.viability_score, currentDraft.viability_score, changedPointers),
       };
+      recommendationSet.recommendation_set_id = rescoredRecommendationSetId;
       recommendationSet.drafts = rescored.map((item) => item.draft_id === draftId ? state.draft as typeof item : item);
-      state.shortlist = {
-        schema_version: "p0-shortlist-v1",
-        shortlist_revision_id: `p0-shortlist-r${current.revision + 1}`,
-        strategy_revision_id: String(state.strategy.strategy_revision_id ?? ""),
-        draft_revision_ids: [String(state.draft.draft_revision_id ?? "")],
-        updated_at: editedAt,
-      };
+      recommendationSet.candidate_audit = recommendationSet.candidate_audit.map((candidate) => {
+        if (candidate.candidate_type !== "DRAFT" || !candidate.draft_id) return candidate;
+        const rescoredDraft = recommendationSet.drafts.find((item) => item.draft_id === candidate.draft_id);
+        return rescoredDraft ? {
+          ...candidate,
+          visibility: rescoredDraft.visibility,
+          reason_code: rescoredDraft.visibility === "VISIBLE"
+            ? "VISIBLE:GENERATED_DRAFT"
+            : String(rescoredDraft.suppression_reason || "HIDDEN:STRUCTURAL"),
+        } : candidate;
+      });
+      recommendationSet.coverage.visible_count = recommendationSet.candidate_audit.filter((candidate) => candidate.visibility === "VISIBLE").length;
+      recommendationSet.coverage.hidden_count = recommendationSet.candidate_audit.length - Number(recommendationSet.coverage.visible_count);
+      recommendationSet.coverage.visible_drafts = recommendationSet.drafts.filter((item) => item.visibility === "VISIBLE").length;
+      recommendationSet.coverage.hidden_drafts = recommendationSet.drafts.length - Number(recommendationSet.coverage.visible_drafts);
+      const currentScore = record(state.draft.viability_score);
+      state.shortlist = state.draft.shortlist_eligible === true
+        && record(currentScore.eligibility).status === "ELIGIBLE"
+        && record(currentScore.evidence_gaps).status === "RESOLVED"
+        && state.draft.visibility === "VISIBLE"
+        ? {
+            schema_version: "p0-shortlist-v1",
+            shortlist_revision_id: `p0-shortlist-r${current.revision + 1}`,
+            strategy_revision_id: String(state.strategy.strategy_revision_id ?? ""),
+            draft_revision_ids: [String(state.draft.draft_revision_id ?? "")],
+            updated_at: editedAt,
+          }
+        : null;
     } else if (action === "confirm_creation") {
       if (payload.confirmation !== "CREATE_NON_SERVING_CAMPAIGN") {
         fail("P0_CONFIRMATION_REQUIRED", "Нужно точное подтверждение создания реальной кампании с выключенными показами.");
