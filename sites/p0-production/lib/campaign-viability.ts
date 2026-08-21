@@ -8,6 +8,7 @@ const MINIMUM_HIDING_EVIDENCE_QUALITY = 60;
 const UNKNOWN_MIDPOINT = 50;
 const SCORE_LABEL = "COMPARATIVE PRELAUNCH PRIORITY / NOT A PREDICTION";
 const SCORE_HIDDEN_REASON = "HIDDEN:VIABILITY_SENSITIVITY_UPPER_BELOW_45_V1";
+const FORBIDDEN_INPUT_FIELD = /(?:landing.*advisory|advisory.*landing|post.*launch|launch.*outcome|campaign.*outcome|moderation.*outcome|outcome.*learning|calibrat)/iu;
 
 const WEIGHTS_PERCENT = {
   demand: 18,
@@ -514,7 +515,12 @@ function safeScope(value: unknown): unknown {
     if (typeof value === "string") return boundedText(value, 500);
     return value ?? null;
   }
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 32).map(([key, item]) => [boundedText(key, 100), safeScope(item)]));
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !FORBIDDEN_INPUT_FIELD.test(key))
+      .slice(0, 32)
+      .map(([key, item]) => [boundedText(key, 100), safeScope(item)]),
+  );
 }
 
 function frequencyEvidenceIds(frequency: Record<string, unknown>) {
@@ -580,15 +586,7 @@ function costObservation(draft: DraftCandidate) {
 }
 
 function disclosedCostScope(value: unknown) {
-  const scope = record(value);
-  return {
-    account: boundedText(scope.account, 255) || null,
-    phrase: boundedText(scope.phrase, 500) || null,
-    geography: boundedText(scope.geography, 255) || null,
-    placement: boundedText(scope.placement, 255) || null,
-    strategy: boundedText(scope.strategy, 255) || null,
-    season: boundedText(scope.season, 255) || null,
-  };
+  return safeScope(value);
 }
 
 function scoreScopes(draft: DraftCandidate) {

@@ -26,6 +26,7 @@ const PROVIDER_UNORDERED_ARRAY_PATHS = new Set([
   "/ad_group/NegativeKeywords/Items",
   "/campaign/UnifiedCampaign/CounterIds",
 ]);
+const FORBIDDEN_PUBLISH_FINGERPRINT_FIELD = /(?:landing.*advisory|advisory.*landing|post.*launch|launch.*outcome|campaign.*outcome|moderation.*outcome|outcome.*learning|calibrat)/iu;
 
 export const CORE_DIRECT_CAPABILITY_PROFILE = Object.freeze({
   profile_id: "direct-v501-unified-search-explicit-text",
@@ -285,6 +286,16 @@ function changedPointers(left: unknown, right: unknown, path = "/direct"): strin
   ));
 }
 
+function withoutForbiddenFingerprintFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutForbiddenFingerprintFields);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([field]) => !FORBIDDEN_PUBLISH_FINGERPRINT_FIELD.test(field))
+      .map(([field, item]) => [field, withoutForbiddenFingerprintFields(item)]),
+  );
+}
+
 export async function fingerprintDirectProjection(projection: Record<string, unknown>) {
   const direct = projection.direct && typeof projection.direct === "object" && !Array.isArray(projection.direct)
     ? projection.direct as Record<string, unknown>
@@ -292,7 +303,7 @@ export async function fingerprintDirectProjection(projection: Record<string, unk
   const providerPublishSurface = Object.fromEntries(
     ["campaign", "ad_group", "keyword", "ad", "sitelink_sets"]
       .filter((field) => Object.hasOwn(direct, field))
-      .map((field) => [field, direct[field]]),
+      .map((field) => [field, withoutForbiddenFingerprintFields(direct[field])]),
   );
   return sha256(providerPublishSurface);
 }

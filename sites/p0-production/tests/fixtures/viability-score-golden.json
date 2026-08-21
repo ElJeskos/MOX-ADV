@@ -1,0 +1,333 @@
+{
+  "score_contract": {
+    "version": "viability-score/1.0.0",
+    "status": "UNCALIBRATED_POLICY_V1",
+    "semantics": "COMPARATIVE PRELAUNCH PRIORITY / NOT A PREDICTION",
+    "weights_percent": {
+      "demand": 18,
+      "cost": 12,
+      "economics": 20,
+      "offer_audience_fit": 18,
+      "direct_feasibility": 12,
+      "measurement_readiness": 10,
+      "evidence_quality": 10
+    },
+    "weight_sum_percent": 100,
+    "optional_unknown_midpoint": 50,
+    "sensitivity_unknown_dimension_values": [
+      0,
+      100
+    ],
+    "landing_advisory_used": false,
+    "post_launch_inputs_used": false,
+    "calibration_used": false
+  },
+  "drafts": [
+    {
+      "draft_id": "draft-8393df3887f7cf158484",
+      "score": 90,
+      "score_raw": 89.6667,
+      "score_lower": 89.6667,
+      "score_upper": 89.6667,
+      "rank": 1,
+      "tied_draft_ids": [
+        "draft-73024b24ef2c5e42ee11",
+        "draft-8393df3887f7cf158484",
+        "draft-9144aa93f04e3252c96b"
+      ],
+      "ranking": {
+        "status": "RANKED",
+        "recommendation_set_id": "recommendation-set-93097b951fa54a1bdd1d",
+        "cohort_id": "capability-cohort:14df8f0a071a7c75a3f73a80",
+        "comparable_set_id": "comparable-set:24751910e3115ec15dbdd9ec",
+        "rank": 1,
+        "tied_draft_ids": [
+          "draft-73024b24ef2c5e42ee11",
+          "draft-8393df3887f7cf158484",
+          "draft-9144aa93f04e3252c96b"
+        ],
+        "semantic_tie_rule": "EXACT_SCORE_RAW_EQUALITY_WITHIN_COHORT",
+        "stable_id_display_order_only": true
+      },
+      "dimensions": {
+        "demand": {
+          "state": "KNOWN",
+          "value": 83.3333,
+          "lower": 83.3333,
+          "upper": 83.3333,
+          "weight_percent": 18,
+          "weighted_contribution": 15
+        },
+        "cost": {
+          "state": "KNOWN",
+          "value": 50,
+          "lower": 50,
+          "upper": 50,
+          "weight_percent": 12,
+          "weighted_contribution": 6
+        },
+        "economics": {
+          "state": "KNOWN",
+          "value": 93.3333,
+          "lower": 93.3333,
+          "upper": 93.3333,
+          "weight_percent": 20,
+          "weighted_contribution": 18.6667
+        },
+        "offer_audience_fit": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 18,
+          "weighted_contribution": 18
+        },
+        "direct_feasibility": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 12,
+          "weighted_contribution": 12
+        },
+        "measurement_readiness": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 10,
+          "weighted_contribution": 10
+        },
+        "evidence_quality": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 10,
+          "weighted_contribution": 10
+        }
+      },
+      "visibility": {
+        "status": "VISIBLE",
+        "reason": null,
+        "threshold_contract_version": "score-hidden-v1",
+        "decision": "REVIEW_VISIBLE",
+        "gates": {
+          "structural_reason": null,
+          "sensitivity_upper": 89.6667,
+          "upper_threshold_exclusive": 45,
+          "upper_below_threshold": false,
+          "evidence_quality": 100,
+          "minimum_evidence_quality_inclusive": 60,
+          "evidence_quality_sufficient": true,
+          "unresolved_evidence_gap": false,
+          "applied_by_score": false
+        }
+      }
+    },
+    {
+      "draft_id": "draft-9144aa93f04e3252c96b",
+      "score": 90,
+      "score_raw": 89.6667,
+      "score_lower": 89.6667,
+      "score_upper": 89.6667,
+      "rank": 1,
+      "tied_draft_ids": [
+        "draft-73024b24ef2c5e42ee11",
+        "draft-8393df3887f7cf158484",
+        "draft-9144aa93f04e3252c96b"
+      ],
+      "ranking": {
+        "status": "RANKED",
+        "recommendation_set_id": "recommendation-set-93097b951fa54a1bdd1d",
+        "cohort_id": "capability-cohort:14df8f0a071a7c75a3f73a80",
+        "comparable_set_id": "comparable-set:24751910e3115ec15dbdd9ec",
+        "rank": 1,
+        "tied_draft_ids": [
+          "draft-73024b24ef2c5e42ee11",
+          "draft-8393df3887f7cf158484",
+          "draft-9144aa93f04e3252c96b"
+        ],
+        "semantic_tie_rule": "EXACT_SCORE_RAW_EQUALITY_WITHIN_COHORT",
+        "stable_id_display_order_only": true
+      },
+      "dimensions": {
+        "demand": {
+          "state": "KNOWN",
+          "value": 83.3333,
+          "lower": 83.3333,
+          "upper": 83.3333,
+          "weight_percent": 18,
+          "weighted_contribution": 15
+        },
+        "cost": {
+          "state": "KNOWN",
+          "value": 50,
+          "lower": 50,
+          "upper": 50,
+          "weight_percent": 12,
+          "weighted_contribution": 6
+        },
+        "economics": {
+          "state": "KNOWN",
+          "value": 93.3333,
+          "lower": 93.3333,
+          "upper": 93.3333,
+          "weight_percent": 20,
+          "weighted_contribution": 18.6667
+        },
+        "offer_audience_fit": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 18,
+          "weighted_contribution": 18
+        },
+        "direct_feasibility": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 12,
+          "weighted_contribution": 12
+        },
+        "measurement_readiness": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 10,
+          "weighted_contribution": 10
+        },
+        "evidence_quality": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 10,
+          "weighted_contribution": 10
+        }
+      },
+      "visibility": {
+        "status": "VISIBLE",
+        "reason": null,
+        "threshold_contract_version": "score-hidden-v1",
+        "decision": "REVIEW_VISIBLE",
+        "gates": {
+          "structural_reason": null,
+          "sensitivity_upper": 89.6667,
+          "upper_threshold_exclusive": 45,
+          "upper_below_threshold": false,
+          "evidence_quality": 100,
+          "minimum_evidence_quality_inclusive": 60,
+          "evidence_quality_sufficient": true,
+          "unresolved_evidence_gap": false,
+          "applied_by_score": false
+        }
+      }
+    },
+    {
+      "draft_id": "draft-73024b24ef2c5e42ee11",
+      "score": 90,
+      "score_raw": 89.6667,
+      "score_lower": 89.6667,
+      "score_upper": 89.6667,
+      "rank": 1,
+      "tied_draft_ids": [
+        "draft-73024b24ef2c5e42ee11",
+        "draft-8393df3887f7cf158484",
+        "draft-9144aa93f04e3252c96b"
+      ],
+      "ranking": {
+        "status": "RANKED",
+        "recommendation_set_id": "recommendation-set-93097b951fa54a1bdd1d",
+        "cohort_id": "capability-cohort:14df8f0a071a7c75a3f73a80",
+        "comparable_set_id": "comparable-set:24751910e3115ec15dbdd9ec",
+        "rank": 1,
+        "tied_draft_ids": [
+          "draft-73024b24ef2c5e42ee11",
+          "draft-8393df3887f7cf158484",
+          "draft-9144aa93f04e3252c96b"
+        ],
+        "semantic_tie_rule": "EXACT_SCORE_RAW_EQUALITY_WITHIN_COHORT",
+        "stable_id_display_order_only": true
+      },
+      "dimensions": {
+        "demand": {
+          "state": "KNOWN",
+          "value": 83.3333,
+          "lower": 83.3333,
+          "upper": 83.3333,
+          "weight_percent": 18,
+          "weighted_contribution": 15
+        },
+        "cost": {
+          "state": "KNOWN",
+          "value": 50,
+          "lower": 50,
+          "upper": 50,
+          "weight_percent": 12,
+          "weighted_contribution": 6
+        },
+        "economics": {
+          "state": "KNOWN",
+          "value": 93.3333,
+          "lower": 93.3333,
+          "upper": 93.3333,
+          "weight_percent": 20,
+          "weighted_contribution": 18.6667
+        },
+        "offer_audience_fit": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 18,
+          "weighted_contribution": 18
+        },
+        "direct_feasibility": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 12,
+          "weighted_contribution": 12
+        },
+        "measurement_readiness": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 10,
+          "weighted_contribution": 10
+        },
+        "evidence_quality": {
+          "state": "KNOWN",
+          "value": 100,
+          "lower": 100,
+          "upper": 100,
+          "weight_percent": 10,
+          "weighted_contribution": 10
+        }
+      },
+      "visibility": {
+        "status": "VISIBLE",
+        "reason": null,
+        "threshold_contract_version": "score-hidden-v1",
+        "decision": "REVIEW_VISIBLE",
+        "gates": {
+          "structural_reason": null,
+          "sensitivity_upper": 89.6667,
+          "upper_threshold_exclusive": 45,
+          "upper_below_threshold": false,
+          "evidence_quality": 100,
+          "minimum_evidence_quality_inclusive": 60,
+          "evidence_quality_sufficient": true,
+          "unresolved_evidence_gap": false,
+          "applied_by_score": false
+        }
+      }
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile, writeFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -114,7 +115,7 @@ function evidence(overrides = {}) {
         status: "AVAILABLE",
         compact_source: "DIRECT_HISTORY_OWN_EMPIRICAL",
         scenario: "day-level P25-P75",
-        scope: { account: "owner-account", phrase: "CLUSTER", geography: "SAME", placement: "SAME", strategy: "SAME", season: "SAME" },
+        scope: { account: "owner-account", campaign_id: "10", ad_group_id: "20", keyword_id: "30", phrase: "CLUSTER", geography: "SAME", placement: "SAME", strategy: "SAME", season: "SAME" },
         as_of: "2026-08-20T00:00:00.000Z",
         currency: "RUB",
         vat_treatment: "INCLUDED",
@@ -217,6 +218,36 @@ test("uses the exact versioned weights and discloses deterministic contributions
       assert.equal(dimension.weighted_contribution, dimension.weighted_points);
     }
   }
+});
+
+test("matches the checked-in comparative decision-surface golden", async () => {
+  const value = await recommendationSet();
+  const actual = {
+    score_contract: value.score_contract,
+    drafts: value.drafts.map((draft) => ({
+      draft_id: draft.draft_id,
+      score: draft.viability_score.score,
+      score_raw: draft.viability_score.score_raw,
+      score_lower: draft.viability_score.score_lower,
+      score_upper: draft.viability_score.score_upper,
+      rank: draft.viability_score.rank,
+      tied_draft_ids: draft.viability_score.tied_draft_ids,
+      ranking: draft.viability_score.ranking,
+      dimensions: Object.fromEntries(Object.entries(draft.viability_score.dimensions).map(([name, dimension]) => [name, {
+        state: dimension.state,
+        value: dimension.value,
+        lower: dimension.lower,
+        upper: dimension.upper,
+        weight_percent: dimension.weight_percent,
+        weighted_contribution: dimension.weighted_contribution,
+      }])),
+      visibility: draft.viability_score.visibility,
+    })),
+  };
+  const fixtureUrl = new URL("./fixtures/viability-score-golden.json", import.meta.url);
+  if (process.env.UPDATE_VIABILITY_GOLDEN === "1") await writeFile(fixtureUrl, `${JSON.stringify(actual, null, 2)}\n`, "utf8");
+  const expected = JSON.parse(await readFile(fixtureUrl, "utf8"));
+  assert.deepEqual(actual, expected);
 });
 
 test("evaluates hard eligibility and required EVIDENCE_GAP before score or rank", async () => {
@@ -362,7 +393,32 @@ test("discloses bounded evidence pointers and exact frequency/cost scopes", asyn
   assert.equal(result.scopes.cost.currency, "RUB");
   assert.equal(result.scopes.cost.vat_treatment, "INCLUDED");
   assert.deepEqual(result.scopes.cost.sample_size, { unit: "clicks", value: 42 });
+  assert.equal(result.scopes.cost.scope.campaign_id, "10");
+  assert.equal(result.scopes.cost.scope.ad_group_id, "20");
+  assert.equal(result.scopes.cost.scope.keyword_id, "30");
   assert.ok(Object.values(result.dimensions).every((dimension) => dimension.evidence_pointers.length <= 32));
+});
+
+test("does not compare distinct exact keyword-auction cost scopes", async () => {
+  const generated = await recommendationSet();
+  const source = generated.drafts[0];
+  const scopedDraft = (id, keywordId, low, high) => {
+    const draft = structuredClone(source);
+    draft.draft_id = id;
+    draft.draft_revision_id = `${id}-r1`;
+    draft.market_evidence.cost.scope.keyword_id = keywordId;
+    draft.market_evidence.cost.range = { low, high, kind: "SCENARIO" };
+    draft.viability_score = undefined;
+    return draft;
+  };
+  const scored = await rescore([
+    scopedDraft("draft-cost-a", "keyword-a", 100, 120),
+    scopedDraft("draft-cost-b", "keyword-b", 400, 500),
+  ]);
+  assert.equal(scored[0].viability_score.dimensions.cost.value, 50);
+  assert.equal(scored[1].viability_score.dimensions.cost.value, 50);
+  assert.equal(scored[0].viability_score.scopes.cost.scope.keyword_id, "keyword-a");
+  assert.equal(scored[1].viability_score.scopes.cost.scope.keyword_id, "keyword-b");
 });
 
 test("recomputes field-level score delta after a material manual edit", async () => {
@@ -423,6 +479,10 @@ test("LandingAdvisoryRun and post-launch outcomes cannot affect decisions or fin
   contaminatedProjection.direct.post_launch_outcome = { cpa: 1 };
   contaminatedProjection.direct.moderation_outcome = { status: "ACCEPTED" };
   contaminatedProjection.direct.landing_advisory_run = { score: 100 };
+  contaminatedProjection.direct.campaign.post_launch_outcome = { cpa: 1 };
+  contaminatedProjection.direct.campaign.UnifiedCampaign.landing_advisory = { score: 100 };
+  contaminatedProjection.direct.ad.TextAd.moderation_outcome = { status: "ACCEPTED" };
+  contaminatedProjection.direct.ad.TextAd.outcome_learning = [{ calibrated_probability: 0.99 }];
   assert.equal(await fingerprintDirectProjection(contaminatedProjection), await fingerprintDirectProjection(projection));
 
   const regenerated = await recommendationSet(contaminatedEvidence);
