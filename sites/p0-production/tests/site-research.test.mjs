@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  researchAllowlistedPublicCompetitorPage,
   researchPublicFirstPartySite,
   SiteResearchError,
 } from "../lib/site-research.ts";
@@ -24,7 +25,14 @@ function transport(routes, resolved = ["93.184.216.34"]) {
     },
     async fetch(input, init) {
       const url = String(input);
-      requests.push({ kind: "fetch", url, redirect: init?.redirect });
+      requests.push({
+        kind: "fetch",
+        url,
+        redirect: init?.redirect,
+        method: init?.method,
+        credentials: init?.credentials,
+        authorization: init?.headers?.Authorization,
+      });
       const value = routes[url];
       if (!value) throw new Error(`Unexpected URL ${url}`);
       return typeof value === "function" ? value() : value;
@@ -110,5 +118,50 @@ test("rejects credential-bearing, local and link-local URL literals before resol
   ]) {
     await assert.rejects(researchPublicFirstPartySite(url, { ...adapter, now: () => "2026-08-21T10:00:00.000Z" }));
   }
+  assert.deepEqual(adapter.requests, []);
+});
+
+test("competitor research uses an exact public-host allowlist, credential-free GET and preserved collection policy", async () => {
+  const adapter = transport({
+    "https://competitor.example/offer": html("<main><h1>Публичное предложение</h1></main>"),
+  });
+  const result = await researchAllowlistedPublicCompetitorPage(
+    "https://competitor.example/offer",
+    {
+      allowedHosts: ["competitor.example"],
+      policyId: "public-competitor-pages",
+      policyVersion: "1.0.0",
+      policyUrl: "https://competitor.example/robots.txt",
+      observationScope: "published offer text on one public page",
+    },
+    { ...adapter, now: () => "2026-08-21T10:00:00.000Z" },
+  );
+
+  assert.equal(result.collected_via, "PUBLIC_RESEARCH_EGRESS_V1");
+  assert.equal(result.locator.url, "https://competitor.example/offer");
+  assert.deepEqual(result.policy.allowed_hosts, ["competitor.example"]);
+  assert.equal(result.policy.access, "PUBLIC_NO_AUTH");
+  const networkCall = adapter.requests.find((item) => item.kind === "fetch");
+  assert.equal(networkCall.method, "GET");
+  assert.equal(networkCall.credentials, "omit");
+  assert.equal(networkCall.authorization, undefined);
+});
+
+test("competitor research rejects a host before DNS or fetch when it is absent from the exact allowlist", async () => {
+  const adapter = transport({});
+  await assert.rejects(
+    researchAllowlistedPublicCompetitorPage(
+      "https://competitor.example/offer",
+      {
+        allowedHosts: ["allowed.example"],
+        policyId: "public-competitor-pages",
+        policyVersion: "1.0.0",
+        policyUrl: "https://allowed.example/robots.txt",
+        observationScope: "one public page",
+      },
+      { ...adapter, now: () => "2026-08-21T10:00:00.000Z" },
+    ),
+    (error) => error instanceof SiteResearchError && error.code === "SITE_HOST_NOT_ALLOWLISTED",
+  );
   assert.deepEqual(adapter.requests, []);
 });

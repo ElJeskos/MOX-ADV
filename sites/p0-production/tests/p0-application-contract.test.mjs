@@ -81,6 +81,13 @@ function context() {
       campaigns_total: 1,
       minimum_weekly_budget_rub: 300,
       observed_at: "2026-08-21T10:00:00.000Z",
+      read_limitations: {
+        inventory_complete: true,
+        limited_by: null,
+        methods_read: ["Campaigns.get"],
+        methods_not_read: ["AdGroups.get", "Keywords.get", "Ads.get", "SEARCH_QUERY_PERFORMANCE_REPORT"],
+        statistics_provisional_days: 3,
+      },
     },
     metrika: {
       ready: true,
@@ -88,6 +95,7 @@ function context() {
       access: "YANDEX_METRIKA_MANAGEMENT_AND_REPORTS_API",
       counter_id: "424242",
       goal_id: "1717",
+      time_zone: "Europe/Moscow",
       binding: {
         expected_counter_id: "424242",
         api_counter_id: "424242",
@@ -105,7 +113,22 @@ function context() {
       period_start: "2026-08-01",
       period_end: "2026-08-20",
       display_metrics: { visits: "10", goal_visits: "2" },
-      provenance: { observed_at: "2026-08-21T10:00:00.000Z" },
+      provenance: {
+        source_kind: "METRIKA_REPORTS_API",
+        observed_at: "2026-08-21T10:00:00.000Z",
+        attribution: "last_direct_click_order_dimension",
+        timezone: "Europe/Moscow",
+        dimensions: ["ym:s:date", "ym:s:lastDirectClickOrder"],
+        filters: "ym:s:lastDirectClickOrder=='77'",
+        sampling: {
+          sampled: false,
+          contains_sensitive_data: false,
+          sample_share: 1,
+          sample_size: 10,
+          sample_space: 10,
+          data_lag: 0,
+        },
+      },
     },
   };
 }
@@ -239,14 +262,24 @@ test("one query/command contract drives and persists the current five-step path"
   assert.equal(result.workflow.current_step, 1);
   assert.equal(result.state.context_state.status, "GOAL_CONFIRMED");
   assert.equal(result.state.context_state.business_goal_decision.decision, "CONFIRMED");
-  assert.match(result.state.business_model.analysis_evidence.snapshot_id, /^sha256:[a-f0-9]{64}$/);
+  assert.match(result.state.analytics_evidence_snapshot.snapshot_id, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(result.state.business_model.analysis_evidence, undefined);
 
-  const persistedSnapshotId = result.state.business_model.analysis_evidence.snapshot_id;
-  restarted = new P0Application({ store, adapters: adapters() });
+  const persistedSnapshotId = result.state.analytics_evidence_snapshot.snapshot_id;
+  const persistedAfterModel = JSON.parse((await store.load("owner")).value_json);
+  assert.equal(persistedAfterModel.analytics_evidence_snapshot.snapshot_id, persistedSnapshotId);
+  assert.equal(persistedAfterModel.business_model.analysis_evidence, undefined);
+
+  const changedContext = context();
+  changedContext.performance.display_metrics.visits = "999999";
+  changedContext.performance.provenance.observed_at = "2026-08-21T10:04:00.000Z";
+  restarted = new P0Application({ store, adapters: adapters({ readContext: async () => changedContext }) });
   result = await restarted.query("owner");
   assert.equal(result.revision, 2);
   assert.equal(result.state.context_state.business_goal_decision.value, "Получать заявки на участие через сайт");
-  assert.equal(result.analysis_evidence.snapshot_id, persistedSnapshotId);
+  assert.equal(result.state.analytics_evidence_snapshot.snapshot_id, persistedSnapshotId);
+  assert.equal(result.analytics_evidence_snapshot, undefined);
+  assert.doesNotMatch(JSON.stringify(result.state.analytics_evidence_snapshot), /999999/u);
 
   result = await restarted.command("owner", {
     action: "save_business_model",
@@ -329,21 +362,119 @@ test("Context preflight fails closed for stale, partial or mismatched exact API 
   }
 });
 
+test("migrates the baseline v1 nested evidence bundle into one authoritative top-level persisted snapshot", async (t) => {
+  const { directory, store, application } = await fixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let result = await application.query("owner");
+  result = await application.command("owner", {
+    action: "analyze_site",
+    expected_revision: result.revision,
+    url: "https://owner.example/",
+  });
+  await application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: result.state.context_state.provisional_business_goal.value,
+  });
+  const current = JSON.parse((await store.load("owner")).value_json);
+  const snapshotId = current.analytics_evidence_snapshot.snapshot_id;
+  current.schema_version = "p0-application-document-v1";
+  current.business_model.analysis_evidence = current.analytics_evidence_snapshot;
+  delete current.analytics_evidence_snapshot;
+  await store.seed("owner", {
+    revision: 12,
+    updated_at: "2026-08-21T10:00:12.000Z",
+    value_json: JSON.stringify(current),
+  });
+
+  const migrated = await new P0Application({ store, adapters: adapters() }).query("owner");
+  assert.equal(migrated.revision, 13);
+  assert.equal(migrated.state.schema_version, P0_DOCUMENT_SCHEMA);
+  assert.equal(migrated.state.analytics_evidence_snapshot.snapshot_id, snapshotId);
+  assert.equal(migrated.state.business_model.analysis_evidence, undefined);
+  const persisted = JSON.parse((await store.load("owner")).value_json);
+  assert.equal(persisted.analytics_evidence_snapshot.snapshot_id, snapshotId);
+  assert.equal(persisted.business_model.analysis_evidence, undefined);
+});
+
 test("client context and persisted Context facts exclude injected credentials", async (t) => {
   const { directory, store } = await fixture();
   t.after(() => rm(directory, { recursive: true, force: true }));
   const value = context();
   value.direct.oauth_token = "direct-secret";
   value.metrika.token = "metrika-secret";
+  value.research_prompt = "Bearer prompt-secret";
+  value.competitor_observations = [{
+    source_url: "https://competitor.example/offer",
+    observed_at: "2026-08-21T10:00:00.000Z",
+    collected_via: "PUBLIC_RESEARCH_EGRESS_V1",
+    locator: { url: "https://competitor.example/offer", selector: "main" },
+    policy: {
+      policy_id: "public-competitor-pages",
+      version: "1.0.0",
+      policy_url: "https://competitor.example/robots.txt",
+      access: "PUBLIC_NO_AUTH",
+      allowed_hosts: ["competitor.example"],
+    },
+    scope: { host: "competitor.example", pages_observed: 1, observation_scope: "one public page" },
+    claim: { subject: "competitor:competitor.example", predicate: "published_offer", value: "Published offer" },
+    raw_quote: "Authorization: Bearer competitor-secret owner@example.com",
+    limitations: [],
+    credential: "hidden-context-secret",
+  }];
   const application = new P0Application({ store, adapters: adapters({ readContext: async () => value }) });
   let result = await application.query("owner");
-  assert.doesNotMatch(JSON.stringify(result), /direct-secret|metrika-secret/u);
+  assert.doesNotMatch(JSON.stringify(result), /direct-secret|metrika-secret|prompt-secret|competitor-secret|owner@example\.com|hidden-context-secret/u);
   result = await application.command("owner", {
     action: "analyze_site",
     expected_revision: result.revision,
     url: "https://owner.example/",
   });
-  assert.doesNotMatch((await store.load("owner")).value_json, /direct-secret|metrika-secret/u);
+  assert.doesNotMatch((await store.load("owner")).value_json, /direct-secret|metrika-secret|prompt-secret|competitor-secret|owner@example\.com|hidden-context-secret/u);
+});
+
+test("redacts sensitive public-page and owner-entered artifacts before the revision is persisted", async (t) => {
+  const { directory, store } = await fixture();
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const baseAdapters = adapters();
+  const application = new P0Application({
+    store,
+    adapters: adapters({
+      async researchSite(url) {
+        const site = await baseAdapters.researchSite(url);
+        site.description = "Authorization: Bearer page-secret owner@example.com";
+        site.text_excerpt = `${site.text_excerpt} +7 999 123-45-67`;
+        site.pages[0].description = site.description;
+        site.pages[0].text_excerpt = site.text_excerpt;
+        return site;
+      },
+    }),
+  });
+  let result = await application.query("owner");
+  result = await application.command("owner", {
+    action: "analyze_site",
+    expected_revision: result.revision,
+    url: "https://owner.example/",
+  });
+  result = await application.command("owner", {
+    action: "confirm_context_goal",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_CONTEXT_GOAL",
+    goal: result.state.context_state.provisional_business_goal.value,
+  });
+  const edited = ownerModel(result.state);
+  edited.product = "Authorization: Bearer owner-secret sales@example.com";
+  result = await application.command("owner", {
+    action: "save_business_model",
+    expected_revision: result.revision,
+    value: edited,
+  });
+
+  const persisted = (await store.load("owner")).value_json;
+  assert.doesNotMatch(persisted, /page-secret|owner-secret|owner@example\.com|sales@example\.com|999 123-45-67/u);
+  assert.match(persisted, /\[REDACTED_(?:CREDENTIAL|PII)\]/u);
+  assert.doesNotMatch(JSON.stringify(result), /page-secret|owner-secret|owner@example\.com|sales@example\.com|999 123-45-67/u);
 });
 
 test("the owner explicitly corrects the one provisional goal and the decision survives restart", async (t) => {

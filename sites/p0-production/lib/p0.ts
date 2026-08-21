@@ -364,6 +364,13 @@ async function readContext(): Promise<P0Context> {
         ...directBindingResult.value,
         campaigns_total: directResult.value.total,
         minimum_weekly_budget_rub: limitsResult.value.minimum_weekly_budget_rub,
+        read_limitations: {
+          inventory_complete: true,
+          limited_by: null,
+          methods_read: ["Campaigns.get"],
+          methods_not_read: ["AdGroups.get", "Keywords.get", "Ads.get", "SEARCH_QUERY_PERFORMANCE_REPORT"],
+          statistics_provisional_days: 3,
+        },
       }
     : {
         ready: false,
@@ -371,7 +378,16 @@ async function readContext(): Promise<P0Context> {
         authority: directBindingResult.status === "fulfilled" ? directBindingResult.value.authority : "UNVERIFIED",
         access: "YANDEX_DIRECT_API_V501",
         ...(directBindingResult.status === "fulfilled" ? directBindingResult.value : {}),
-        ...(directResult.status === "fulfilled" ? { campaigns_total: directResult.value.total } : {}),
+        ...(directResult.status === "fulfilled" ? {
+          campaigns_total: directResult.value.total,
+          read_limitations: {
+            inventory_complete: true,
+            limited_by: null,
+            methods_read: ["Campaigns.get"],
+            methods_not_read: ["AdGroups.get", "Keywords.get", "Ads.get", "SEARCH_QUERY_PERFORMANCE_REPORT"],
+            statistics_provisional_days: 3,
+          },
+        } : {}),
         blockers: [
           ...(directBindingResult.status === "rejected" ? [errorMessage(directBindingResult.reason)] : []),
           ...(directResult.status === "rejected" ? [errorMessage(directResult.reason)] : []),
@@ -416,6 +432,10 @@ async function readContext(): Promise<P0Context> {
             provenance: {
               source_kind: "METRIKA_REPORTS_API",
               observed_at: metrikaResult.value.observed_at,
+              attribution: "last_direct_click_order_dimension",
+              timezone: metrikaBindingResult.status === "fulfilled" ? metrikaBindingResult.value.time_zone : "",
+              dimensions: ["ym:s:date", "ym:s:lastDirectClickOrder"],
+              filters: `ym:s:lastDirectClickOrder=='${runtimeEnv().YANDEX_DIRECT_CAMPAIGN_ID ?? ""}'`,
               sampling: metrikaResult.value.sampling,
             },
           }

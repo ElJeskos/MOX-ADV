@@ -531,7 +531,7 @@ function measurementDimension(evidence: Record<string, unknown> | null | undefin
 
 function claimQuality(claim: Record<string, unknown>, materialUncertaintyCount: number) {
   const confidence = record(claim.confidence);
-  const source = { A: 100, B: 80, C: 60, D: 30, U: 0 }[text(confidence.source_quality)] ?? 0;
+  const source = { A: 100, B: 80, C: 60, D: 30, U: 0 }[text(confidence.quality ?? confidence.source_quality)] ?? 0;
   const freshness = { current: 100, aging: 70, stale: 30, unknown: 0 }[text(confidence.freshness)] ?? 0;
   const consistency = { corroborated: 100, single: 70, conflicted: 20, scope_mismatch: 0, not_evaluated: 0 }[text(confidence.consistency)] ?? 0;
   const coverage = { complete_for_scope: 100, sampled_with_denominator: 70, partial: 40, unknown: 0 }[text(confidence.coverage)] ?? 0;

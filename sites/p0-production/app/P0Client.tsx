@@ -23,7 +23,6 @@ type Payload = {
     normalization_only_changes_invalidate: boolean;
     confirmation_requires_recomputation: boolean;
   };
-  analysis_evidence?: Record<string, any> | null;
   revision_history?: Array<Record<string, any>>;
   write_readiness: { ready: boolean; blockers: string[] };
 };
@@ -91,10 +90,7 @@ export default function P0Client() {
           ...extra,
         }),
       });
-      const refreshedEvidence = ["analyze_site", "save_business_model"].includes(action)
-        ? result.state?.business_model?.analysis_evidence || payload.analysis_evidence
-        : payload.analysis_evidence;
-      const next = { ...payload, ...result, analysis_evidence: refreshedEvidence } as Payload;
+      const next = { ...payload, ...result } as Payload;
       setPayload(next);
       setStep(next.workflow.current_step);
     } catch (reason) {
@@ -263,16 +259,21 @@ function evidenceValue(value: unknown) {
 function EvidenceClaimDisclosure({ claim, records }: { claim: Record<string, any>; records: Record<string, any>[] }) {
   const linkedRecords = records.filter((record) => (claim.evidence_ids || []).includes(record.evidence_id));
   return <details className="evidence-claim">
-    <summary><strong>{claim.predicate}</strong><span>{claim.confidence?.tier}</span></summary>
+    <summary aria-label={`Раскрыть claim ${claim.predicate}`}><strong>{claim.predicate}</strong><span>{claim.classification} · {claim.confidence?.tier}</span></summary>
     <div className="evidence-claim-body">
-      <p>{evidenceValue(claim.value).slice(0, 360)}</p>
+      <p><strong>Normalized claim:</strong> {evidenceValue(claim.normalized?.value ?? claim.value).slice(0, 500)}</p>
+      <dl className="claim-confidence"><div><dt>Quality</dt><dd>{claim.confidence?.quality}</dd></div><div><dt>Freshness</dt><dd>{claim.confidence?.freshness}</dd></div><div><dt>Consistency</dt><dd>{claim.confidence?.consistency}</dd></div><div><dt>Coverage</dt><dd>{claim.confidence?.coverage}</dd></div><div><dt>Uncertainty</dt><dd>{claim.confidence?.uncertainty?.length || 0}</dd></div></dl>
       <code>{claim.claim_id}</code>
-      {linkedRecords.map((record) => <section key={record.evidence_id}>
-        <div><strong>{record.source_kind}</strong><span>{record.observed_at || "as_of unavailable"}</span></div>
-        {record.raw?.quote && <blockquote>«{record.raw.quote}»</blockquote>}
-        <code>{evidenceValue(record.source_locator)}</code>
-        <code>{record.extraction?.method} · {record.raw?.sha256}</code>
-      </section>)}
+      {linkedRecords.map((record) => <details className="evidence-record" key={record.evidence_id}>
+        <summary aria-label={`Раскрыть Evidence Record ${record.evidence_id}`}><strong>Evidence Record · {record.source_kind}</strong><span>{record.observed_at || "as_of unavailable"}</span></summary>
+        <div>
+          {record.raw?.quote && <blockquote>«{record.raw.quote}»</blockquote>}
+          <p><strong>Bounded raw value</strong><code>{evidenceValue(record.raw?.value)}</code></p>
+          <p><strong>Raw locator</strong><code>{evidenceValue(record.source_locator)}</code></p>
+          <p><strong>Transform metadata</strong><code>{evidenceValue(record.transforms)}</code></p>
+          <p><strong>Versions and hashes</strong><code>{evidenceValue({ versions: record.versions, extraction: record.extraction, raw_sha256: record.raw?.sha256, record_hash: record.record_hash })}</code></p>
+        </div>
+      </details>)}
     </div>
   </details>;
 }
@@ -283,25 +284,35 @@ function AnalyticsEvidencePanel({ evidence }: { evidence: Record<string, any> })
   const sources = Array.isArray(evidence.sources) ? evidence.sources : [];
   const claims = Array.isArray(evidence.claims) ? evidence.claims : [];
   const records = Array.isArray(evidence.evidence) ? evidence.evidence : [];
-  const uncertainties = Array.isArray(evidence.material_uncertainties) ? evidence.material_uncertainties : [];
+  const uncertainties = Array.isArray(confidence.uncertainty) ? confidence.uncertainty : [];
   const blockers = Array.isArray(summary.hard_blockers) ? summary.hard_blockers : [];
+  const conflicts = Array.isArray(evidence.conflicts) ? evidence.conflicts : [];
+  const gaps = Array.isArray(evidence.gaps) ? evidence.gaps : [];
   const prelaunchCost = evidence.prelaunch_cost || {};
   return <section className="evidence-overview" aria-labelledby="evidence-overview-title">
     <header><div><p className="eyebrow">Versioned evidence snapshot</p><h3 id="evidence-overview-title">Краткая сводка аналитики</h3><p>Факты раскрываются до claim и source locator; score и hard blockers не смешиваются.</p></div><strong className={String(evidence.recommendation_status || "").toLowerCase()}>{evidenceStatusLabel(evidence.recommendation_status)}</strong></header>
     <div className="evidence-kpis"><Metric label="Источники" value={`${summary.sources_verified || 0} проверено · ${summary.sources_partial || 0} частично`} copy={`${summary.sources_unavailable || 0} недоступно из ${summary.sources_total || 0}`} /><Metric label="Claims" value={String(summary.claims_supported || 0)} copy="Каждый связан с Evidence Record" /><Metric label="Стоимость до запуска" value={prelaunchCost.status === "HISTORICAL_FIRST_PARTY" ? "First-party history" : "Недоступна"} copy={prelaunchCost.reason || "Wordstat не является CPC forecast"} /></div>
-    <dl className="confidence-vector"><div><dt>Качество</dt><dd>{confidence.source_quality || "UNKNOWN"}</dd></div><div><dt>Свежесть</dt><dd>{confidence.freshness || "UNKNOWN"}</dd></div><div><dt>Согласованность</dt><dd>{confidence.consistency || "NOT_EVALUATED"}</dd></div><div><dt>Покрытие</dt><dd>{confidence.coverage || "UNKNOWN"}</dd></div></dl>
+    <dl className="confidence-vector" aria-label="Confidence dimensions"><div><dt>Качество</dt><dd>{confidence.quality || "UNKNOWN"}</dd></div><div><dt>Свежесть</dt><dd>{confidence.freshness || "UNKNOWN"}</dd></div><div><dt>Согласованность</dt><dd>{confidence.consistency || "NOT_EVALUATED"}</dd></div><div><dt>Покрытие</dt><dd>{confidence.coverage || "UNKNOWN"}</dd></div><div><dt>Неопределённость</dt><dd>{uncertainties.length}</dd></div></dl>
     <div className="evidence-source-grid">{sources.map((source: Record<string, any>) => <details key={source.source_id} className={`evidence-source ${String(source.status || "").toLowerCase()}`}><summary><span /><div><strong>{source.title}</strong><small>{sourceStatusLabel(source.status)}</small></div></summary><div className="evidence-source-body">{source.facts?.length > 0 && <ul>{source.facts.map((fact: string) => <li key={fact}>{fact}</li>)}</ul>}{source.limitations?.length > 0 && <ul className="limitations">{source.limitations.map((item: string) => <li key={item}>{item}</li>)}</ul>}<code>{source.source_kind} · {source.observed_at || "as_of unavailable"}</code></div></details>)}</div>
-    {blockers.length > 0 && <div className="evidence-blockers"><strong>Hard blockers оцениваются отдельно от score</strong><ul>{blockers.map((item: string) => <li key={item}>{item}</li>)}</ul></div>}
-    {uncertainties.length > 0 && <div className="evidence-uncertainty"><strong>Неопределённость раскрыта, а не заполнена догадкой</strong><ul>{uncertainties.slice(0, 4).map((item: string) => <li key={item}>{item}</li>)}</ul></div>}
-    <details className="evidence-index"><summary>Evidence index · {claims.length} claims · {records.length} records</summary><div>{claims.map((claim: Record<string, any>) => <EvidenceClaimDisclosure key={claim.claim_id} claim={claim} records={records} />)}</div></details>
-    <footer><code>{String(evidence.snapshot_id || "").slice(0, 28)}…</code><span>as of {evidence.as_of}</span><span>{evidence.schema_version}</span></footer>
+    {blockers.length > 0 && <section className="evidence-blockers" aria-labelledby="evidence-hard-blockers"><strong id="evidence-hard-blockers">Hard blockers оцениваются отдельно от score</strong><ul>{blockers.map((item: string) => <li key={item}>{item}</li>)}</ul></section>}
+    <div className="evidence-separate-grid">
+      <section className="evidence-missing" aria-labelledby="evidence-missing-title"><strong id="evidence-missing-title">Missing evidence</strong>{gaps.length ? <ul>{gaps.map((gap: Record<string, any>) => <li key={gap.gap_id}><b>{gap.material ? "MATERIAL" : "GAP"}</b>{gap.description}</li>)}</ul> : <p>Не зафиксировано.</p>}</section>
+      <section className="evidence-conflicts" aria-labelledby="evidence-conflicts-title"><strong id="evidence-conflicts-title">Conflicts</strong>{conflicts.length ? <ul>{conflicts.map((conflict: Record<string, any>) => <li key={conflict.conflict_id}><b>{conflict.material ? "MATERIAL" : conflict.relation}</b>{conflict.predicate} · {conflict.resolution}</li>)}</ul> : <p>Неразрешённых конфликтов нет.</p>}</section>
+    </div>
+    {uncertainties.length > 0 && <div className="evidence-uncertainty"><strong>Неопределённость раскрыта, а не заполнена догадкой</strong><ul>{uncertainties.slice(0, 5).map((item: string) => <li key={item}>{item}</li>)}</ul></div>}
+    <details className="evidence-index"><summary aria-label="Раскрыть Evidence index">Evidence index · claim → Evidence Record → bounded raw locator/value · {claims.length} claims · {records.length} records</summary><div>{claims.map((claim: Record<string, any>) => <EvidenceClaimDisclosure key={claim.claim_id} claim={claim} records={records} />)}</div></details>
+    <footer><code>{String(evidence.snapshot_id || "")}</code><span>generated {evidence.generated_at}</span><span>as of {evidence.as_of}</span><span>{evidence.schema_version}</span></footer>
   </section>;
+}
+
+function BusinessModelSummary({ model }: { model: Record<string, any> }) {
+  return <section className="business-model-summary" aria-labelledby="business-model-summary-title"><header><p className="eyebrow">Business model</p><h3 id="business-model-summary-title">Краткая модель бизнеса</h3></header><div><Metric label="Предложение" value={model.product || "Missing evidence"} copy={model.value || "Ценность не подтверждена"} /><Metric label="Аудитория" value={model.audience || "Missing evidence"} copy={model.exclusions || "Исключения не подтверждены"} /><Metric label="Квалифицированный результат" value={model.qualified_result || "Missing evidence"} copy="Owner confirmation хранится отдельно от first-party evidence" /></div></section>;
 }
 
 function ModelStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>) => Promise<void>; back: () => void }) {
   const model = payload.state.business_model || {};
   const research = model.research || {};
-  const analyticsEvidence = payload.analysis_evidence || model.analysis_evidence || null;
+  const analyticsEvidence = payload.state.analytics_evidence_snapshot || null;
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -309,6 +320,7 @@ function ModelStep({ payload, apply, back }: { payload: Payload; apply: (action:
   }
   return <>
     <ArtifactHead eyebrow="Шаг 2 · агентное исследование" title="Агент уже собрал модель бизнеса" copy="Сначала — краткая сводка, затем раскрываемые доказательства. Исправьте только неверную гипотезу или факт, которого действительно нет в разрешённых источниках." badge="AGENT RESEARCH" />
+    <BusinessModelSummary model={model} />
     {analyticsEvidence && <AnalyticsEvidencePanel evidence={analyticsEvidence} />}
     <div className="research-strip"><Metric label="Исследовано" value={`${research.pages_analyzed || 1} страниц`} copy="First-party public HTTPS" /><Metric label="Источники" value={String(research.sources?.length || 0)} copy={(research.sources || []).join(" · ")} /><Metric label="Сделано агентом" value={`${research.completed_fields?.length || 0} / 5 полей`} copy="Человеку — подтверждение и разногласия" /></div>
     {model.assumptions?.length > 0 && <div className="assumption"><strong>Где нужна проверка</strong><span>{model.assumptions.join(" · ")}</span></div>}

@@ -32,6 +32,36 @@ type SiteResearchDependencies = {
   limits?: Partial<SiteResearchLimits>;
 };
 
+export type PublicCompetitorResearchPolicy = {
+  allowedHosts: string[];
+  policyId: string;
+  policyVersion: string;
+  policyUrl: string;
+  observationScope: string;
+};
+
+export type PublicCompetitorPageObservation = {
+  source_url: string;
+  observed_at: string;
+  collected_via: "PUBLIC_RESEARCH_EGRESS_V1";
+  locator: { url: string; selector: "document" };
+  policy: {
+    policy_id: string;
+    version: string;
+    policy_url: string;
+    access: "PUBLIC_NO_AUTH";
+    allowed_hosts: string[];
+  };
+  scope: {
+    host: string;
+    pages_observed: 1;
+    observation_scope: string;
+  };
+  page: PageEvidence;
+  raw_quote: string;
+  limitations: string[];
+};
+
 export class SiteResearchError extends Error {
   readonly code: string;
 
@@ -120,14 +150,21 @@ async function fetchPage(
   dependencies: SiteResearchDependencies,
   limits: SiteResearchLimits,
   remainingBytes: number,
+  exactAllowedHosts?: Set<string>,
 ) {
   let current = requirePublicHttpsUrl(rawUrl);
   for (let redirectCount = 0; ; redirectCount += 1) {
     if (!firstParty(baseHost, normalizeHost(current.hostname))) {
       fail("SITE_REDIRECT_UNSAFE", "Redirect вывел исследование за пределы first-party HTTPS target.");
     }
+    if (exactAllowedHosts && !exactAllowedHosts.has(current.hostname.toLowerCase())) {
+      fail("SITE_HOST_NOT_ALLOWLISTED", "Public research host отсутствует в exact allowlist.");
+    }
     await assertPublicResolution(current, dependencies.resolveHostname);
     const response = await dependencies.fetch(current, {
+      method: "GET",
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
       headers: {
         "User-Agent": "MOX-ADV-GPT-Sites/1.0",
         Accept: "text/html,application/xhtml+xml",
@@ -149,6 +186,9 @@ async function fetchPage(
       }
       if (!firstParty(baseHost, normalizeHost(target.hostname))) {
         fail("SITE_REDIRECT_UNSAFE", "Redirect вывел исследование за пределы first-party HTTPS target.");
+      }
+      if (exactAllowedHosts && !exactAllowedHosts.has(target.hostname.toLowerCase())) {
+        fail("SITE_HOST_NOT_ALLOWLISTED", "Redirect host отсутствует в exact public research allowlist.");
       }
       current = target;
       continue;
@@ -215,6 +255,61 @@ function rankedLinks(baseUrl: string, links: string[]) {
     if (score > 0) scores.set(candidate.toString(), Math.max(score, scores.get(candidate.toString()) ?? -100));
   }
   return [...scores.entries()].sort((left, right) => right[1] - left[1]).map(([url]) => url);
+}
+
+export async function researchAllowlistedPublicCompetitorPage(
+  rawUrl: string,
+  policy: PublicCompetitorResearchPolicy,
+  dependencies: SiteResearchDependencies,
+): Promise<PublicCompetitorPageObservation> {
+  const requested = normalizePublicHttpsUrl(rawUrl);
+  const allowedHosts = [...new Set(policy.allowedHosts.map((item) => item.trim().toLowerCase()).filter(Boolean))].sort();
+  if (!allowedHosts.includes(requested.hostname.toLowerCase())) {
+    fail("SITE_HOST_NOT_ALLOWLISTED", "Public competitor host отсутствует в exact allowlist.");
+  }
+  if (!policy.policyId.trim() || !policy.policyVersion.trim() || !policy.policyUrl.trim() || !policy.observationScope.trim()) {
+    fail("SITE_POLICY_REQUIRED", "Public competitor research требует policy, version, URL и observation scope.");
+  }
+  requirePublicHttpsUrl(policy.policyUrl);
+  const limits = exactLimits({
+    maximumPages: 1,
+    maximumRedirects: dependencies.limits?.maximumRedirects,
+    maximumTotalBytes: dependencies.limits?.maximumTotalBytes,
+  });
+  const result = await fetchPage(
+    requested.toString(),
+    normalizeHost(requested.hostname),
+    dependencies,
+    limits,
+    limits.maximumTotalBytes,
+    new Set(allowedHosts),
+  );
+  const observedAt = dependencies.now();
+  const finalUrl = new URL(result.page.url);
+  return {
+    source_url: finalUrl.toString(),
+    observed_at: observedAt,
+    collected_via: "PUBLIC_RESEARCH_EGRESS_V1",
+    locator: { url: finalUrl.toString(), selector: "document" },
+    policy: {
+      policy_id: cleanText(policy.policyId, 100),
+      version: cleanText(policy.policyVersion, 100),
+      policy_url: requirePublicHttpsUrl(policy.policyUrl).toString(),
+      access: "PUBLIC_NO_AUTH",
+      allowed_hosts: allowedHosts,
+    },
+    scope: {
+      host: finalUrl.hostname.toLowerCase(),
+      pages_observed: 1,
+      observation_scope: cleanText(policy.observationScope, 500),
+    },
+    page: result.page,
+    raw_quote: cleanText(result.page.text_excerpt, 1_000),
+    limitations: [
+      "Одно public observation не доказывает prevalence или effectiveness.",
+      "Budgets, CPC, conversions, account state и internal strategy не наблюдаются.",
+    ],
+  };
 }
 
 export async function researchPublicFirstPartySite(

@@ -127,7 +127,7 @@ export async function verifyMetrikaCounterBinding(
     fail("METRIKA_API_UNAVAILABLE", "Metrika API недоступен для проверки counter binding.");
   }
   const counterPayload = await officialJson(counterResponse, "Metrika") as {
-    counter?: { id?: unknown };
+    counter?: { id?: unknown; time_zone_name?: unknown };
   };
   const apiCounterId = String(counterPayload.counter?.id ?? "");
   if (apiCounterId !== expectedCounterId) {
@@ -157,6 +157,7 @@ export async function verifyMetrikaCounterBinding(
     access: "YANDEX_METRIKA_MANAGEMENT_AND_REPORTS_API" as const,
     counter_id: expectedCounterId,
     goal_id: expectedGoalId,
+    time_zone: String(counterPayload.counter?.time_zone_name ?? ""),
     binding: {
       expected_counter_id: expectedCounterId,
       api_counter_id: apiCounterId,

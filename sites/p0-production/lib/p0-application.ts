@@ -1,6 +1,7 @@
 import { buildAdTitle } from "./ad-copy.ts";
 import {
   buildAnalyticsEvidence,
+  redactSensitiveEvidenceText,
   type AnalyticsEvidenceBundle,
 } from "./analytics-evidence.ts";
 import {
@@ -35,8 +36,9 @@ import { normalizePublicHttpsUrl } from "./site-url.ts";
 import { cleanText } from "./text.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.1.0";
-export const P0_DOCUMENT_SCHEMA = "p0-application-document-v1";
+export const P0_APPLICATION_CONTRACT_VERSION = "1.2.0";
+export const P0_DOCUMENT_SCHEMA = "p0-application-document-v2";
+const P0_LEGACY_DOCUMENT_SCHEMA = "p0-application-document-v1";
 export const P0_CONTEXT_SCHEMA = "p0-context-v1";
 export const P0_CONTEXT_PREFLIGHT_MAX_AGE_MS = 5 * 60_000;
 
@@ -98,6 +100,7 @@ export type P0Document = {
   context_state: P0ContextState | null;
   site_analysis: SiteAnalysis | null;
   business_model: BusinessModel | null;
+  analytics_evidence_snapshot: AnalyticsEvidenceBundle | null;
   strategy: Record<string, unknown> | null;
   recommendation_set: CampaignRecommendationSet | null;
   draft: Record<string, unknown> | null;
@@ -137,6 +140,7 @@ export type P0Context = {
   metrika: Record<string, unknown>;
   performance: Record<string, unknown> | null;
   campaign_catalog: Record<string, unknown> | null;
+  competitor_observations?: Array<Record<string, unknown>>;
 };
 
 export type P0ExternalWriteConfiguration = {
@@ -207,7 +211,6 @@ export type BusinessModel = {
       owner_confirmed_at?: string;
     }
   >;
-  analysis_evidence?: AnalyticsEvidenceBundle;
 };
 
 export class P0ApplicationError extends Error {
@@ -271,6 +274,7 @@ function emptyDocument(): P0Document {
     context_state: null,
     site_analysis: null,
     business_model: null,
+    analytics_evidence_snapshot: null,
     strategy: null,
     recommendation_set: null,
     draft: null,
@@ -287,25 +291,53 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 function requiredInput(value: unknown, label: string, maximum: number) {
-  const text = cleanText(String(value ?? ""), 10_000);
-  if (!text) fail("P0_INPUT_REQUIRED", `${label} не заполнено.`);
-  if (text.length > maximum) fail("P0_INPUT_TOO_LONG", `${label}: максимум ${maximum} символов.`);
-  return text;
+  const normalized = cleanText(String(value ?? ""), 10_000);
+  if (!normalized) fail("P0_INPUT_REQUIRED", `${label} не заполнено.`);
+  if (normalized.length > maximum) fail("P0_INPUT_TOO_LONG", `${label}: максимум ${maximum} символов.`);
+  return artifactText(normalized, maximum);
 }
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Неизвестная ошибка";
 }
 
+function artifactText(value: unknown, maximum: number) {
+  return cleanText(redactSensitiveEvidenceText(value, maximum), maximum + 20);
+}
+
 function stringList(value: unknown) {
   return Array.isArray(value)
-    ? value.map((item) => cleanText(String(item ?? ""), 500)).filter(Boolean).slice(0, 20)
+    ? value.map((item) => artifactText(item, 500)).filter(Boolean).slice(0, 20)
     : [];
+}
+
+function sanitizeSiteAnalysis(input: SiteAnalysis): SiteAnalysis {
+  const sanitizePage = (page: PageEvidence): PageEvidence => ({
+    url: normalizePublicHttpsUrl(page.url).toString(),
+    title: artifactText(page.title, 500),
+    description: artifactText(page.description, 1_000),
+    headings: page.headings.slice(0, 20).map((item) => artifactText(item, 1_000)),
+    forms_detected: Math.max(0, Number(page.forms_detected ?? 0)),
+    text_excerpt: artifactText(page.text_excerpt, 8_000),
+  });
+  const pages = input.pages.slice(0, 6).map(sanitizePage);
+  const entry = sanitizePage(input);
+  return {
+    ...entry,
+    fetched_at: cleanText(String(input.fetched_at ?? ""), 100),
+    pages,
+    research: {
+      pages_analyzed: pages.length,
+      links_discovered: Math.max(0, Number(input.research.links_discovered ?? 0)),
+      scope: cleanText(String(input.research.scope ?? ""), 100),
+    },
+  };
 }
 
 function sanitizeContext(input: P0Context): P0Context {
   const direct = record(input.direct);
   const directBinding = record(direct.binding);
+  const directReadLimitations = record(direct.read_limitations);
   const metrika = record(input.metrika);
   const metrikaBinding = record(metrika.binding);
   const goalBinding = record(metrika.goal_binding);
@@ -332,6 +364,15 @@ function sanitizeContext(input: P0Context): P0Context {
       campaigns_total: Number(direct.campaigns_total ?? 0),
       minimum_weekly_budget_rub: Number(direct.minimum_weekly_budget_rub),
       observed_at: cleanText(String(direct.observed_at ?? ""), 100),
+      read_limitations: {
+        inventory_complete: directReadLimitations.inventory_complete === true,
+        limited_by: directReadLimitations.limited_by === null || directReadLimitations.limited_by === undefined
+          ? null
+          : Number(directReadLimitations.limited_by),
+        methods_read: stringList(directReadLimitations.methods_read),
+        methods_not_read: stringList(directReadLimitations.methods_not_read),
+        statistics_provisional_days: Number(directReadLimitations.statistics_provisional_days ?? 3),
+      },
       blockers: stringList(direct.blockers),
     },
     metrika: {
@@ -340,6 +381,7 @@ function sanitizeContext(input: P0Context): P0Context {
       access: cleanText(String(metrika.access ?? ""), 100),
       counter_id: cleanText(String(metrika.counter_id ?? ""), 100),
       goal_id: cleanText(String(metrika.goal_id ?? ""), 100),
+      time_zone: cleanText(String(metrika.time_zone ?? ""), 100),
       binding: {
         expected_counter_id: cleanText(String(metrikaBinding.expected_counter_id ?? ""), 100),
         api_counter_id: cleanText(String(metrikaBinding.api_counter_id ?? ""), 100),
@@ -380,6 +422,10 @@ function sanitizeContext(input: P0Context): P0Context {
           provenance: {
             source_kind: cleanText(String(provenance.source_kind ?? ""), 100),
             observed_at: cleanText(String(provenance.observed_at ?? ""), 100),
+            attribution: cleanText(String(provenance.attribution ?? ""), 100),
+            timezone: cleanText(String(provenance.timezone ?? ""), 100),
+            dimensions: stringList(provenance.dimensions),
+            filters: cleanText(String(provenance.filters ?? ""), 1_000),
             sampling: {
               sampled: sampling.sampled === true,
               contains_sensitive_data: sampling.contains_sensitive_data === true,
@@ -391,6 +437,41 @@ function sanitizeContext(input: P0Context): P0Context {
           },
         }
       : null,
+    competitor_observations: (Array.isArray(input.competitor_observations) ? input.competitor_observations : []).slice(0, 20).map((rawObservation) => {
+      const observation = record(rawObservation);
+      const locator = record(observation.locator);
+      const policy = record(observation.policy);
+      const scope = record(observation.scope);
+      const claim = record(observation.claim);
+      return {
+        source_url: cleanText(String(observation.source_url ?? ""), 2_000),
+        observed_at: cleanText(String(observation.observed_at ?? ""), 100),
+        collected_via: cleanText(String(observation.collected_via ?? ""), 100),
+        locator: {
+          url: cleanText(String(locator.url ?? ""), 2_000),
+          selector: cleanText(String(locator.selector ?? ""), 500),
+        },
+        policy: {
+          policy_id: cleanText(String(policy.policy_id ?? ""), 100),
+          version: cleanText(String(policy.version ?? ""), 100),
+          policy_url: cleanText(String(policy.policy_url ?? ""), 2_000),
+          access: cleanText(String(policy.access ?? ""), 100),
+          allowed_hosts: stringList(policy.allowed_hosts),
+        },
+        scope: {
+          host: cleanText(String(scope.host ?? ""), 255),
+          pages_observed: Number(scope.pages_observed ?? 0),
+          observation_scope: cleanText(String(scope.observation_scope ?? ""), 500),
+        },
+        claim: {
+          subject: cleanText(String(claim.subject ?? ""), 500),
+          predicate: cleanText(String(claim.predicate ?? ""), 200),
+          value: artifactText(claim.value, 1_000),
+        },
+        raw_quote: artifactText(observation.raw_quote, 1_000),
+        limitations: stringList(observation.limitations).map((item) => artifactText(item, 500)),
+      };
+    }),
   };
 }
 
@@ -695,11 +776,6 @@ async function inferModel(site: SiteAnalysis, context: P0Context): Promise<Busin
       ]),
     ),
   };
-  model.analysis_evidence = await buildAnalyticsEvidence({
-    site: site as unknown as Record<string, unknown>,
-    model: model as unknown as Record<string, unknown>,
-    context: context as unknown as Record<string, unknown>,
-  });
   return model;
 }
 
@@ -722,12 +798,18 @@ function lineageError(message: string): never {
 
 async function migrateDocument(raw: Record<string, unknown>, revision: number, updatedAt: string) {
   const version = raw.schema_version;
-  if (version !== undefined && version !== P0_DOCUMENT_SCHEMA) {
+  if (version !== undefined && version !== P0_DOCUMENT_SCHEMA && version !== P0_LEGACY_DOCUMENT_SCHEMA) {
     fail("P0_DOCUMENT_SCHEMA_UNSUPPORTED", `Persisted P0 document использует неподдерживаемую схему ${String(version)}.`);
   }
   const state = raw as unknown as P0Document;
   let changed = version !== P0_DOCUMENT_SCHEMA;
   if (changed) state.schema_version = P0_DOCUMENT_SCHEMA;
+  const legacyModel = record(state.business_model);
+  if (!state.analytics_evidence_snapshot && legacyModel.analysis_evidence) {
+    state.analytics_evidence_snapshot = legacyModel.analysis_evidence as AnalyticsEvidenceBundle;
+    delete legacyModel.analysis_evidence;
+    changed = true;
+  }
 
   if (state.context_state) {
     if (state.context_state.schema_version !== P0_CONTEXT_SCHEMA) {
@@ -756,7 +838,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     lineageError("Campaign Strategy не связана с моделью бизнеса.");
   }
 
-  for (const key of ["context_state", "site_analysis", "business_model", "strategy", "recommendation_set", "draft", "shortlist", "external_write_intent", "campaign"] as const) {
+  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy", "recommendation_set", "draft", "shortlist", "external_write_intent", "campaign"] as const) {
     if (!(key in state)) {
       state[key] = null as never;
       changed = true;
@@ -809,7 +891,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
       modelChanged = true;
     }
   }
-  if (modelChanged && model) delete model.analysis_evidence;
+  if (modelChanged && model) state.analytics_evidence_snapshot = null;
 
   const strategy = state.strategy;
   if (strategy && model) {
@@ -826,7 +908,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
       state.recommendation_set = await buildCampaignRecommendationSet({
         model: model as unknown as Record<string, unknown>,
         strategy,
-        analyticsEvidence: model.analysis_evidence as unknown as Record<string, unknown> | undefined,
+        analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown> | undefined,
         generatedAt: updatedAt,
       });
       changed = true;
@@ -1077,7 +1159,6 @@ export class P0Application {
     const [stored, rawContext] = await Promise.all([this.load(key), this.adapters.readContext()]);
     const context = sanitizeContext(rawContext);
     const timestamp = this.adapters.now();
-    const analysisEvidence = stored.state.business_model?.analysis_evidence ?? null;
     const viewState = structuredClone(stored.state);
     return {
       contract: contractMetadata("query"),
@@ -1094,7 +1175,6 @@ export class P0Application {
         maximum_age_ms: P0_CONTEXT_PREFLIGHT_MAX_AGE_MS,
       },
       context_change_policy: contextChangePolicy(),
-      analysis_evidence: analysisEvidence,
       revision_history: await this.history(key, stored.revision),
       write_readiness: this.writeReadiness(viewState, context, timestamp),
     };
@@ -1127,7 +1207,7 @@ export class P0Application {
       const context = sanitizeContext(await this.adapters.readContext());
       this.assertContextPreflight(context, timestamp);
       const requestedUrl = normalizePublicHttpsUrl(String(payload.url ?? "")).toString();
-      const site = await this.adapters.researchSite(requestedUrl);
+      const site = sanitizeSiteAnalysis(await this.adapters.researchSite(requestedUrl));
       const fingerprint = await contextMaterialFingerprint(site, context);
       const previousContext = state.context_state;
       const normalizationOnly = previousContext?.material_fingerprint === fingerprint;
@@ -1147,6 +1227,7 @@ export class P0Application {
           last_material_change: lastMaterialChange,
         };
         state.business_model = null;
+        state.analytics_evidence_snapshot = null;
         invalidateContextDownstream(state);
       }
     } else if (action === "confirm_context_goal") {
@@ -1182,15 +1263,21 @@ export class P0Application {
       };
       if (!state.business_model) {
         state.business_model = await inferModel(state.site_analysis, context);
+        state.analytics_evidence_snapshot = await buildAnalyticsEvidence({
+          site: state.site_analysis as unknown as Record<string, unknown>,
+          model: state.business_model as unknown as Record<string, unknown>,
+          context: context as unknown as Record<string, unknown>,
+          generatedAt: timestamp,
+        });
       }
     } else if (action === "save_business_model") {
       if (!state.business_model) fail("P0_PREREQUISITE_MISSING", "Сначала исследуйте сайт.");
       const value = record(payload.value);
       const ownerConfirmedAt = this.adapters.now();
       for (const field of ["product", "audience", "value", "qualified_result", "exclusions"]) {
-        const text = cleanText(String(value[field] ?? ""), 1_000);
-        if (!text) fail("P0_INPUT_REQUIRED", `Поле ${field} требует подтверждённого значения.`);
-        (state.business_model as unknown as Record<string, unknown>)[field] = text;
+        const confirmedValue = artifactText(value[field], 1_000);
+        if (!confirmedValue) fail("P0_INPUT_REQUIRED", `Поле ${field} требует подтверждённого значения.`);
+        (state.business_model as unknown as Record<string, unknown>)[field] = confirmedValue;
         state.business_model.field_evidence[field] = {
           ...state.business_model.field_evidence[field],
           confidence: "OWNER_CONFIRMED",
@@ -1205,10 +1292,11 @@ export class P0Application {
       const context = sanitizeContext(await this.adapters.readContext());
       this.assertContextPreflight(context, ownerConfirmedAt);
       this.assertPersistedBindings(state, context);
-      state.business_model.analysis_evidence = await buildAnalyticsEvidence({
+      state.analytics_evidence_snapshot = await buildAnalyticsEvidence({
         site: state.site_analysis as unknown as Record<string, unknown>,
         model: state.business_model as unknown as Record<string, unknown>,
         context: context as unknown as Record<string, unknown>,
+        generatedAt: ownerConfirmedAt,
       });
       state.strategy = null;
       state.recommendation_set = null;
@@ -1239,7 +1327,7 @@ export class P0Application {
       state.recommendation_set = await buildCampaignRecommendationSet({
         model: state.business_model as unknown as Record<string, unknown>,
         strategy: state.strategy,
-        analyticsEvidence: state.business_model.analysis_evidence as unknown as Record<string, unknown> | undefined,
+        analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown> | undefined,
         generatedAt: approvedAt,
       });
       state.draft = null;
@@ -1276,18 +1364,9 @@ export class P0Application {
       const changedPointers = editableFields
         .filter((field) => String(generated[field] ?? "") !== String(normalized[field] ?? ""))
         .map((field) => `/draft/${field}`);
-      let scoreEvidence = state.business_model.analysis_evidence;
+      const scoreEvidence = state.analytics_evidence_snapshot;
       if (!scoreEvidence) {
-        if (!state.site_analysis) fail("P0_EVIDENCE_LINEAGE_INVALID", "Scoring требует first-party Analytics Evidence Snapshot.");
-        const scoringContext = sanitizeContext(await this.adapters.readContext());
-        this.assertContextPreflight(scoringContext, this.adapters.now());
-        this.assertPersistedBindings(state, scoringContext);
-        scoreEvidence = await buildAnalyticsEvidence({
-          site: state.site_analysis as unknown as Record<string, unknown>,
-          model: state.business_model as unknown as Record<string, unknown>,
-          context: scoringContext as unknown as Record<string, unknown>,
-        });
-        state.business_model.analysis_evidence = scoreEvidence;
+        fail("P0_EVIDENCE_LINEAGE_INVALID", "Scoring требует persisted Analytics Evidence Snapshot из Model revision.");
       }
       const editedAt = this.adapters.now();
       const editedDraft = {
@@ -1398,7 +1477,6 @@ export class P0Application {
         maximum_age_ms: P0_CONTEXT_PREFLIGHT_MAX_AGE_MS,
       },
       context_change_policy: contextChangePolicy(),
-      analysis_evidence: state.business_model?.analysis_evidence ?? null,
       revision_history: await this.history(key, next.revision),
       write_readiness: this.writeReadiness(state, context, responseAt),
     };

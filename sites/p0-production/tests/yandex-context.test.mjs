@@ -57,7 +57,7 @@ test("verifies exact Metrika counter and goal authority through management APIs"
     async (input) => {
       const url = String(input);
       urls.push(url);
-      if (url.endsWith("/counter/424242")) return json({ counter: { id: 424242, name: "Owner" } });
+      if (url.endsWith("/counter/424242")) return json({ counter: { id: 424242, name: "Owner", time_zone_name: "Europe/Moscow" } });
       if (url.endsWith("/counter/424242/goals")) return json({ goals: [{ id: 1717, name: "Lead" }] });
       throw new Error(`Unexpected URL ${url}`);
     },
@@ -72,6 +72,7 @@ test("verifies exact Metrika counter and goal authority through management APIs"
     access: "YANDEX_METRIKA_MANAGEMENT_AND_REPORTS_API",
     counter_id: "424242",
     goal_id: "1717",
+    time_zone: "Europe/Moscow",
     binding: { expected_counter_id: "424242", api_counter_id: "424242", matched: true },
     goal_binding: { expected_goal_id: "1717", api_goal_id: "1717", matched: true },
     observed_at: "2026-08-21T10:00:00.000Z",

@@ -144,6 +144,16 @@ body::before {
 .evidence.medium { border-color: #e5ccaa; background: var(--amber-soft); }
 .assumption { display: grid; grid-template-columns: 180px 1fr; gap: 12px; margin-top: 12px; padding: 12px 14px; border: 1px solid #e5ccaa; border-radius: 8px; background: var(--amber-soft); font-size: 8px; }
 .assumption span { color: var(--muted); }
+.business-model-summary { margin-top: 20px; padding: 16px; border: 1px solid var(--line-strong); border-radius: 10px; background: #fbfcfa; }
+.business-model-summary header { margin-bottom: 11px; }
+.business-model-summary h3 { margin: 4px 0 0; font-size: 18px; }
+.business-model-summary > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 8px; background: white; }
+.business-model-summary > div > div { min-width: 0; min-height: 84px; padding: 13px; border-left: 1px solid var(--line); }
+.business-model-summary > div > div:first-child { border-left: 0; }
+.business-model-summary span, .business-model-summary strong, .business-model-summary small { display: block; overflow-wrap: anywhere; }
+.business-model-summary span { color: var(--muted); font-size: 7px; text-transform: uppercase; }
+.business-model-summary strong { margin-top: 7px; font-size: 11px; }
+.business-model-summary small { margin-top: 5px; color: var(--muted); font-size: 7px; line-height: 1.4; }
 
 .evidence-overview { margin-top: 20px; padding: 18px; border: 1px solid var(--line-strong); border-radius: 11px; background: #fff; }
 .evidence-overview > header { display: flex; gap: 20px; justify-content: space-between; align-items: flex-start; }
@@ -158,7 +168,7 @@ body::before {
 .evidence-kpis span { color: var(--muted); font-size: 7px; text-transform: uppercase; }
 .evidence-kpis strong { margin-top: 7px; font-size: 12px; }
 .evidence-kpis small { margin-top: 5px; color: var(--muted); font-size: 7px; line-height: 1.4; }
-.confidence-vector { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 10px 0 0; }
+.confidence-vector { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 10px 0 0; }
 .confidence-vector div { padding: 9px 10px; border-radius: 7px; background: #f4f6f2; }
 .confidence-vector dt { color: var(--muted); font-size: 7px; }
 .confidence-vector dd { margin: 4px 0 0; font-size: 8px; font-weight: 750; }
@@ -180,6 +190,13 @@ body::before {
 .evidence-blockers { border-color: #e3b9b4; background: #fbe8e5; }
 .evidence-blockers strong, .evidence-uncertainty strong { font-size: 9px; }
 .evidence-blockers ul, .evidence-uncertainty ul { margin: 6px 0 0; padding-left: 15px; color: var(--muted); font-size: 7px; line-height: 1.5; }
+.evidence-separate-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.evidence-missing, .evidence-conflicts { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 8px; background: #f7f8f5; }
+.evidence-missing > strong, .evidence-conflicts > strong { font-size: 9px; }
+.evidence-missing p, .evidence-conflicts p { margin: 6px 0 0; color: var(--muted); font-size: 7px; }
+.evidence-missing ul, .evidence-conflicts ul { display: grid; gap: 5px; margin: 7px 0 0; padding: 0; list-style: none; }
+.evidence-missing li, .evidence-conflicts li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px; color: var(--muted); font-size: 7px; line-height: 1.4; overflow-wrap: anywhere; }
+.evidence-missing li b, .evidence-conflicts li b { color: var(--danger); font-size: 6px; }
 .evidence-index { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; }
 .evidence-index > summary { padding: 11px 12px; cursor: pointer; color: var(--green-dark); font-size: 8px; font-weight: 750; }
 .evidence-index > div { display: grid; gap: 6px; padding: 0 11px 11px; }
@@ -189,14 +206,23 @@ body::before {
 .evidence-claim > summary strong, .evidence-claim > summary span { font-size: 8px; }
 .evidence-claim > summary span { color: var(--green-dark); }
 .evidence-claim-body { padding: 0 10px 10px; }
-.evidence-claim-body > p { margin: 0; color: var(--muted); font-size: 7px; }
-.evidence-claim-body > section { margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: white; }
-.evidence-claim-body > section > div { display: flex; justify-content: space-between; gap: 12px; }
-.evidence-claim-body > section strong, .evidence-claim-body > section span { font-size: 7px; }
-.evidence-claim-body > section span { color: var(--muted); }
+.evidence-claim-body > p { margin: 0; color: var(--muted); font-size: 7px; overflow-wrap: anywhere; }
+.claim-confidence { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; margin: 7px 0; }
+.claim-confidence div { padding: 6px; border-radius: 5px; background: white; }
+.claim-confidence dt { color: var(--muted); font-size: 6px; }
+.claim-confidence dd { margin: 3px 0 0; font-size: 7px; font-weight: 700; overflow-wrap: anywhere; }
+.evidence-record { margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; background: white; }
+.evidence-record > summary { display: flex; justify-content: space-between; gap: 12px; padding: 8px; cursor: pointer; list-style: none; }
+.evidence-record > summary::-webkit-details-marker { display: none; }
+.evidence-record > summary strong, .evidence-record > summary span { font-size: 7px; }
+.evidence-record > summary span { color: var(--muted); }
+.evidence-record > div { min-width: 0; padding: 0 8px 8px; }
+.evidence-record p { margin: 7px 0 0; color: var(--muted); font-size: 7px; }
+.evidence-record p > strong { display: block; color: var(--ink); }
+.evidence-record code { max-width: 100%; overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
 .evidence-claim-body blockquote { margin: 7px 0 0; color: var(--ink); font-size: 7px; line-height: 1.5; }
-.evidence-overview > footer { display: flex; gap: 12px; margin-top: 10px; color: var(--muted); font-size: 6px; }
-.evidence-overview > footer code { margin-right: auto; }
+.evidence-overview > footer { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 10px; color: var(--muted); font-size: 6px; }
+.evidence-overview > footer code { width: 100%; overflow-wrap: anywhere; }
 
 .decision-packet { display: grid; gap: 8px; margin-top: 18px; }
 .decision-packet article { display: grid; grid-template-columns: 28px 1fr; gap: 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: white; }
