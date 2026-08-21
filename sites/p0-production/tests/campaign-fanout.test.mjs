@@ -334,8 +334,26 @@ test("packs compatible keyword clusters before a finite product-audience-offer f
   assert.equal(value.axis_ledger.keyword_clusters.length, 2);
   assert.equal(value.axis_ledger.leafs.length, 2);
   assert.equal(value.axis_ledger.every_leaf_terminal, true);
+  assert.equal(value.coverage.status, "COMPLETE");
+  assert.equal(value.coverage.represented_leaf_ids.length, 2);
+  assert.deepEqual(value.coverage.uncovered_leaf_ids, []);
   assert.equal(value.drafts.length, 3);
   assert.equal(value.drafts.every((draft) => draft.demand_cluster_ids.length === 2), true);
+});
+
+test("reconciles canonical leaf coverage for cluster IDs that require normalization", async () => {
+  const evidence = structuredClone(availableDemandEvidence);
+  evidence.market_evidence.frequency.clusters = [{
+    cluster_id: "Cluster Mixed Case",
+    status: "AVAILABLE",
+    assigned_row_ids: ["row-mixed"],
+    semantic_key: { product: "выставка", need: "участие", intent: "commercial", offer: "стенд" },
+  }];
+  const value = await recommendationSet(evidence);
+  assert.equal(value.axis_ledger.leafs[0].keyword_cluster_id, "keyword-cluster:cluster-mixed-case");
+  assert.equal(value.drafts.every((draft) => draft.covered_leaf_ids.includes(value.axis_ledger.leafs[0].leaf_id)), true);
+  assert.deepEqual(value.coverage.uncovered_leaf_ids, []);
+  assert.equal(value.coverage.status, "COMPLETE");
 });
 
 test("emits exactly one comparator and at most two improvements for every evidence-backed delivery bucket", async () => {

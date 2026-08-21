@@ -819,6 +819,23 @@ test("one query/command contract drives and persists the current five-step path"
   assert.equal(result.state.recommendation_set.strategy_revision_id, result.state.strategy.strategy_revision_id);
 
   const draft = result.state.recommendation_set.drafts.find((candidate) => candidate.visibility === "VISIBLE");
+  await assert.rejects(
+    restarted.command("owner", {
+      action: "save_draft",
+      expected_revision: result.revision,
+      value: {
+        draft_id: draft.draft_id,
+        campaign_name: draft.campaign_name,
+        group_name: draft.group_name,
+        keyword: draft.keyword,
+        negative_keywords: draft.negative_keywords,
+        ad_title: draft.ad_title,
+        ad_text: draft.ad_text,
+        autotargeting_settings: { Exact: "YES" },
+      },
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_DRAFT_FIELD_UNSUPPORTED",
+  );
   result = await restarted.command("owner", {
     action: "save_draft",
     expected_revision: result.revision,

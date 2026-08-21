@@ -1736,6 +1736,11 @@ export class P0Application {
       if (!state.strategy || !state.business_model) {
         fail("P0_PREREQUISITE_MISSING", "Сначала подтвердите модель и Strategy.");
       }
+      const allowedDraftInputs = new Set(["draft_id", "campaign_name", "group_name", "keyword", "negative_keywords", "ad_title", "ad_text"]);
+      const unsupportedDraftInput = Object.keys(value).find((field) => !allowedDraftInputs.has(field));
+      if (unsupportedDraftInput) {
+        fail("P0_DRAFT_FIELD_UNSUPPORTED", `Campaign Draft field ${unsupportedDraftInput} is not editable in the current exact projection contract and was not applied.`);
+      }
       const draftId = requiredInput(value.draft_id, "Campaign Draft", 255);
       const recommendationSet = state.recommendation_set;
       const generated = recommendationSet?.drafts.find((item) => item.draft_id === draftId);

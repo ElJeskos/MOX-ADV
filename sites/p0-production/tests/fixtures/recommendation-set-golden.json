@@ -19,6 +19,12 @@
       "generated_equals_audited": true,
       "unaudited_candidate_ids": []
     },
+    "represented_leaf_ids": [
+      "leaf:product:участие-со-стендом-в-выставке-иннопром:audience:руководители-промышленных-компаний:offer:подайте-заявку-на-участие-в-выставке:keyword-cluster:cluster-long-tail",
+      "leaf:product:участие-со-стендом-в-выставке-иннопром:audience:руководители-промышленных-компаний:offer:подайте-заявку-на-участие-в-выставке:keyword-cluster:cluster-primary"
+    ],
+    "suppressed_leaf_ids": [],
+    "uncovered_leaf_ids": [],
     "uncovered_axis_members": []
   },
   "termination": {

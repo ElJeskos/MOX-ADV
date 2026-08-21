@@ -593,7 +593,8 @@ export async function buildCampaignRecommendationSet({
   const demandPartial = frequency.status === "PARTIAL" && packedClusterIds.size > 0;
   const normalizedStrategyDeliveryKey = normalizeDeliveryKey(strategyDeliveryKey);
   const syntheticFingerprint = await sha256(normalizedStrategyDeliveryKey);
-  const buckets = deliveryPacking.delivery_buckets.length
+  const usesSyntheticEvidenceGapBucket = deliveryPacking.delivery_buckets.length === 0;
+  const buckets = !usesSyntheticEvidenceGapBucket
     ? deliveryPacking.delivery_buckets
     : [{
         delivery_bucket_id: `delivery-bucket:${syntheticFingerprint.slice("sha256:".length, "sha256:".length + 20)}`,
@@ -619,9 +620,10 @@ export async function buildCampaignRecommendationSet({
       audience_id: audienceAxes[0].member_id,
       offer_id: offerAxes[0].member_id,
       keyword_cluster_id: cluster.member_id,
+      demand_cluster_id: demandClusters.length ? clusterId : null,
       terminal_disposition: disposition?.disposition ?? "EVIDENCE_GAP",
       reason_codes: disposition?.reason_codes ?? ["DEMAND_EVIDENCE_UNAVAILABLE"],
-      delivery_bucket_id: disposition?.delivery_bucket_id ?? null,
+      delivery_bucket_id: disposition?.delivery_bucket_id ?? (usesSyntheticEvidenceGapBucket ? text(buckets[0].delivery_bucket_id) : null),
     };
   });
 
@@ -737,7 +739,7 @@ export async function buildCampaignRecommendationSet({
         delivery_bucket_id: bucketId,
         delivery_key_fingerprint: bucket.delivery_key_fingerprint,
         demand_cluster_ids: clusterIds,
-        covered_leaf_ids: leafLedger.filter((leaf) => clusterIds.some((clusterId) => leaf.keyword_cluster_id.endsWith(clusterId))).map((leaf) => leaf.leaf_id),
+        covered_leaf_ids: leafLedger.filter((leaf) => leaf.delivery_bucket_id === bucketId).map((leaf) => leaf.leaf_id),
         variant: {
           kind: rule ? "IMPROVEMENT" : "CONTROL",
           code: rule?.changed_family ?? "CONTROL",
@@ -820,6 +822,10 @@ export async function buildCampaignRecommendationSet({
   const auditedDraftCount = candidateAudit.filter((item) => item.candidate_type === "DRAFT").length;
   const auditedNonDraftCount = candidateAudit.length - auditedDraftCount;
   const generatedCount = scored.length + auditedNonDraftCount;
+  const representedLeafIds = new Set(scored.flatMap((draft) => Array.isArray(draft.covered_leaf_ids) ? draft.covered_leaf_ids.map(String) : []));
+  const suppressedLeafIds = leafLedger.filter((leaf) => !representedLeafIds.has(leaf.leaf_id)).map((leaf) => leaf.leaf_id);
+  const uncoveredLeafIds = leafLedger.filter((leaf) => !text(leaf.terminal_disposition)).map((leaf) => leaf.leaf_id);
+  const generatedReconciles = generatedCount === candidateAudit.length && auditedDraftCount === scored.length;
   const recommendationSetId = `recommendation-set-${(await sha256({
     strategy_revision_id: strategyRevisionId,
     evidence_snapshot_id: analyticsEvidence?.snapshot_id ?? null,
@@ -850,7 +856,7 @@ export async function buildCampaignRecommendationSet({
       mutable_default_read_at_query_time: false,
     },
     coverage: {
-      status: "COMPLETE",
+      status: uncoveredLeafIds.length === 0 && generatedReconciles ? "COMPLETE" : "INCOMPLETE",
       generated_count: generatedCount,
       visible_count: visibleCount,
       hidden_count: hiddenCount,
@@ -862,10 +868,13 @@ export async function buildCampaignRecommendationSet({
       evidence_gap_drafts: scored.filter((draft) => draft.market_evidence_status === "EVIDENCE_GAP").length,
       reconciliation: {
         generated_equals_visible_plus_hidden: generatedCount === visibleCount + hiddenCount,
-        generated_equals_audited: generatedCount === candidateAudit.length && auditedDraftCount === scored.length,
-        unaudited_candidate_ids: [],
+        generated_equals_audited: generatedReconciles,
+        unaudited_candidate_ids: generatedReconciles ? [] : candidateAudit.filter((candidate) => candidate.candidate_type === "DRAFT" && !scored.some((draft) => draft.draft_id === candidate.draft_id)).map((candidate) => candidate.candidate_id),
       },
-      uncovered_axis_members: [],
+      represented_leaf_ids: [...representedLeafIds].sort(),
+      suppressed_leaf_ids: suppressedLeafIds.sort(),
+      uncovered_leaf_ids: uncoveredLeafIds.sort(),
+      uncovered_axis_members: leafLedger.length ? [] : [...productAxes, ...audienceAxes, ...offerAxes].map((member) => member.member_id),
     },
     candidate_audit: candidateAudit,
     axis_ledger: {
