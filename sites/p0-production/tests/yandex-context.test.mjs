@@ -20,7 +20,15 @@ test("verifies the exact Direct advertiser login through the official clients AP
     { token: "fixture-only", expectedAccount: "owner-account" },
     async (input, init) => {
       requests.push({ input: String(input), init });
-      return json({ result: { Clients: [{ Login: "owner-account", ClientId: "9007199254740993" }] } });
+      return json({ result: { Clients: [{
+        Login: "owner-account",
+        ClientId: "9007199254740993",
+        Archived: "NO",
+        Currency: "RUB",
+        Grants: [{ Privilege: "EDIT_CAMPAIGNS", Value: "YES" }],
+        AvailableCampaignTypes: ["UNIFIED_CAMPAIGN", "TEXT_CAMPAIGN"],
+        Restrictions: [{ Element: "CAMPAIGNS_TOTAL_PER_CLIENT", Value: 3000 }],
+      }] } });
     },
     () => "2026-08-21T10:00:00.000Z",
   );
@@ -28,12 +36,36 @@ test("verifies the exact Direct advertiser login through the official clients AP
   assert.equal(requests[0].input, "https://api.direct.yandex.com/json/v501/clients");
   assert.equal(requests[0].init.method, "POST");
   assert.equal(requests[0].init.headers["Client-Login"], "owner-account");
+  assert.deepEqual(JSON.parse(requests[0].init.body).params.FieldNames, [
+    "Login",
+    "ClientId",
+    "Archived",
+    "Currency",
+    "Grants",
+    "AvailableCampaignTypes",
+    "Restrictions",
+  ]);
+  assert.match(result.capability_snapshot.snapshot_id, /^direct-capability:sha256:[a-f0-9]{64}$/u);
   assert.deepEqual(result, {
     authority: "VERIFIED",
     access: "YANDEX_DIRECT_API_V501",
     account: "owner-account",
     client_id: "9007199254740993",
     binding: { expected_account: "owner-account", api_account: "owner-account", matched: true },
+    capability_snapshot: {
+      schema_version: "direct-account-capability-snapshot-v1",
+      snapshot_id: result.capability_snapshot.snapshot_id,
+      source: "YANDEX_DIRECT_API_V501",
+      account: "owner-account",
+      observed_at: "2026-08-21T10:00:00.000Z",
+      api_version: "v501",
+      archived: "NO",
+      currency: "RUB",
+      edit_campaigns_grant: "YES",
+      available_campaign_types: ["TEXT_CAMPAIGN", "UNIFIED_CAMPAIGN"],
+      restrictions: [{ element: "CAMPAIGNS_TOTAL_PER_CLIENT", value: 3000 }],
+      conditional_capabilities: [],
+    },
     observed_at: "2026-08-21T10:00:00.000Z",
   });
   assert.doesNotMatch(JSON.stringify(result), /fixture-only/u);

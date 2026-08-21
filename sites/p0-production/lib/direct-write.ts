@@ -7,7 +7,13 @@ export type DirectProjection = {
   lineage: {
     strategy_revision_id?: unknown;
     draft_id?: unknown;
+    draft_revision_id?: unknown;
     capability_profile_id?: unknown;
+    capability_profile_version?: unknown;
+    playbook_release_id?: unknown;
+    playbook_release_version?: unknown;
+    playbook_rule_id?: unknown;
+    playbook_rule_version?: unknown;
   };
   business: Record<string, unknown>;
   safety: { must_end_non_serving: true; resume_allowed: false; network_serving: false };

@@ -22,7 +22,9 @@ import {
   campaignDraftPublishBlockers,
   fingerprintDirectProjection,
   type CampaignRecommendationSet,
+  type DirectCapabilitySnapshot,
 } from "./campaign-fanout.ts";
+import { bundledCuratedPlaybookReleases } from "./campaign-playbook.ts";
 import {
   CAMPAIGN_STRATEGY_SCHEMA,
   STRATEGY_QUESTIONNAIRE_SCHEMA,
@@ -56,7 +58,7 @@ import {
 } from "./landing-advisory.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.5.0";
+export const P0_APPLICATION_CONTRACT_VERSION = "1.6.0";
 export const P0_DOCUMENT_SCHEMA = "p0-application-document-v4";
 const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3"]);
 export const P0_CONTEXT_SCHEMA = "p0-context-v2";
@@ -74,6 +76,7 @@ export type P0ContextState = {
       minimum_weekly_budget_rub: number | null;
       observed_at: string;
       source_kind: "YANDEX_DIRECT_API_V501";
+      capability_snapshot: DirectCapabilitySnapshot;
     };
     metrika: {
       counter_id: string;
@@ -390,6 +393,51 @@ function sanitizeSiteAnalysis(input: SiteAnalysis): SiteAnalysis {
   };
 }
 
+function sanitizeDirectCapabilitySnapshot(value: unknown): DirectCapabilitySnapshot {
+  const snapshot = record(value);
+  const restrictions = Array.isArray(snapshot.restrictions) ? snapshot.restrictions : [];
+  const conditional = Array.isArray(snapshot.conditional_capabilities) ? snapshot.conditional_capabilities : [];
+  return {
+    schema_version: cleanText(String(snapshot.schema_version ?? ""), 100) as DirectCapabilitySnapshot["schema_version"],
+    snapshot_id: cleanText(String(snapshot.snapshot_id ?? ""), 255),
+    observed_at: cleanText(String(snapshot.observed_at ?? ""), 100),
+    source: cleanText(String(snapshot.source ?? ""), 100) as DirectCapabilitySnapshot["source"],
+    account: cleanText(String(snapshot.account ?? ""), 255),
+    api_version: cleanText(String(snapshot.api_version ?? ""), 20) as DirectCapabilitySnapshot["api_version"],
+    currency: cleanText(String(snapshot.currency ?? ""), 20),
+    available_campaign_types: stringList(snapshot.available_campaign_types).sort(),
+    edit_campaigns_grant: ["YES", "NO"].includes(String(snapshot.edit_campaigns_grant))
+      ? String(snapshot.edit_campaigns_grant) as "YES" | "NO" : "UNKNOWN",
+    archived: ["YES", "NO"].includes(String(snapshot.archived))
+      ? String(snapshot.archived) as "YES" | "NO" : "UNKNOWN",
+    restrictions: restrictions.map((item) => {
+      const restriction = record(item);
+      return { element: cleanText(String(restriction.element ?? ""), 100), value: Number(restriction.value) };
+    }).filter((item) => item.element && Number.isFinite(item.value)).sort((left, right) => left.element.localeCompare(right.element)),
+    conditional_capabilities: conditional.map((item) => {
+      const capability = record(item);
+      const apiCheck = record(capability.official_api_check);
+      const accountCheck = record(capability.account_eligibility_check);
+      return {
+        capability: cleanText(String(capability.capability ?? ""), 100) as DirectCapabilitySnapshot["conditional_capabilities"][number]["capability"],
+        field_paths: stringList(capability.field_paths).sort(),
+        official_api_check: {
+          source: cleanText(String(apiCheck.source ?? ""), 100) as "YANDEX_DIRECT_API_V501",
+          endpoint: cleanText(String(apiCheck.endpoint ?? ""), 255),
+          method: cleanText(String(apiCheck.method ?? ""), 100),
+          evidence_id: cleanText(String(apiCheck.evidence_id ?? ""), 255),
+          verified: apiCheck.verified === true,
+        },
+        account_eligibility_check: {
+          account: cleanText(String(accountCheck.account ?? ""), 255),
+          evidence_id: cleanText(String(accountCheck.evidence_id ?? ""), 255),
+          eligible: accountCheck.eligible === true,
+        },
+      };
+    }).filter((item) => ["AUTOTARGETING", "SITELINKS", "PRODUCT_GALLERY", "NETWORK"].includes(item.capability)),
+  };
+}
+
 function sanitizeContext(input: P0Context): P0Context {
   const direct = record(input.direct);
   const directBinding = record(direct.binding);
@@ -428,6 +476,7 @@ function sanitizeContext(input: P0Context): P0Context {
       campaigns_total: Number(direct.campaigns_total ?? 0),
       minimum_weekly_budget_rub: Number(direct.minimum_weekly_budget_rub),
       observed_at: cleanText(String(direct.observed_at ?? ""), 100),
+      capability_snapshot: sanitizeDirectCapabilitySnapshot(direct.capability_snapshot),
       read_limitations: {
         inventory_complete: directReadLimitations.inventory_complete === true,
         limited_by: directReadLimitations.limited_by === null || directReadLimitations.limited_by === undefined
@@ -551,6 +600,7 @@ function observationIsFresh(value: unknown, nowValue: string) {
 export function contextPreflightBlockers(context: P0Context, nowValue: string) {
   const direct = record(context.direct);
   const directBinding = record(direct.binding);
+  const directCapability = record(direct.capability_snapshot);
   const metrika = record(context.metrika);
   const metrikaBinding = record(metrika.binding);
   const goalBinding = record(metrika.goal_binding);
@@ -573,6 +623,16 @@ export function contextPreflightBlockers(context: P0Context, nowValue: string) {
     blockers.push("Direct advertiser account binding не совпадает");
   }
   if (!observationIsFresh(direct.observed_at, nowValue)) blockers.push("Direct API preflight устарел");
+  if (
+    directCapability.schema_version !== "direct-account-capability-snapshot-v1"
+    || directCapability.source !== "YANDEX_DIRECT_API_V501"
+    || directCapability.api_version !== "v501"
+    || directCapability.account !== direct.account
+    || directCapability.archived !== "NO"
+    || directCapability.edit_campaigns_grant !== "YES"
+    || !Array.isArray(directCapability.available_campaign_types)
+    || !directCapability.available_campaign_types.includes("UNIFIED_CAMPAIGN")
+  ) blockers.push("Direct core v501 capability profile не подтверждён exact account preflight");
   if (metrika.ready !== true) blockers.push("Metrika API preflight недоступен или частичен");
   if (metrika.authority !== "VERIFIED" || metrika.access !== "YANDEX_METRIKA_MANAGEMENT_AND_REPORTS_API") {
     blockers.push("Metrika read authority не подтверждена официальным API");
@@ -646,6 +706,7 @@ function persistedContextFacts(site: SiteAnalysis, context: P0Context): P0Contex
       minimum_weekly_budget_rub: Number.isFinite(minimum) ? minimum : null,
       observed_at: cleanText(String(direct.observed_at ?? ""), 100),
       source_kind: "YANDEX_DIRECT_API_V501",
+      capability_snapshot: sanitizeDirectCapabilitySnapshot(direct.capability_snapshot),
     },
     metrika: {
       counter_id: cleanText(String(metrika.counter_id ?? ""), 100),
@@ -672,6 +733,7 @@ function providerMaterialFacts(context: P0Context) {
       client_id: String(direct.client_id ?? ""),
       campaigns_total: Number(direct.campaigns_total ?? 0),
       minimum_weekly_budget_rub: Number(direct.minimum_weekly_budget_rub),
+      capability_snapshot: sanitizeDirectCapabilitySnapshot(direct.capability_snapshot),
     },
     metrika: {
       counter_id: String(metrika.counter_id ?? ""),
@@ -687,6 +749,7 @@ function persistedProviderMaterialFacts(facts: P0ContextState["facts"]) {
       client_id: facts.direct.client_id,
       campaigns_total: facts.direct.campaigns_total,
       minimum_weekly_budget_rub: facts.direct.minimum_weekly_budget_rub,
+      capability_snapshot: facts.direct.capability_snapshot,
     },
     metrika: {
       counter_id: facts.metrika.counter_id,
@@ -1074,12 +1137,14 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     if (
       !state.recommendation_set
       || state.recommendation_set.strategy_revision_id !== strategy.strategy_revision_id
-      || state.recommendation_set.schema_version !== "campaign-recommendation-set-v2"
+      || state.recommendation_set.schema_version !== "campaign-recommendation-set-v3"
     ) {
       state.recommendation_set = await buildCampaignRecommendationSet({
         model: model as unknown as Record<string, unknown>,
         strategy: strategy as unknown as Record<string, unknown>,
         analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown> | undefined,
+        playbookReleases: await bundledCuratedPlaybookReleases(),
+        directCapabilitySnapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
         generatedAt: updatedAt,
       });
       changed = true;
@@ -1109,6 +1174,11 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
       draft.draft_revision_id = `${baseline.draft_id}-r${Math.max(1, revision)}`;
       draft.strategy_revision_id = strategy.strategy_revision_id;
       draft.capability_profile_id = state.recommendation_set?.capability_profile.profile_id;
+      draft.capability_profile_version = state.recommendation_set?.capability_profile.profile_version;
+      draft.playbook_release_id = baseline.playbook_release_id;
+      draft.playbook_release_version = baseline.playbook_release_version;
+      draft.playbook_rule_id = baseline.playbook_rule_id;
+      draft.playbook_rule_version = baseline.playbook_rule_version;
       changed = true;
       draftChanged = true;
     }
@@ -1637,6 +1707,8 @@ export class P0Application {
             model: state.business_model as unknown as Record<string, unknown>,
             strategy: state.strategy as unknown as Record<string, unknown>,
             analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
+            playbookReleases: await bundledCuratedPlaybookReleases(),
+            directCapabilitySnapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
             generatedAt: approvedAt,
           });
           state.landing_advisory_run = await this.buildLandingAdvisory(state);
@@ -1681,6 +1753,11 @@ export class P0Application {
         draft_revision_id: `${draftId}-r${current.revision + 1}`,
         strategy_revision_id: state.strategy.strategy_revision_id,
         capability_profile_id: recommendationSet.capability_profile.profile_id,
+        capability_profile_version: recommendationSet.capability_profile.profile_version,
+        playbook_release_id: generated.playbook_release_id,
+        playbook_release_version: generated.playbook_release_version,
+        playbook_rule_id: generated.playbook_rule_id,
+        playbook_rule_version: generated.playbook_rule_version,
       };
       const projection = buildPublishProjection(
         state.business_model as unknown as Record<string, unknown>,

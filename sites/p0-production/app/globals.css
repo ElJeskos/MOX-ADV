@@ -109,6 +109,12 @@ body::before {
 .context-strip span, .research-strip span { color: var(--muted); font-size: 8px; text-transform: uppercase; }
 .context-strip strong, .research-strip strong { margin-top: 9px; font-size: 14px; }
 .context-strip small, .research-strip small { margin-top: 6px; color: var(--muted); font-size: 7px; line-height: 1.5; }
+.recommendation-governance { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.recommendation-governance > div { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.recommendation-governance strong, .recommendation-governance code, .recommendation-governance small { display: block; overflow-wrap: anywhere; }
+.recommendation-governance strong { font-size: 8px; text-transform: uppercase; }
+.recommendation-governance code { margin-top: 6px; color: var(--green-dark); font-size: 8px; }
+.recommendation-governance small { margin-top: 5px; color: var(--muted); font-size: 7px; line-height: 1.45; }
 
 .form { display: grid; gap: 16px; padding-top: 22px; }
 .form.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildCampaignRecommendationSet } from "../lib/campaign-fanout.ts";
+import { bundledCuratedPlaybookReleases } from "../lib/campaign-playbook.ts";
 import { explainScoreDelta, scoreCampaignDrafts, viabilityScorePolicy } from "../lib/campaign-viability.ts";
 
 const model = {
@@ -62,6 +63,7 @@ async function recommendationSet(analyticsEvidence = evidence) {
     model,
     strategy,
     analyticsEvidence,
+    playbookReleases: await bundledCuratedPlaybookReleases(),
     generatedAt: "2026-08-21T12:00:00.000Z",
   });
 }
@@ -70,7 +72,7 @@ test("computes one deterministic non-predictive score for each hard-eligible Dra
   const first = await recommendationSet();
   const second = await recommendationSet();
   assert.deepEqual(first, second);
-  assert.equal(first.schema_version, "campaign-recommendation-set-v2");
+  assert.equal(first.schema_version, "campaign-recommendation-set-v3");
   assert.equal(first.score_contract.version, "viability-score/1.0.0");
 
   for (const draft of first.drafts) {

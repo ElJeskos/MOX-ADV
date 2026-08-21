@@ -6,6 +6,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { weeklyBudgetValidationMessage } from "../lib/direct-limits";
 import { landingAdvisoryPriorities } from "../lib/landing-advisory";
 import { MarketEvidenceDisclosure } from "./MarketEvidenceDisclosure";
+import { DraftPublicationBlockers, DraftTreatmentDelta, DraftVariantLabel, RecommendationSetDisclosure } from "./RecommendationSetDisclosure";
 
 type Payload = {
   contract: { name: string; version: string; document_schema: string };
@@ -473,18 +474,11 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
       Number(left.viability_score?.rank || 999) - Number(right.viability_score?.rank || 999)
       || String(left.draft_id).localeCompare(String(right.draft_id))
     );
-  const hiddenDrafts = drafts
-    .filter((item: Record<string, any>) => item.visibility === "HIDDEN")
-    .sort((left: Record<string, any>, right: Record<string, any>) =>
-      Number(left.viability_score?.rank || 999) - Number(right.viability_score?.rank || 999)
-      || String(left.draft_id).localeCompare(String(right.draft_id))
-    );
   const revisionHistory = (Array.isArray(payload.revision_history) ? payload.revision_history : [])
     .filter((item: Record<string, any>) => item.strategy_revision_id || item.draft_revision_id);
   const [selectedDraftId, setSelectedDraftId] = useState(String(existing.draft_id || visibleDrafts[0]?.draft_id || ""));
   const generated = visibleDrafts.find((item: Record<string, any>) => item.draft_id === selectedDraftId) || visibleDrafts[0] || existing;
   const selected = existing.draft_id === generated.draft_id ? { ...generated, ...existing } : generated;
-  const profile = recommendationSet.capability_profile || {};
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -496,20 +490,21 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   }
   return <>
     <ArtifactHead eyebrow="Шаг 4 · Campaign Drafts" title="Детерминированный fan-out Strategy" copy="Одна immutable Strategy revision дала несколько существенно различающихся полных проекций. Варианты с EVIDENCE_GAP доступны для review, но не входят в shortlist и не могут быть опубликованы." />
-    <div className="context-strip"><Metric label="Покрытие" value={`${recommendationSet.coverage?.visible_drafts || visibleDrafts.length} review · ${recommendationSet.coverage?.hidden_drafts || hiddenDrafts.length} скрыт`} copy={`${recommendationSet.coverage?.publishable_drafts || 0} доступно для publish; каждый кандидат имеет terminal disposition`} /><Metric label="Direct-профиль" value="Unified · Search" copy={`${profile.search_strategy || "WB_MAXIMUM_CLICKS"} · Network ${profile.network_strategy || "SERVING_OFF"}`} /><Metric label="Безопасный финиш" value="Только SUSPENDED" copy="Явный suspend подтверждается до дочерних записей" /></div>
+    <RecommendationSetDisclosure recommendationSet={recommendationSet} />
     <section className="draft-canvas" aria-label="Варианты Campaign Draft">
       {visibleDrafts.map((item: Record<string, any>) => <button type="button" key={item.draft_id} className={item.draft_id === selected.draft_id ? "selected" : ""} aria-pressed={item.draft_id === selected.draft_id} onClick={() => setSelectedDraftId(item.draft_id)}>
-        <span className="draft-card-head"><b>{item.variant?.kind === "CONTROL" ? "BASELINE" : "IMPROVEMENT"}</b><em>{item.viability_score?.score ?? "—"}<small>/100</small></em></span>
+        <span className="draft-card-head"><DraftVariantLabel draft={item} /><em>{item.viability_score?.score ?? "—"}<small>/100</small></em></span>
         <strong>{item.dimensions?.keyword_cluster}</strong>
         <p>{item.dimensions?.offer}</p>
         <small>{item.viability_score?.rank ? `Rank ${item.viability_score.rank} · диапазон ${item.viability_score.score_lower}–${item.viability_score.score_upper}` : "Score заблокирован hard eligibility"}</small>
         <small>{item.market_evidence_status === "EVIDENCE_GAP" ? "REVIEW ONLY · demand evidence отсутствует" : item.market_evidence_status}</small>
+        <DraftTreatmentDelta draft={item} />
       </button>)}
     </section>
-    {hiddenDrafts.length > 0 && <details className="hidden-drafts"><summary>Скрытые варианты · {hiddenDrafts.length}</summary><ul>{hiddenDrafts.map((item: Record<string, any>) => <li key={item.draft_id}><strong>{item.dimensions?.keyword_cluster}</strong><span>{item.viability_score?.score ?? "—"}/100 · {item.suppression_reason}</span></li>)}</ul></details>}
     {revisionHistory.length > 0 && <details className="hidden-drafts revision-history"><summary>История Strategy и Draft · {revisionHistory.length}</summary><ul>{revisionHistory.map((item: Record<string, any>) => <li key={item.revision}><strong>Ревизия {item.revision} · {item.status}</strong><span>{item.strategy_revision_id}{item.draft_revision_id ? ` · ${item.draft_revision_id}` : " · Draft ещё не зафиксирован"}{item.publish_fingerprint ? ` · ${String(item.publish_fingerprint).slice(0, 12)}…` : ""}</span></li>)}</ul></details>}
     {selected?.draft_id && <form key={selected.draft_id} className="form two" onSubmit={submit}>
-      <div className="wide draft-lineage"><strong>{selected.variant?.kind === "CONTROL" ? "Базовый comparator" : selected.variant?.hypothesis?.changed_family}</strong><span>{selected.strategy_revision_id} · {String(selected.publish_fingerprint || "").slice(0, 18)}…</span><small>{selected.publish_eligibility === "BLOCKED_EVIDENCE_GAP" ? "Publish заблокирован до допустимого demand evidence." : "Score v1 · не прогноз эффективности"}</small></div>
+      <div className="wide draft-lineage"><strong>{selected.variant?.kind === "CONTROL" ? selected.variant?.control_basis?.kind : selected.variant?.hypothesis?.changed_family}</strong><span>{selected.strategy_revision_id} · {selected.draft_revision_id} · {String(selected.publish_fingerprint || "").slice(0, 18)}…</span><small>{selected.playbook_release_id}@{selected.playbook_release_version} · {selected.capability_profile_id}@{selected.capability_profile_version}</small></div>
+      <DraftPublicationBlockers draft={selected} />
       {selected.market_evidence && <div className="wide"><MarketEvidenceDisclosure evidence={selected.market_evidence} context="draft" /></div>}
       <ViabilityDisclosure score={selected.viability_score} delta={selected.score_delta} />
       <label><span>Название кампании</span><input name="campaign_name" required defaultValue={selected.campaign_name} /></label>

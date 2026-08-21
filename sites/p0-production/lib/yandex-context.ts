@@ -31,6 +31,20 @@ function required(value: string, code: string, message: string) {
   return result;
 }
 
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, item]) => [key, canonicalize(item)]));
+}
+
+async function sha256(value: unknown) {
+  const bytes = new TextEncoder().encode(JSON.stringify(canonicalize(value)));
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return `sha256:${[...new Uint8Array(digest)].map((item) => item.toString(16).padStart(2, "0")).join("")}`;
+}
+
 async function officialJson(response: Response, provider: "Direct" | "Metrika") {
   if (!response.ok) {
     fail(`${provider.toUpperCase()}_API_UNAVAILABLE`, `${provider} API вернул HTTP ${response.status}.`);
@@ -68,7 +82,7 @@ export async function verifyDirectAccountBinding(
         method: "get",
         params: {
           SelectionCriteria: { Logins: [expectedAccount] },
-          FieldNames: ["Login", "ClientId"],
+          FieldNames: ["Login", "ClientId", "Archived", "Currency", "Grants", "AvailableCampaignTypes", "Restrictions"],
         },
       }),
     });
@@ -77,7 +91,15 @@ export async function verifyDirectAccountBinding(
   }
   const payload = await officialJson(response, "Direct") as {
     error?: unknown;
-    result?: { Clients?: Array<{ Login?: unknown; ClientId?: unknown }> };
+    result?: { Clients?: Array<{
+      Login?: unknown;
+      ClientId?: unknown;
+      Archived?: unknown;
+      Currency?: unknown;
+      Grants?: Array<{ Privilege?: unknown; Value?: unknown }>;
+      AvailableCampaignTypes?: unknown[];
+      Restrictions?: Array<{ Element?: unknown; Value?: unknown }>;
+    }> };
   };
   if (payload.error || !Array.isArray(payload.result?.Clients)) {
     fail("DIRECT_API_INVALID", "Direct clients.get не подтвердил advertiser binding.");
@@ -86,17 +108,51 @@ export async function verifyDirectAccountBinding(
   if (matching.length !== 1) {
     fail("DIRECT_ACCOUNT_BINDING_MISMATCH", "Direct API не подтвердил точный advertiser account binding.");
   }
+  const client = matching[0];
+  const availableCampaignTypes = Array.isArray(client.AvailableCampaignTypes)
+    ? [...new Set(client.AvailableCampaignTypes.map(String).filter(Boolean))].sort()
+    : [];
+  const grants = Array.isArray(client.Grants) ? client.Grants : [];
+  const editGrant = String(grants.find((grant) => String(grant.Privilege ?? "") === "EDIT_CAMPAIGNS")?.Value ?? "UNKNOWN");
+  const archived = String(client.Archived ?? "UNKNOWN");
+  const currency = String(client.Currency ?? "");
+  const restrictions = Array.isArray(client.Restrictions)
+    ? client.Restrictions.map((restriction) => ({ element: String(restriction.Element ?? ""), value: Number(restriction.Value) }))
+      .filter((restriction) => restriction.element && Number.isFinite(restriction.value))
+      .sort((left, right) => left.element.localeCompare(right.element))
+    : [];
+  if (!availableCampaignTypes.length || !currency || !["YES", "NO"].includes(archived) || !["YES", "NO"].includes(editGrant)) {
+    fail("DIRECT_CAPABILITY_SNAPSHOT_INVALID", "Direct clients.get не вернул точные account capability fields.");
+  }
+  const observedAt = now();
+  const snapshotBody = {
+    schema_version: "direct-account-capability-snapshot-v1" as const,
+    source: "YANDEX_DIRECT_API_V501" as const,
+    account: expectedAccount,
+    observed_at: observedAt,
+    api_version: "v501" as const,
+    archived: archived as "YES" | "NO",
+    currency,
+    edit_campaigns_grant: editGrant as "YES" | "NO",
+    available_campaign_types: availableCampaignTypes,
+    restrictions,
+    conditional_capabilities: [] as [],
+  };
   return {
     authority: "VERIFIED" as const,
     access: "YANDEX_DIRECT_API_V501" as const,
     account: expectedAccount,
-    client_id: String(matching[0].ClientId ?? ""),
+    client_id: String(client.ClientId ?? ""),
     binding: {
       expected_account: expectedAccount,
-      api_account: String(matching[0].Login),
+      api_account: String(client.Login),
       matched: true as const,
     },
-    observed_at: now(),
+    capability_snapshot: {
+      ...snapshotBody,
+      snapshot_id: `direct-capability:${await sha256(snapshotBody)}`,
+    },
+    observed_at: observedAt,
   };
 }
 

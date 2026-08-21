@@ -57,7 +57,13 @@ export function buildPublishProjection(
     lineage: {
       strategy_revision_id: draft.strategy_revision_id,
       draft_id: draft.draft_id,
+      draft_revision_id: draft.draft_revision_id,
       capability_profile_id: draft.capability_profile_id,
+      capability_profile_version: draft.capability_profile_version,
+      playbook_release_id: draft.playbook_release_id,
+      playbook_release_version: draft.playbook_release_version,
+      playbook_rule_id: draft.playbook_rule_id,
+      playbook_rule_version: draft.playbook_rule_version,
     },
     business: {
       product: strategyAnswerValue(strategy, "advertised_offer") || model.product,

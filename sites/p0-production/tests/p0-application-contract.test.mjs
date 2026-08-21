@@ -101,6 +101,20 @@ function context() {
       campaigns_total: 1,
       minimum_weekly_budget_rub: 300,
       observed_at: "2026-08-21T10:00:00.000Z",
+      capability_snapshot: {
+        schema_version: "direct-account-capability-snapshot-v1",
+        snapshot_id: "direct-capability:fixture-owner-account",
+        source: "YANDEX_DIRECT_API_V501",
+        account: "owner-account",
+        observed_at: "2026-08-21T10:00:00.000Z",
+        api_version: "v501",
+        archived: "NO",
+        currency: "RUB",
+        edit_campaigns_grant: "YES",
+        available_campaign_types: ["UNIFIED_CAMPAIGN"],
+        restrictions: [{ element: "CAMPAIGNS_TOTAL_PER_CLIENT", value: 3000 }],
+        conditional_capabilities: [],
+      },
       read_limitations: {
         inventory_complete: true,
         limited_by: null,
@@ -389,6 +403,10 @@ test("authoritative application collects market evidence only for a Model revisi
   result = await approveStrategy(application, result);
   assert.equal(result.state.recommendation_set.delivery_packing.delivery_buckets.length, 1);
   assert.equal(result.state.recommendation_set.delivery_packing.delivery_buckets[0].disposition, "PACKED");
+  assert.equal(result.state.context_state.facts.direct.capability_snapshot.source, "YANDEX_DIRECT_API_V501");
+  assert.equal(result.state.recommendation_set.direct_capability_snapshot_id, result.state.context_state.facts.direct.capability_snapshot.snapshot_id);
+  assert.equal(result.state.recommendation_set.capability_profile.eligibility.eligible, true);
+  assert.equal(result.state.recommendation_set.playbook_release.status, "ACTIVE_APPROVED");
   assert.equal(result.state.recommendation_set.drafts.every((draft) => draft.market_evidence.frequency.snapshot_batch_id === result.state.analytics_evidence_snapshot.market_evidence.snapshot_batch_id), true);
 });
 
@@ -813,7 +831,7 @@ test("one query/command contract drives and persists the current five-step path"
   assert.equal(result.revision, 6);
   assert.equal(result.workflow.current_step, 4);
   assert.equal(result.state.draft.strategy_revision_id, result.state.strategy.strategy_revision_id);
-  assert.equal(result.state.draft.publish_fingerprint.length, 64);
+  assert.match(result.state.draft.publish_fingerprint, /^sha256:[a-f0-9]{64}$/u);
 
   await assert.rejects(
     restarted.command("owner", {
@@ -833,6 +851,11 @@ test("Context preflight fails closed for stale, partial or mismatched exact API 
     {
       name: "mismatched Direct account",
       mutate(value) { value.direct.binding.api_account = "other-account"; value.direct.binding.matched = false; },
+      code: "P0_CONTEXT_PREFLIGHT_BLOCKED",
+    },
+    {
+      name: "unverified Direct capability source",
+      mutate(value) { value.direct.capability_snapshot.source = "UNTRUSTED_SNAPSHOT"; },
       code: "P0_CONTEXT_PREFLIGHT_BLOCKED",
     },
     {
@@ -1233,7 +1256,7 @@ test("legacy Sites state migrates with lineage before an external outcome surviv
   assert.equal(result.state.strategy.strategy_revision_id, "campaign-strategy-r7");
   assert.match(result.state.draft.draft_id, /^draft-/);
   assert.equal(result.state.draft.strategy_revision_id, "campaign-strategy-r7");
-  assert.equal(result.state.draft.publish_fingerprint.length, 64);
+  assert.match(result.state.draft.publish_fingerprint, /^sha256:[a-f0-9]{64}$/u);
   assert.equal(result.revision_history.at(-1).revision, 7);
 
   result = await application.command("owner", {
