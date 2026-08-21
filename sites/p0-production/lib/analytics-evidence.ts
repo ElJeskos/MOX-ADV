@@ -1,4 +1,9 @@
 import { normalizePublicHttpsUrl } from "./site-url.ts";
+import {
+  buildMarketEvidence,
+  unavailableWordstatBatch,
+  type MarketEvidenceInput,
+} from "./market-evidence.ts";
 
 export const ANALYTICS_EVIDENCE_SCHEMA = "p0-analytics-evidence-v2";
 export const ANALYTICS_EVIDENCE_CONTRACT_VERSION = "2.0.0";
@@ -162,10 +167,8 @@ export type AnalyticsEvidenceBundle = {
   conflicts: EvidenceConflict[];
   gaps: EvidenceGap[];
   material_uncertainties: string[];
-  prelaunch_cost: {
-    status: "UNAVAILABLE" | "HISTORICAL_FIRST_PARTY";
-    reason: string;
-  };
+  market_evidence: Awaited<ReturnType<typeof buildMarketEvidence>>;
+  prelaunch_cost: Awaited<ReturnType<typeof buildMarketEvidence>>["cost"];
   versions: {
     schema: string;
     contract: string;
@@ -175,6 +178,7 @@ export type AnalyticsEvidenceBundle = {
     model_extractor: string;
     direct_adapter: string;
     metrika_adapter: string;
+    wordstat_adapter: string;
     competitor_policy: string;
   };
   hashes: {
@@ -184,6 +188,7 @@ export type AnalyticsEvidenceBundle = {
     evidence_sha256: string;
     conflicts_sha256: string;
     gaps_sha256: string;
+    market_evidence_sha256: string;
   };
   contract_path: string;
 };
@@ -587,9 +592,19 @@ export async function buildAnalyticsEvidence({
     .sort((left, right) => compareText(text(record(left.locator).url), text(record(right.locator).url)));
   const competitorObservedAts = competitorInputs.map((item) => isoTimestamp(item.observed_at));
   const ownerObservedAts = Object.values(fieldEvidence).map((item) => isoTimestamp(record(item).owner_confirmed_at));
-  const asOf = latestTimestamp([siteObservedAt, directObservedAt, metrikaObservedAt, ...competitorObservedAts, ...ownerObservedAts])
+  const rawMarketInput = record(context.market_evidence_input);
+  const marketBatchObservedAt = isoTimestamp(record(rawMarketInput.wordstat_batch).batch_finished_at);
+  const asOf = latestTimestamp([siteObservedAt, directObservedAt, metrikaObservedAt, marketBatchObservedAt, ...competitorObservedAts, ...ownerObservedAts])
     ?? "1970-01-01T00:00:00.000Z";
   const generated = isoTimestamp(generatedAt) ?? asOf;
+  const marketInput = rawMarketInput.wordstat_batch
+    ? rawMarketInput as unknown as MarketEvidenceInput
+    : {
+        wordstat_batch: await unavailableWordstatBatch("Official scoped Wordstat observation was not collected for this Model revision.", generated),
+        demand_clusters: [],
+        cost_observations: [],
+      };
+  const marketEvidence = await buildMarketEvidence(marketInput);
   const companyHost = urlHost(site.url) || urlHost(record(list(site.pages)[0]).url);
   const directAccount = text(direct.account);
   const directClientId = text(direct.client_id);
@@ -1056,6 +1071,143 @@ export async function buildAnalyticsEvidence({
     }));
   }
 
+  if (marketEvidence.frequency.status !== "UNAVAILABLE") {
+    const normalizedDemand = marketEvidence.frequency;
+    const boundedDemand = safeValue(normalizedDemand);
+    const identity = await contentHash({
+      subject: "market_demand",
+      predicate: "scoped_wordstat_frequency",
+      normalized: { value: boundedDemand, datatype: "metric_observation" },
+    });
+    const claimId = `urn:mox:claim:${identity.slice("sha256:".length)}`;
+    const wordstatRecord = await makeEvidenceRecord({
+      sourceId: "wordstat",
+      claimId,
+      sourceKind: "wordstat_api",
+      sourceLocator: {
+        endpoint_host: "api.wordstat.yandex.net",
+        methods: ["/v1/topRequests", "/v1/dynamics", "/v1/regions"],
+        batch_id: marketEvidence.snapshot_batch_id,
+      },
+      fetchedAt: marketEvidence.batch_finished_at,
+      observedAt: marketEvidence.batch_finished_at,
+      effectiveInterval: { from: null, to: null, basis: "unknown" },
+      scope: {
+        batch_id: marketEvidence.snapshot_batch_id,
+        scopes: marketEvidence.frequency.scopes,
+        declared_window: marketEvidence.frequency.declared_window,
+        source_window_end: marketEvidence.frequency.source_window_end,
+      },
+      collectionPolicy: {
+        policy_id: "official-yandex-wordstat-read-only",
+        version: "v1",
+        allowed_host: "api.wordstat.yandex.net",
+        allowed_methods: ["POST /v1/topRequests", "POST /v1/dynamics", "POST /v1/regions"],
+        browser_cabinet_allowed: false,
+      },
+      extraction: {
+        method: "api_parser",
+        version: "wordstat-v1-scoped-demand-v1",
+        selector_or_jsonpath: "$.topRequests + $.dynamics + $.regions",
+        request_digest: await contentHash(marketEvidence.frequency.scopes),
+      },
+      rawValue: normalizedDemand,
+      normalized: normalizedDemand,
+      limitations: [
+        "Observed unique top rows are a lower bound, not exhaustive demand.",
+        "The API does not disclose the exact rolling-window end date.",
+        ...marketEvidence.frequency.gaps.map((gap) => gap.detail),
+      ],
+      qualityFlags: ["LOWER_BOUND_OBSERVED_TOP_ROWS", "SOURCE_WINDOW_END_UNDISCLOSED"],
+      providerMetadata: {
+        snapshot_batch_id: marketEvidence.snapshot_batch_id,
+        unique_assigned_row_ids: marketEvidence.frequency.unique_assigned_rows.map((row) => row.row_id),
+      },
+      freshnessPolicy: "wordstat-rolling-30d/24h-v1",
+      asOf,
+    });
+    evidence.push(wordstatRecord);
+    sourceEvidence.wordstat.push(wordstatRecord.evidence_id);
+    claims.push(await makeClaim({
+      subject: "market_demand",
+      predicate: "scoped_wordstat_frequency",
+      value: normalizedDemand,
+      normalized: { value: normalizedDemand, datatype: "metric_observation" },
+      classification: "documented_api_fact",
+      evidence_ids: [wordstatRecord.evidence_id],
+      confidence: confidenceForClaim({
+        quality: "A",
+        freshness: claimFreshness(isoTimestamp(marketEvidence.batch_finished_at), asOf),
+        consistency: marketEvidence.frequency.status === "PARTIAL" ? "scope_mismatch" : "single",
+        coverage: marketEvidence.frequency.status === "AVAILABLE" ? "complete_for_scope" : "partial",
+        uncertainty: ["Wordstat top rows are non-exhaustive; the aggregate is explicitly a lower bound."],
+        tier: marketEvidence.frequency.status === "AVAILABLE" ? "TIER_1_VERIFIED" : "TIER_3_INDICATIVE",
+      }),
+    }));
+  }
+
+  if (marketEvidence.cost.status === "AVAILABLE") {
+    const normalizedCost = marketEvidence.cost;
+    const boundedCost = safeValue(normalizedCost);
+    const identity = await contentHash({
+      subject: "prelaunch_cost",
+      predicate: "qualified_cost_range",
+      normalized: { value: boundedCost, datatype: "money_range" },
+    });
+    const claimId = `urn:mox:claim:${identity.slice("sha256:".length)}`;
+    const costRecord = await makeEvidenceRecord({
+      sourceId: "direct",
+      claimId,
+      sourceKind: "direct_cost_evidence",
+      sourceLocator: {
+        official_host: "api.direct.yandex.com",
+        source: normalizedCost.compact_source,
+        observation_id: normalizedCost.observations.find((item) => item.source === normalizedCost.compact_source)?.observation_id ?? null,
+      },
+      fetchedAt: normalizedCost.as_of ?? generated,
+      observedAt: normalizedCost.as_of ?? generated,
+      scope: normalizedCost.scope ?? {},
+      collectionPolicy: {
+        policy_id: "official-yandex-direct-read-only-cost",
+        version: "v1",
+        allowed_hosts: ["api.direct.yandex.com", "api.direct.yandex.ru"],
+        browser_cabinet_allowed: false,
+        source_precedence: ["LEGACY_LIVE4_SCENARIO", "KEYWORDBIDS_V5_CURRENT_PROXY", "DIRECT_HISTORY_OWN_EMPIRICAL"],
+        averaging_allowed: false,
+      },
+      extraction: {
+        method: "qualified_source_selection",
+        version: "prelaunch-cost-precedence-v1",
+        selector_or_jsonpath: null,
+        request_digest: await contentHash({ source: normalizedCost.compact_source, scope: normalizedCost.scope }),
+      },
+      rawValue: normalizedCost.observations,
+      normalized: normalizedCost,
+      limitations: ["The selected range is a scenario or empirical range, not a performance guarantee."],
+      qualityFlags: ["FIRST_QUALIFIED_SOURCE_NO_AVERAGING"],
+      providerMetadata: { precedence: normalizedCost.aggregation },
+      asOf,
+    });
+    evidence.push(costRecord);
+    sourceEvidence.direct.push(costRecord.evidence_id);
+    claims.push(await makeClaim({
+      subject: "prelaunch_cost",
+      predicate: "qualified_cost_range",
+      value: normalizedCost,
+      normalized: { value: normalizedCost, datatype: "money_range" },
+      classification: "documented_api_fact",
+      evidence_ids: [costRecord.evidence_id],
+      confidence: confidenceForClaim({
+        quality: "A",
+        freshness: claimFreshness(isoTimestamp(normalizedCost.as_of), asOf),
+        consistency: "single",
+        coverage: "complete_for_scope",
+        uncertainty: ["Source-labelled pre-launch cost is not a conversion or profitability forecast."],
+        tier: "TIER_1_VERIFIED",
+      }),
+    }));
+  }
+
   claims.sort((left, right) => compareText(left.claim_id, right.claim_id));
   evidence.sort((left, right) => compareText(left.evidence_id, right.evidence_id));
 
@@ -1131,13 +1283,24 @@ export async function buildAnalyticsEvidence({
     material: false,
     limitations: ["Public observations cannot establish hidden competitor performance facts."],
   }));
-  gaps.push(await makeGap({
-    code: "WORDSTAT_UNAVAILABLE_TICKET_104",
-    source_id: "wordstat",
-    description: "Wordstat demand evidence is outside this vertical slice and remains unavailable.",
-    material: false,
-    limitations: ["Wordstat frequency is not CPC or a budget forecast."],
-  }));
+  for (const gap of marketEvidence.frequency.gaps) {
+    gaps.push(await makeGap({
+      code: gap.code,
+      source_id: "wordstat",
+      description: gap.detail,
+      material: marketEvidence.frequency.status === "UNAVAILABLE",
+      limitations: ["Unavailable or partial Wordstat evidence is not zero demand."],
+    }));
+  }
+  if (marketEvidence.cost.status === "UNAVAILABLE") {
+    gaps.push(await makeGap({
+      code: "PRELAUNCH_COST_UNAVAILABLE",
+      source_id: "direct",
+      description: "No qualified account-specific preflight, comparable current auction proxy or comparable first-party historical CPC is available.",
+      material: false,
+      limitations: marketEvidence.cost.missing_or_conflict_reasons,
+    }));
+  }
   gaps.sort((left, right) => compareText(left.gap_id, right.gap_id));
 
   const modelFields = ["product", "audience", "value", "qualified_result", "exclusions"];
@@ -1159,6 +1322,11 @@ export async function buildAnalyticsEvidence({
     ? metrikaPartial ? "PARTIAL" : "VERIFIED"
     : metrikaManagementReady ? "PARTIAL" : "UNAVAILABLE";
   const competitorStatus: EvidenceSourceStatus = sourceEvidence.competitors.length ? "PARTIAL" : "UNAVAILABLE";
+  const wordstatStatus: EvidenceSourceStatus = marketEvidence.frequency.status === "AVAILABLE"
+    && marketEvidence.frequency.seasonality.status === "AVAILABLE"
+    && marketEvidence.frequency.geo_evidence.status === "AVAILABLE"
+    ? "VERIFIED"
+    : marketEvidence.frequency.status === "UNAVAILABLE" ? "UNAVAILABLE" : "PARTIAL";
 
   const sources = await Promise.all([
     makeSource({
@@ -1259,16 +1427,34 @@ export async function buildAnalyticsEvidence({
       title: "Спрос и Wordstat",
       source_kind: "wordstat_api",
       provenance_class: "WORDSTAT_OFFICIAL_API",
-      status: "UNAVAILABLE",
-      observed_at: null,
+      status: wordstatStatus,
+      observed_at: wordstatStatus === "UNAVAILABLE" ? null : marketEvidence.batch_finished_at,
       generated_at: generated,
-      scope: { ticket: "#104" },
-      access: "unavailable",
-      collection_policy: { policy_id: "official-yandex-wordstat-read-only", version: "placeholder" },
-      versions: { schema: ANALYTICS_EVIDENCE_SCHEMA, extractor: "UNAVAILABLE", policy: "ticket-104-boundary" },
-      facts: [],
-      limitations: ["Wordstat implementation belongs to #104.", "Wordstat frequency must never be treated as CPC or budget forecast."],
-      evidence_ids: [],
+      scope: {
+        batch_id: marketEvidence.snapshot_batch_id,
+        scopes: marketEvidence.frequency.scopes,
+        declared_window: marketEvidence.frequency.declared_window,
+        source_window_end: marketEvidence.frequency.source_window_end,
+      },
+      access: wordstatStatus === "UNAVAILABLE" ? "unavailable" : "owner_authorized",
+      collection_policy: {
+        policy_id: "official-yandex-wordstat-read-only",
+        version: "v1",
+        allowed_host: "api.wordstat.yandex.net",
+        allowed_methods: ["POST /v1/topRequests", "POST /v1/dynamics", "POST /v1/regions"],
+        browser_cabinet_allowed: false,
+      },
+      versions: { schema: ANALYTICS_EVIDENCE_SCHEMA, extractor: "wordstat-v1-scoped-demand-v1", policy: "official-yandex-wordstat-read-only/v1" },
+      facts: marketEvidence.frequency.status === "UNAVAILABLE" ? [] : [
+        `${marketEvidence.frequency.unique_assigned_rows.length} unique assigned Wordstat top rows`,
+        "Cluster frequency is LOWER_BOUND_OBSERVED_TOP_ROWS.",
+      ],
+      limitations: [
+        "Wordstat frequency is not CPC, users, clicks, guaranteed impressions or a budget forecast.",
+        "The exact rolling 30-day source window end is undisclosed by the API.",
+        ...marketEvidence.frequency.gaps.map((gap) => gap.detail),
+      ],
+      evidence_ids: sourceEvidence.wordstat,
     }),
   ]);
 
@@ -1311,15 +1497,17 @@ export async function buildAnalyticsEvidence({
     model_extractor: text(modelResearch.agent) || "GPT_SITES_EVIDENCE_RESEARCH_V3",
     direct_adapter: "direct-v501-campaign-inventory-v2",
     metrika_adapter: "metrika-management-and-stat-v2",
+    wordstat_adapter: "wordstat-v1-scoped-demand-v1",
     competitor_policy: "public-competitor-pages-v1",
   };
   const hashes = {
-    input_root_sha256: await contentHash({ scope, generated_at: generated, as_of: asOf, versions, sources, claims, evidence, conflicts, gaps }),
+    input_root_sha256: await contentHash({ scope, generated_at: generated, as_of: asOf, versions, sources, claims, evidence, conflicts, gaps, market_evidence: marketEvidence }),
     sources_sha256: await contentHash(sources),
     claims_sha256: await contentHash(claims),
     evidence_sha256: await contentHash(evidence),
     conflicts_sha256: await contentHash(conflicts),
     gaps_sha256: await contentHash(gaps),
+    market_evidence_sha256: await contentHash(marketEvidence),
   };
   const unsigned: Omit<AnalyticsEvidenceBundle, "snapshot_id"> = {
     schema_version: ANALYTICS_EVIDENCE_SCHEMA,
@@ -1348,10 +1536,8 @@ export async function buildAnalyticsEvidence({
     conflicts,
     gaps,
     material_uncertainties: materialUncertainties,
-    prelaunch_cost: {
-      status: "UNAVAILABLE" as const,
-      reason: "Wordstat API is not a CPC/budget forecast; comparable first-party history is unavailable.",
-    },
+    market_evidence: marketEvidence,
+    prelaunch_cost: marketEvidence.cost,
     versions,
     hashes,
     contract_path: "docs/research/analytics-evidence-contract.md",
@@ -1409,7 +1595,9 @@ export async function verifyAnalyticsEvidenceSnapshot(snapshot: AnalyticsEvidenc
     if (current.hashes.evidence_sha256 !== await contentHash(current.evidence)) return false;
     if (current.hashes.conflicts_sha256 !== await contentHash(current.conflicts)) return false;
     if (current.hashes.gaps_sha256 !== await contentHash(current.gaps)) return false;
-    if (current.hashes.input_root_sha256 !== await contentHash({
+    const hasMarketEvidence = Boolean((current as unknown as Record<string, unknown>).market_evidence);
+    if (hasMarketEvidence && current.hashes.market_evidence_sha256 !== await contentHash(current.market_evidence)) return false;
+    const inputRoot = {
       scope: current.scope,
       generated_at: current.generated_at,
       as_of: current.as_of,
@@ -1419,7 +1607,9 @@ export async function verifyAnalyticsEvidenceSnapshot(snapshot: AnalyticsEvidenc
       evidence: current.evidence,
       conflicts: current.conflicts,
       gaps: current.gaps,
-    })) return false;
+      ...(hasMarketEvidence ? { market_evidence: current.market_evidence } : {}),
+    };
+    if (current.hashes.input_root_sha256 !== await contentHash(inputRoot)) return false;
     const unsigned = { ...current } as Record<string, unknown>;
     delete unsigned.snapshot_id;
     return snapshotId === await contentHash(unsigned);

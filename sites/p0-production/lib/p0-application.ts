@@ -35,9 +35,10 @@ import {
 } from "./revision-history.ts";
 import { normalizePublicHttpsUrl } from "./site-url.ts";
 import { cleanText } from "./text.ts";
+import type { MarketEvidenceInput } from "./market-evidence.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.2.0";
+export const P0_APPLICATION_CONTRACT_VERSION = "1.3.0";
 export const P0_DOCUMENT_SCHEMA = "p0-application-document-v2";
 const P0_LEGACY_DOCUMENT_SCHEMA = "p0-application-document-v1";
 export const P0_CONTEXT_SCHEMA = "p0-context-v1";
@@ -155,6 +156,11 @@ export interface P0ApplicationAdapters {
   readContext(): Promise<P0Context>;
   researchSite(url: string): Promise<SiteAnalysis>;
   readCurrencyLimits(): Promise<{ minimum_weekly_budget_rub: number }>;
+  readMarketEvidence?(input: {
+    model: BusinessModel;
+    context: P0Context;
+    generatedAt: string;
+  }): Promise<MarketEvidenceInput>;
   externalWriteConfiguration(): P0ExternalWriteConfiguration;
   createExternalOutcome(input: {
     key: string;
@@ -1126,6 +1132,23 @@ export class P0Application {
     return rows.slice(0, 50).map((row) => summarizeP0Revision(row, currentRevision));
   }
 
+  private async buildModelEvidence(site: SiteAnalysis, model: BusinessModel, context: P0Context, generatedAt: string) {
+    const marketEvidenceInput: MarketEvidenceInput | undefined = await this.adapters.readMarketEvidence?.({
+      model,
+      context,
+      generatedAt,
+    });
+    return buildAnalyticsEvidence({
+      site: site as unknown as Record<string, unknown>,
+      model: model as unknown as Record<string, unknown>,
+      context: {
+        ...context as unknown as Record<string, unknown>,
+        ...(marketEvidenceInput ? { market_evidence_input: marketEvidenceInput } : {}),
+      },
+      generatedAt,
+    });
+  }
+
   private assertContextPreflight(context: P0Context, timestamp: string) {
     const blockers = contextPreflightBlockers(context, timestamp);
     if (blockers.length) fail("P0_CONTEXT_PREFLIGHT_BLOCKED", blockers[0]);
@@ -1276,12 +1299,12 @@ export class P0Application {
       };
       if (!state.business_model) {
         state.business_model = await inferModel(state.site_analysis, context);
-        state.analytics_evidence_snapshot = await buildAnalyticsEvidence({
-          site: state.site_analysis as unknown as Record<string, unknown>,
-          model: state.business_model as unknown as Record<string, unknown>,
-          context: context as unknown as Record<string, unknown>,
-          generatedAt: timestamp,
-        });
+        state.analytics_evidence_snapshot = await this.buildModelEvidence(
+          state.site_analysis,
+          state.business_model,
+          context,
+          timestamp,
+        );
       }
     } else if (action === "save_business_model") {
       if (!state.business_model) fail("P0_PREREQUISITE_MISSING", "Сначала исследуйте сайт.");
@@ -1305,12 +1328,12 @@ export class P0Application {
       const context = sanitizeContext(await this.adapters.readContext());
       this.assertContextPreflight(context, ownerConfirmedAt);
       this.assertPersistedBindings(state, context);
-      state.analytics_evidence_snapshot = await buildAnalyticsEvidence({
-        site: state.site_analysis as unknown as Record<string, unknown>,
-        model: state.business_model as unknown as Record<string, unknown>,
-        context: context as unknown as Record<string, unknown>,
-        generatedAt: ownerConfirmedAt,
-      });
+      state.analytics_evidence_snapshot = await this.buildModelEvidence(
+        state.site_analysis,
+        state.business_model,
+        context,
+        ownerConfirmedAt,
+      );
       state.strategy = null;
       state.recommendation_set = null;
       state.draft = null;

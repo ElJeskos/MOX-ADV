@@ -4,6 +4,7 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { weeklyBudgetValidationMessage } from "../lib/direct-limits";
+import { MarketEvidenceDisclosure } from "./MarketEvidenceDisclosure";
 
 type Payload = {
   contract: { name: string; version: string; document_schema: string };
@@ -289,9 +290,11 @@ function AnalyticsEvidencePanel({ evidence }: { evidence: Record<string, any> })
   const conflicts = Array.isArray(evidence.conflicts) ? evidence.conflicts : [];
   const gaps = Array.isArray(evidence.gaps) ? evidence.gaps : [];
   const prelaunchCost = evidence.prelaunch_cost || {};
+  const marketEvidence = evidence.market_evidence || null;
   return <section className="evidence-overview" aria-labelledby="evidence-overview-title">
     <header><div><p className="eyebrow">Versioned evidence snapshot</p><h3 id="evidence-overview-title">Краткая сводка аналитики</h3><p>Факты раскрываются до claim и source locator; score и hard blockers не смешиваются.</p></div><strong className={String(evidence.recommendation_status || "").toLowerCase()}>{evidenceStatusLabel(evidence.recommendation_status)}</strong></header>
-    <div className="evidence-kpis"><Metric label="Источники" value={`${summary.sources_verified || 0} проверено · ${summary.sources_partial || 0} частично`} copy={`${summary.sources_unavailable || 0} недоступно из ${summary.sources_total || 0}`} /><Metric label="Claims" value={String(summary.claims_supported || 0)} copy="Каждый связан с Evidence Record" /><Metric label="Стоимость до запуска" value={prelaunchCost.status === "HISTORICAL_FIRST_PARTY" ? "First-party history" : "Недоступна"} copy={prelaunchCost.reason || "Wordstat не является CPC forecast"} /></div>
+    <div className="evidence-kpis"><Metric label="Источники" value={`${summary.sources_verified || 0} проверено · ${summary.sources_partial || 0} частично`} copy={`${summary.sources_unavailable || 0} недоступно из ${summary.sources_total || 0}`} /><Metric label="Claims" value={String(summary.claims_supported || 0)} copy="Каждый связан с Evidence Record" /><Metric label="Стоимость до запуска" value={prelaunchCost.status === "AVAILABLE" ? String(prelaunchCost.compact_source || "Qualified source") : "Недоступна"} copy={prelaunchCost.status === "AVAILABLE" ? `${prelaunchCost.range?.low}–${prelaunchCost.range?.high} ${prelaunchCost.currency} · VAT ${prelaunchCost.vat_treatment}` : "Нет квалифицированного comparable source"} /></div>
+    {marketEvidence && <MarketEvidenceDisclosure evidence={marketEvidence} context="model" />}
     <dl className="confidence-vector" aria-label="Confidence dimensions"><div><dt>Качество</dt><dd>{confidence.quality || "UNKNOWN"}</dd></div><div><dt>Свежесть</dt><dd>{confidence.freshness || "UNKNOWN"}</dd></div><div><dt>Согласованность</dt><dd>{confidence.consistency || "NOT_EVALUATED"}</dd></div><div><dt>Покрытие</dt><dd>{confidence.coverage || "UNKNOWN"}</dd></div><div><dt>Неопределённость</dt><dd>{uncertainties.length}</dd></div></dl>
     <div className="evidence-source-grid">{sources.map((source: Record<string, any>) => <details key={source.source_id} className={`evidence-source ${String(source.status || "").toLowerCase()}`}><summary><span /><div><strong>{source.title}</strong><small>{sourceStatusLabel(source.status)}</small></div></summary><div className="evidence-source-body">{source.facts?.length > 0 && <ul>{source.facts.map((fact: string) => <li key={fact}>{fact}</li>)}</ul>}{source.limitations?.length > 0 && <ul className="limitations">{source.limitations.map((item: string) => <li key={item}>{item}</li>)}</ul>}<code>{source.source_kind} · {source.observed_at || "as_of unavailable"}</code></div></details>)}</div>
     {blockers.length > 0 && <section className="evidence-blockers" aria-labelledby="evidence-hard-blockers"><strong id="evidence-hard-blockers">Hard blockers оцениваются отдельно от score</strong><ul>{blockers.map((item: string) => <li key={item}>{item}</li>)}</ul></section>}
@@ -417,6 +420,7 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
     {revisionHistory.length > 0 && <details className="hidden-drafts revision-history"><summary>История Strategy и Draft · {revisionHistory.length}</summary><ul>{revisionHistory.map((item: Record<string, any>) => <li key={item.revision}><strong>Ревизия {item.revision} · {item.status}</strong><span>{item.strategy_revision_id}{item.draft_revision_id ? ` · ${item.draft_revision_id}` : " · Draft ещё не зафиксирован"}{item.publish_fingerprint ? ` · ${String(item.publish_fingerprint).slice(0, 12)}…` : ""}</span></li>)}</ul></details>}
     {selected?.draft_id && <form key={selected.draft_id} className="form two" onSubmit={submit}>
       <div className="wide draft-lineage"><strong>{selected.variant?.kind === "CONTROL" ? "Базовый comparator" : selected.variant?.hypothesis?.changed_family}</strong><span>{selected.strategy_revision_id} · {String(selected.publish_fingerprint || "").slice(0, 18)}…</span><small>{selected.publish_eligibility === "BLOCKED_EVIDENCE_GAP" ? "Publish заблокирован до допустимого demand evidence." : "Score v1 · не прогноз эффективности"}</small></div>
+      {selected.market_evidence && <div className="wide"><MarketEvidenceDisclosure evidence={selected.market_evidence} context="draft" /></div>}
       <ViabilityDisclosure score={selected.viability_score} delta={selected.score_delta} />
       <label><span>Название кампании</span><input name="campaign_name" required defaultValue={selected.campaign_name} /></label>
       <label><span>Название группы объявлений</span><input name="group_name" required defaultValue={selected.group_name} /></label>

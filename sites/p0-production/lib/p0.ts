@@ -21,6 +21,12 @@ import {
 import { researchPublicFirstPartySite } from "./site-research.ts";
 import { cleanText } from "./text.ts";
 import {
+  collectOfficialWordstatBatch,
+  unavailableWordstatBatch,
+  type MarketEvidenceInput,
+  type WordstatSeed,
+} from "./market-evidence.ts";
+import {
   verifyDirectAccountBinding,
   verifyMetrikaCounterBinding,
 } from "./yandex-context.ts";
@@ -345,6 +351,86 @@ async function readMetrika() {
   };
 }
 
+async function readMarketEvidence({
+  model,
+  generatedAt,
+}: {
+  model: Record<string, unknown>;
+  context: P0Context;
+  generatedAt: string;
+}): Promise<MarketEvidenceInput> {
+  const runtime = runtimeEnv();
+  const phrase = cleanText(String(model.product ?? ""), 500);
+  const regionIds = String(runtime.YANDEX_WORDSTAT_REGION_IDS ?? "")
+    .split(",")
+    .map((item) => Number(item.trim()))
+    .filter((item) => Number.isSafeInteger(item) && item > 0);
+  const regionNames = String(runtime.YANDEX_WORDSTAT_REGION_NAMES ?? "")
+    .split(",")
+    .map((item) => cleanText(item, 100))
+    .filter(Boolean);
+  const configuredDevice = String(runtime.YANDEX_WORDSTAT_DEVICE ?? "all") as WordstatSeed["device"];
+  const clusterId = "demand-cluster-primary";
+  const demandClusters = [{
+    cluster_id: clusterId,
+    semantic_key: {
+      product: phrase,
+      need: cleanText(String(model.audience ?? ""), 500),
+      intent: cleanText(String(model.qualified_result ?? ""), 500),
+      offer: cleanText(String(model.value ?? ""), 500),
+    },
+  }];
+  const configurationMissing = !phrase
+    || !runtime.YANDEX_WORDSTAT_OAUTH_TOKEN
+    || !runtime.YANDEX_WORDSTAT_CLIENT_ID
+    || regionIds.length === 0
+    || regionNames.length !== regionIds.length
+    || !["all", "desktop", "phone", "tablet"].includes(configuredDevice);
+  if (configurationMissing) {
+    return {
+      wordstat_batch: await unavailableWordstatBatch(
+        "Scoped Wordstat authority, phrase, explicit regions or device is unavailable for this Model revision.",
+        generatedAt,
+      ),
+      demand_clusters: demandClusters,
+      cost_observations: [],
+    };
+  }
+  const dynamicsPhrase = phrase
+    .replace(/[!"[\]()|+]/gu, " ")
+    .split(/\s+/u)
+    .map((item) => item.replace(/[^\p{L}\p{N}-]/gu, ""))
+    .filter(Boolean)
+    .map((item) => `+${item}`)
+    .join(" ");
+  const observedDate = new Date(generatedAt);
+  const dynamicsTo = new Date(Date.UTC(observedDate.getUTCFullYear(), observedDate.getUTCMonth(), 0));
+  const dynamicsFrom = new Date(Date.UTC(dynamicsTo.getUTCFullYear() - 3, dynamicsTo.getUTCMonth(), 1));
+  const wordstatBatch = await collectOfficialWordstatBatch({
+    token: runtime.YANDEX_WORDSTAT_OAUTH_TOKEN ?? "",
+    clientId: runtime.YANDEX_WORDSTAT_CLIENT_ID ?? "",
+    seeds: [{
+      seed_id: "primary-product-demand",
+      cluster_id: clusterId,
+      phrase,
+      dynamics_phrase: dynamicsPhrase,
+      dynamics_period: "monthly",
+      dynamics_from_date: dynamicsFrom.toISOString().slice(0, 10),
+      dynamics_to_date: dynamicsTo.toISOString().slice(0, 10),
+      operator_profile: "BROAD_CONTAINING",
+      region_ids: regionIds,
+      region_names: regionNames,
+      device: configuredDevice,
+    }],
+  }, fetch, now);
+  return {
+    wordstat_batch: wordstatBatch,
+    demand_clusters: demandClusters,
+    // Cost remains unavailable unless a separately qualified first-party observation is collected.
+    cost_observations: [],
+  };
+}
+
 async function readContext(): Promise<P0Context> {
   const [directBindingResult, directResult, limitsResult, metrikaBindingResult, metrikaResult] = await Promise.allSettled([
     readDirectBinding(),
@@ -620,6 +706,7 @@ const application = new P0Application({
     readContext,
     researchSite,
     readCurrencyLimits,
+    readMarketEvidence,
     externalWriteConfiguration() {
       const config = directWriteConfig();
       const blockers = [

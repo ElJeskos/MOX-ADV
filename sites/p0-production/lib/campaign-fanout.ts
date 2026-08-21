@@ -1,6 +1,10 @@
 import { buildAdText, buildAdTitle } from "./ad-copy.ts";
 import { buildPublishProjection } from "./campaign-draft.ts";
 import {
+  packDemandClusters,
+  type PackableDemandCluster,
+} from "./market-evidence.ts";
+import {
   scoreCampaignDrafts,
   type ViabilityScoreResult,
 } from "./campaign-viability.ts";
@@ -146,6 +150,7 @@ export type CampaignRecommendationSet = {
   coverage: Record<string, unknown>;
   termination: Record<string, unknown>;
   score_contract: Record<string, unknown>;
+  delivery_packing: Awaited<ReturnType<typeof packDemandClusters>>;
   drafts: CampaignDraftCandidate[];
 };
 
@@ -163,6 +168,50 @@ export async function buildCampaignRecommendationSet({
   const strategyRevisionId = text(strategy.strategy_revision_id);
   if (!strategyRevisionId) throw new Error("Campaign Strategy должна иметь immutable revision ID.");
   const controlBasis = competitorControlBasis(analyticsEvidence);
+  const marketEvidence = analyticsEvidence?.market_evidence && typeof analyticsEvidence.market_evidence === "object"
+    ? analyticsEvidence.market_evidence as Record<string, unknown>
+    : {};
+  const frequency = marketEvidence.frequency && typeof marketEvidence.frequency === "object"
+    ? marketEvidence.frequency as Record<string, unknown>
+    : {};
+  const cost = marketEvidence.cost && typeof marketEvidence.cost === "object"
+    ? marketEvidence.cost as Record<string, unknown>
+    : {};
+  const demandClusters = Array.isArray(frequency.clusters) ? frequency.clusters as Array<Record<string, unknown>> : [];
+  const selectedCost = Array.isArray(cost.observations)
+    ? (cost.observations as Array<Record<string, unknown>>).find((item) => item.source === cost.compact_source)
+    : undefined;
+  const capacity = selectedCost?.source === "LEGACY_LIVE4_SCENARIO" && selectedCost.capacity && typeof selectedCost.capacity === "object"
+    ? {
+        status: "AVAILABLE" as const,
+        source: "LEGACY_LIVE4_SCENARIO" as const,
+        forecast_clicks: Number((selectedCost.capacity as Record<string, unknown>).forecast_clicks),
+        forecast_total_spend: Number((selectedCost.capacity as Record<string, unknown>).forecast_total_spend),
+      }
+    : { status: "UNAVAILABLE" as const, source: null };
+  const provisionalMonthlyBudget = Number(strategy.weekly_budget_rub) * 52 / 12;
+  const packableClusters: PackableDemandCluster[] = demandClusters.map((cluster, index) => ({
+    cluster_id: text(cluster.cluster_id),
+    primary: index === 0,
+    demand_status: ["AVAILABLE", "PARTIAL"].includes(text(cluster.status)) && Array.isArray(cluster.assigned_row_ids) && cluster.assigned_row_ids.length > 0
+      ? text(cluster.status) as "AVAILABLE" | "PARTIAL"
+      : "UNAVAILABLE",
+    unique_publish_row_ids: Array.isArray(cluster.assigned_row_ids) ? cluster.assigned_row_ids.map(text).filter(Boolean) : [],
+    delivery_key: {
+      goal: strategy.goal,
+      economics: { weekly_budget_rub: strategy.weekly_budget_rub, target_cpa_rub: strategy.target_cpa_rub },
+      geography: strategy.geography,
+      landing: strategy.landing_page,
+      message: strategy.message,
+      management: CAPABILITY_PROFILE,
+    },
+    provisional_monthly_budget: provisionalMonthlyBudget,
+    capacity,
+  }));
+  const deliveryPacking = await packDemandClusters(packableClusters);
+  const packedClusterIds = new Set(deliveryPacking.delivery_buckets.flatMap((bucket) => bucket.demand_cluster_ids as string[]));
+  const demandReady = frequency.status === "AVAILABLE" && packedClusterIds.size > 0;
+  const demandPartial = frequency.status === "PARTIAL" && packedClusterIds.size > 0;
   const variantSpecs = [
     {
       code: "CONTROL",
@@ -260,9 +309,15 @@ export async function buildCampaignRecommendationSet({
         core_message: text(strategy.message),
         management_profile: CAPABILITY_PROFILE,
       },
-      market_evidence_status: "EVIDENCE_GAP",
-      shortlist_eligible: false,
-      publish_eligibility: "BLOCKED_EVIDENCE_GAP",
+      market_evidence: {
+        contract_version: marketEvidence.contract_version ?? "demand-cost-packing-v1",
+        frequency,
+        cost,
+        packing: deliveryPacking,
+      },
+      market_evidence_status: demandReady ? "AVAILABLE" : demandPartial ? "PARTIAL" : "EVIDENCE_GAP",
+      shortlist_eligible: demandReady,
+      publish_eligibility: demandReady ? "ELIGIBLE" : "BLOCKED_EVIDENCE_GAP",
       visibility,
       suppression_reason: duplicateOf
         ? "HIDDEN:NO_MATERIAL_DELTA"
@@ -323,10 +378,11 @@ export async function buildCampaignRecommendationSet({
     },
     termination: {
       contract: "FINITE_NON_RECURSIVE",
-      delivery_buckets: 1,
+      delivery_buckets: deliveryPacking.delivery_buckets.length,
       maximum_drafts_per_bucket: MAX_DRAFTS_PER_DELIVERY_BUCKET,
       all_candidates_terminal: true,
     },
+    delivery_packing: deliveryPacking,
     score_contract: {
       version: "viability-score/1.0.0",
       status: "UNCALIBRATED_POLICY_V1",

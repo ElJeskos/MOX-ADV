@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -7,6 +8,7 @@ import {
   buildAnalyticsEvidence,
   verifyAnalyticsEvidenceSnapshot,
 } from "../lib/analytics-evidence.ts";
+import { collectOfficialWordstatBatch } from "../lib/market-evidence.ts";
 
 function fixture({ sampled = false, sensitive = false, lag = 0, missing = [], competitors = [] } = {}) {
   return {
@@ -171,6 +173,7 @@ test("builds a deeply immutable content-addressed snapshot with stable IDs, comp
     "evidence_sha256",
     "gaps_sha256",
     "input_root_sha256",
+    "market_evidence_sha256",
     "sources_sha256",
   ]);
   assert.ok(first.sources.every((source) => /^sha256:[a-f0-9]{64}$/.test(source.manifest_hash)));
@@ -210,6 +213,65 @@ test("content IDs are insensitive to object key order and sensitive to normalize
   const changedVersion = fixture();
   changedVersion.model.research = { agent: "GPT_SITES_EVIDENCE_RESEARCH_V4" };
   assert.notEqual((await buildAnalyticsEvidence(changedVersion)).snapshot_id, original.snapshot_id);
+});
+
+test("persists official scoped demand and qualified cost inside the content-addressed Analytics Evidence Snapshot", async () => {
+  const topRequests = JSON.parse(await readFile(new URL("./fixtures/wordstat/top-requests.json", import.meta.url), "utf8"));
+  const dynamics = JSON.parse(await readFile(new URL("./fixtures/wordstat/dynamics.json", import.meta.url), "utf8"));
+  const regions = JSON.parse(await readFile(new URL("./fixtures/wordstat/regions.json", import.meta.url), "utf8"));
+  let tick = 0;
+  const batch = await collectOfficialWordstatBatch({
+    token: "fixture-only",
+    clientId: "fixture-client",
+    seeds: [{
+      seed_id: "seed-participation",
+      cluster_id: "cluster-participation",
+      phrase: "участие в выставке",
+      dynamics_phrase: "+участие +выставке",
+      dynamics_period: "monthly",
+      dynamics_from_date: "2025-01-01",
+      dynamics_to_date: "2026-07-31",
+      operator_profile: "BROAD_CONTAINING",
+      region_ids: [213],
+      region_names: ["Москва"],
+      device: "desktop",
+    }],
+  }, async (input) => {
+    const path = new URL(String(input)).pathname;
+    return new Response(JSON.stringify(path.endsWith("topRequests") ? topRequests : path.endsWith("dynamics") ? dynamics : regions));
+  }, () => `2026-08-21T10:04:${String(tick++).padStart(2, "0")}.000Z`);
+  const input = fixture();
+  input.context.market_evidence_input = {
+    wordstat_batch: batch,
+    demand_clusters: [{ cluster_id: "cluster-participation", semantic_key: { product: "выставка", need: "участие", intent: "commercial", offer: "стенд" } }],
+    cost_observations: [{
+      observation_id: "history-1",
+      source: "DIRECT_HISTORY_OWN_EMPIRICAL",
+      status: "AVAILABLE",
+      scenario: "day-level P25-P75",
+      scope: { account: "owner-login", phrase: "CLUSTER", geography: "SAME", placement: "SAME", strategy: "SAME", season: "SAME" },
+      as_of: "2026-08-20T00:00:00.000Z",
+      currency: "RUB",
+      vat_treatment: "INCLUDED",
+      sample_size: { unit: "clicks", value: 42 },
+      range: { low: 110, high: 170, kind: "EMPIRICAL_IQR" },
+      qualification: { first_party: true, clicks: 42 },
+    }],
+  };
+
+  const snapshot = await buildAnalyticsEvidence(input);
+  assert.equal(snapshot.market_evidence.frequency.status, "AVAILABLE");
+  assert.deepEqual(snapshot.market_evidence.frequency.observed_unique_count, { value: 67, semantics: "LOWER_BOUND_OBSERVED_TOP_ROWS" });
+  assert.equal(snapshot.market_evidence.cost.compact_source, "DIRECT_HISTORY_OWN_EMPIRICAL");
+  assert.equal(snapshot.sources.find((source) => source.source_id === "wordstat")?.status, "VERIFIED");
+  assert.ok(snapshot.evidence.some((record) => record.source_kind === "wordstat_api"));
+  assert.match(snapshot.hashes.market_evidence_sha256, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(await verifyAnalyticsEvidenceSnapshot(snapshot), true);
+
+  const corrupted = structuredClone(snapshot);
+  corrupted.market_evidence.frequency.observed_unique_count.value = 999999;
+  assert.equal(await verifyAnalyticsEvidenceSnapshot(corrupted), false);
+  assert.doesNotMatch(JSON.stringify(snapshot), /fixture-only|fixture-client/iu);
 });
 
 test("keeps first-party public and owner-confirmed provenance in separate source manifests and Evidence Records", async () => {

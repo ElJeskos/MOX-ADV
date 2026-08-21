@@ -10,6 +10,7 @@ import {
   P0Application,
   P0ApplicationError,
 } from "../lib/p0-application.ts";
+import { collectOfficialWordstatBatch } from "../lib/market-evidence.ts";
 
 class JsonDurableStore {
   constructor(path) {
@@ -214,6 +215,68 @@ function strategyValue() {
     message: "Найдите новых покупателей на выставке",
   };
 }
+
+async function marketEvidenceInput() {
+  const top = JSON.parse(await readFile(new URL("./fixtures/wordstat/top-requests.json", import.meta.url), "utf8"));
+  const dynamics = JSON.parse(await readFile(new URL("./fixtures/wordstat/dynamics.json", import.meta.url), "utf8"));
+  const regions = JSON.parse(await readFile(new URL("./fixtures/wordstat/regions.json", import.meta.url), "utf8"));
+  let tick = 0;
+  const wordstatBatch = await collectOfficialWordstatBatch({
+    token: "fixture-only",
+    clientId: "fixture-client",
+    seeds: [{
+      seed_id: "seed-participation",
+      cluster_id: "cluster-participation",
+      phrase: "участие в выставке",
+      dynamics_phrase: "+участие +выставке",
+      dynamics_period: "monthly",
+      dynamics_from_date: "2025-01-01",
+      dynamics_to_date: "2026-07-31",
+      operator_profile: "BROAD_CONTAINING",
+      region_ids: [213],
+      region_names: ["Москва"],
+      device: "desktop",
+    }],
+  }, async (input) => {
+    const path = new URL(String(input)).pathname;
+    return new Response(JSON.stringify(path.endsWith("topRequests") ? top : path.endsWith("dynamics") ? dynamics : regions));
+  }, () => `2026-08-21T10:00:${String(tick++).padStart(2, "0")}.000Z`);
+  return {
+    wordstat_batch: wordstatBatch,
+    demand_clusters: [{ cluster_id: "cluster-participation", semantic_key: { product: "выставка", need: "участие", intent: "commercial", offer: "стенд" } }],
+    cost_observations: [],
+  };
+}
+
+test("authoritative application collects market evidence only for a Model revision and persists it for downstream delivery packing", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mox-p0-market-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new JsonDurableStore(join(directory, "state.json"));
+  let marketReads = 0;
+  const application = new P0Application({ store, adapters: adapters({
+    async readMarketEvidence() {
+      marketReads += 1;
+      return marketEvidenceInput();
+    },
+  }) });
+
+  let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/" });
+  result = await application.command("owner", { action: "confirm_context_goal", expected_revision: result.revision, confirmation: "CONFIRM_CONTEXT_GOAL", goal: result.state.context_state.provisional_business_goal.value });
+  assert.equal(marketReads, 1);
+  assert.equal(result.state.analytics_evidence_snapshot.market_evidence.frequency.status, "AVAILABLE");
+  const persistedSnapshot = result.state.analytics_evidence_snapshot.snapshot_id;
+
+  const queried = await application.query("owner");
+  assert.equal(marketReads, 1);
+  assert.equal(queried.state.analytics_evidence_snapshot.snapshot_id, persistedSnapshot);
+
+  result = await application.command("owner", { action: "save_business_model", expected_revision: queried.revision, value: ownerModel(queried.state) });
+  assert.equal(marketReads, 2);
+  result = await application.command("owner", { action: "save_strategy", expected_revision: result.revision, value: strategyValue() });
+  assert.equal(result.state.recommendation_set.delivery_packing.delivery_buckets.length, 1);
+  assert.equal(result.state.recommendation_set.delivery_packing.delivery_buckets[0].disposition, "PACKED");
+  assert.equal(result.state.recommendation_set.drafts.every((draft) => draft.market_evidence.frequency.snapshot_batch_id === result.state.analytics_evidence_snapshot.market_evidence.snapshot_batch_id), true);
+});
 
 test("one query/command contract drives and persists the current five-step path", async (t) => {
   const { directory, store, application } = await fixture();
