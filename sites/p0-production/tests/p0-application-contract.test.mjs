@@ -64,6 +64,25 @@ class JsonDurableStore {
   }
 }
 
+function canonicalizeForTest(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeForTest);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, canonicalizeForTest(item)]));
+}
+
+async function sha256ForTest(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(canonicalizeForTest(value))));
+  return `sha256:${[...new Uint8Array(digest)].map((item) => item.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function rehashLandingAdvisoryForTest(run) {
+  run.advisory_key = `landing-advisory-key:${await sha256ForTest({
+    strategy_revision_id: run.strategy_revision_id,
+    final_url: run.final_url ?? run.requested_url,
+  })}`;
+  run.run_id = `landing-advisory:${await sha256ForTest(Object.fromEntries(Object.entries(run).filter(([key]) => key !== "run_id")))}`;
+}
+
 function context() {
   return {
     environment: "PRODUCTION",
@@ -442,7 +461,7 @@ test("authoritative application persists LandingAdvisoryRun while every publish 
   assert.equal(publishDecision(left.result), beforeRerun);
 });
 
-test("rejects malformed persisted LandingAdvisoryRun before it can be queried or used downstream", async (t) => {
+test("rejects a content-rehashed cross-party LandingAdvisoryRun before query or downstream use", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "mox-p0-landing-corrupt-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new JsonDurableStore(join(directory, "state.json"));
@@ -453,7 +472,9 @@ test("rejects malformed persisted LandingAdvisoryRun before it can be queried or
   await approveStrategy(application, result, { landing_page: "https://owner.example/participate" });
   const row = await store.load("owner");
   const corrupted = JSON.parse(row.value_json);
-  corrupted.landing_advisory_run.findings[0].type = "PROMOTED_GUESS";
+  corrupted.landing_advisory_run.final_url = "https://unrelated.example/participate";
+  corrupted.landing_advisory_run.browser_safety.allowed_hosts = ["owner.example", "unrelated.example"];
+  await rehashLandingAdvisoryForTest(corrupted.landing_advisory_run);
   await store.seed("owner", { ...row, value_json: JSON.stringify(corrupted) });
 
   await assert.rejects(

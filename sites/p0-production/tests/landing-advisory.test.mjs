@@ -182,10 +182,18 @@ function canonicalizeForTest(value) {
   return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, canonicalizeForTest(item)]));
 }
 
+async function sha256ForTest(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(canonicalizeForTest(value))));
+  return `sha256:${[...new Uint8Array(digest)].map((item) => item.toString(16).padStart(2, "0")).join("")}`;
+}
+
 async function rehashRun(run) {
+  run.advisory_key = `landing-advisory-key:${await sha256ForTest({
+    strategy_revision_id: run.strategy_revision_id,
+    final_url: run.final_url ?? run.requested_url,
+  })}`;
   const withoutRunId = Object.fromEntries(Object.entries(run).filter(([key]) => key !== "run_id"));
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(canonicalizeForTest(withoutRunId))));
-  run.run_id = `landing-advisory:sha256:${[...new Uint8Array(digest)].map((item) => item.toString(16).padStart(2, "0")).join("")}`;
+  run.run_id = `landing-advisory:${await sha256ForTest(withoutRunId)}`;
   return run;
 }
 
@@ -394,6 +402,21 @@ test("operator priorities are deterministic, exclude hypotheses and are capped a
   assert.equal(priorities.length, 3);
   assert.equal(priorities[0].finding_id, "extra-priority");
   assert.equal(priorities.some((item) => item.type === "LLM_HYPOTHESIS"), false);
+});
+
+test("run verification rejects content-rehashed final URL and allowlist policy tampering", async () => {
+  const run = await runWith(adapter());
+  const crossPartyFinal = structuredClone(run);
+  crossPartyFinal.final_url = "https://unrelated.example/participate";
+  crossPartyFinal.browser_safety.allowed_hosts = ["owner.example", "unrelated.example"];
+  const restrictedFinal = structuredClone(run);
+  restrictedFinal.final_url = "https://owner.example/admin";
+  const inconsistentAllowedHosts = structuredClone(run);
+  inconsistentAllowedHosts.browser_safety.allowed_hosts = ["www.owner.example"];
+
+  assert.equal(await verifyLandingAdvisoryRun(await rehashRun(crossPartyFinal)), false);
+  assert.equal(await verifyLandingAdvisoryRun(await rehashRun(restrictedFinal)), false);
+  assert.equal(await verifyLandingAdvisoryRun(await rehashRun(inconsistentAllowedHosts)), false);
 });
 
 test("run hash verification rejects malformed persisted artifacts and finding enums", async () => {

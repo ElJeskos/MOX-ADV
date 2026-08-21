@@ -268,9 +268,15 @@ function rootHost(hostname: string) {
   return hostname.toLowerCase().replace(/^www\./u, "");
 }
 
+function hostIsIpLiteral(hostname: string) {
+  const value = hostname.toLowerCase().replace(/^\[|\]$/gu, "");
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/u.test(value) || value.includes(":");
+}
+
 function sameFirstPartyFamily(left: string, right: string) {
   const leftRoot = rootHost(left);
   const rightRoot = rootHost(right);
+  if (hostIsIpLiteral(leftRoot) || hostIsIpLiteral(rightRoot)) return leftRoot === rightRoot;
   return leftRoot === rightRoot || leftRoot.endsWith(`.${rightRoot}`) || rightRoot.endsWith(`.${leftRoot}`);
 }
 
@@ -1046,6 +1052,56 @@ function persistedLighthouseResultIsValid(value: unknown) {
   }
 }
 
+function persistedLandingUrlPolicyIsConsistent(
+  run: Record<string, unknown>,
+  browserSafety: Record<string, unknown>,
+) {
+  let requested: URL;
+  let final: URL | null = null;
+  try {
+    requested = safeUrl(String(run.requested_url));
+    if (requested.toString() !== run.requested_url) return false;
+    if (run.final_url !== null) {
+      final = safeUrl(String(run.final_url));
+      if (final.toString() !== run.final_url || RESTRICTED_PATH.test(final.pathname)) return false;
+    }
+  } catch {
+    return false;
+  }
+  if (final && !sameFirstPartyFamily(requested.hostname, final.hostname)) return false;
+
+  const rawAllowedHosts = list(browserSafety.allowed_hosts);
+  if (rawAllowedHosts.some((host) => typeof host !== "string")) return false;
+  const allowedHosts = rawAllowedHosts as string[];
+  const canonicalAllowedHosts = [...new Set(allowedHosts)].sort();
+  if (JSON.stringify(allowedHosts) !== JSON.stringify(canonicalAllowedHosts)) return false;
+  for (const host of allowedHosts) {
+    try {
+      const hostUrl = safeUrl(`https://${host}/`);
+      if (hostUrl.hostname !== host || !sameFirstPartyFamily(requested.hostname, host)) return false;
+    } catch {
+      return false;
+    }
+  }
+
+  const safetyResult = String(browserSafety.safety_result ?? "");
+  const policyBlockedBeforeNavigation = run.status === "SAFETY_BLOCKED"
+    && safetyResult === "BLOCKED"
+    && final === null
+    && allowedHosts.length === 0;
+  if (RESTRICTED_PATH.test(requested.pathname)) return policyBlockedBeforeNavigation;
+  if (allowedHosts.length === 0) return policyBlockedBeforeNavigation;
+  if (!allowedHosts.includes(requested.hostname)) return false;
+  if (final && (!allowedHosts.includes(final.hostname) || safetyResult !== "PASSED")) return false;
+  if (safetyResult === "PASSED" && final === null) return false;
+  if (["COMPLETE", "COMPLETE_WITH_GAPS"].includes(String(run.status))) {
+    return final !== null
+      && allowedHosts.includes(requested.hostname)
+      && allowedHosts.includes(final.hostname);
+  }
+  return true;
+}
+
 export async function verifyLandingAdvisoryRun(value: unknown): Promise<boolean> {
   const run = record(value);
   if (
@@ -1085,6 +1141,7 @@ export async function verifyLandingAdvisoryRun(value: unknown): Promise<boolean>
     || !Array.isArray(browserSafety.allowed_hosts)
     || browserSafety.allowed_hosts.length > 2
     || browserSafety.allowed_hosts.some((host) => typeof host !== "string" || host.length > 255)
+    || !persistedLandingUrlPolicyIsConsistent(run, browserSafety)
   ) return false;
   const coverage = run.coverage.map(record);
   if (
