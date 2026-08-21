@@ -178,6 +178,7 @@ export async function buildCampaignRecommendationSet({
     ? marketEvidence.cost as Record<string, unknown>
     : {};
   const demandClusters = Array.isArray(frequency.clusters) ? frequency.clusters as Array<Record<string, unknown>> : [];
+  const demandClusterIds = demandClusters.map((cluster) => text(cluster.cluster_id)).filter(Boolean).sort();
   const selectedCost = Array.isArray(cost.observations)
     ? (cost.observations as Array<Record<string, unknown>>).find((item) => item.source === cost.compact_source)
     : undefined;
@@ -185,6 +186,8 @@ export async function buildCampaignRecommendationSet({
     ? {
         status: "AVAILABLE" as const,
         source: "LEGACY_LIVE4_SCENARIO" as const,
+        scope: "DEDUPLICATED_DELIVERY_PACK" as const,
+        demand_cluster_ids: demandClusterIds,
         forecast_clicks: Number((selectedCost.capacity as Record<string, unknown>).forecast_clicks),
         forecast_total_spend: Number((selectedCost.capacity as Record<string, unknown>).forecast_total_spend),
       }

@@ -2,7 +2,8 @@
   "topRequests": [
     { "phrase": "  Стенд на выставке  ", "count": 41 },
     { "phrase": "участие в выставке", "count": 19 },
-    { "phrase": "заявка на выставку", "count": 7 }
+    { "phrase": "заявка на выставку", "count": 7 },
+    { "phrase": "ремонт квартиры", "count": 999 }
   ],
   "associations": [
     { "phrase": "промышленная выставка", "count": 13 }

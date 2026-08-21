@@ -1,3 +1,7 @@
+import JSONbigFactory from "json-bigint";
+
+const JSONbig = JSONbigFactory({ useNativeBigInt: true });
+
 export const MARKET_EVIDENCE_CONTRACT = "demand-cost-packing-v1";
 export const WORDSTAT_BATCH_SCHEMA = "wordstat-observation-batch-v1";
 export const WORDSTAT_API_HOST = "api.wordstat.yandex.net";
@@ -91,8 +95,8 @@ function wordstatRows(method: WordstatMethod, payload: Record<string, unknown>) 
     : method === "dynamics"
       ? payload.dynamics
       : payload.regions;
-  if (!Array.isArray(raw) || raw.length === 0) return null;
-  const rows = raw.slice(0, 50).map((item) => {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 2_000) return null;
+  const rows = raw.map((item) => {
     const row = item && typeof item === "object" ? item as Record<string, unknown> : {};
     if (method === "top_requests") {
       return { phrase: normalizedText(row.phrase), count: finiteNonNegative(row.count) };
@@ -201,6 +205,7 @@ export async function collectOfficialWordstatBatch(
         continue;
       }
       try {
+        // Wordstat ClientId is an approved application registration prerequisite; the official API authenticates requests only with the OAuth Bearer header.
         const response = await fetchImpl(endpoint, {
           method: "POST",
           redirect: "error",
@@ -242,9 +247,22 @@ export async function collectOfficialWordstatBatch(
 export type DemandClusterSpec = {
   cluster_id: string;
   semantic_key: { product: string; need: string; intent: string; offer: string };
+  classification?: {
+    version: string;
+    required_any_tokens?: string[];
+    excluded_tokens?: string[];
+  };
 };
 
 type DemandGap = { code: string; detail: string; retry_after_seconds: number | null };
+type ExcludedDemandRow = {
+  row_id: string;
+  phrase: string;
+  normalized_phrase: string;
+  reason_code: "RELEVANCE_RULE_NO_MATCH";
+  classifier_version: string;
+  provenance: { call_ids: string[]; seed_ids: string[] };
+};
 type DemandScopeEvidence = {
   scope_fingerprint: string;
   operator_profile: WordstatOperatorProfile;
@@ -281,7 +299,36 @@ function topScopeKey(call: WordstatCall) {
   });
 }
 
-async function assignedRowsForScope(calls: WordstatCall[]) {
+function demandToken(value: string) {
+  const token = normalizedPhrase(value);
+  return /[а-яё]/u.test(token) && token.length > 4
+    ? token.replace(/(?:иями|ами|ями|ого|ему|ому|ыми|ими|ий|ый|ая|яя|ое|ее|ую|юю|ы|и|а|я|у|ю|е|о)$/u, "")
+    : token;
+}
+
+function phraseTokens(value: unknown) {
+  return new Set(normalizedPhrase(value)
+    .replace(/[^\p{L}\p{N}-]+/gu, " ")
+    .split(" ")
+    .map(demandToken)
+    .filter((item) => item.length >= 2));
+}
+
+function relevanceFor(phrase: string, cluster: DemandClusterSpec | undefined) {
+  if (!cluster) return { eligible: false, version: "demand-relevance-rules-v1" };
+  const version = normalizedText(cluster.classification?.version) || "demand-relevance-rules-v1";
+  const phraseSet = phraseTokens(phrase);
+  const required = cluster.classification?.required_any_tokens?.length
+    ? cluster.classification.required_any_tokens.map((token) => demandToken(normalizedPhrase(token)))
+    : [...phraseTokens(Object.values(cluster.semantic_key).join(" "))];
+  const excluded = (cluster.classification?.excluded_tokens ?? []).map((token) => demandToken(normalizedPhrase(token)));
+  return {
+    eligible: required.some((token) => phraseSet.has(token)) && !excluded.some((token) => phraseSet.has(token)),
+    version,
+  };
+}
+
+async function assignedRowsForScope(calls: WordstatCall[], clusterSpecs: Map<string, DemandClusterSpec>) {
   const candidates = new Map<string, Array<{ call: WordstatCall; phrase: string; normalized: string; count: number }>>();
   for (const call of calls) {
     for (const row of call.rows) {
@@ -295,6 +342,7 @@ async function assignedRowsForScope(calls: WordstatCall[]) {
     }
   }
   const rows: AssignedDemandRow[] = [];
+  const excludedRows: ExcludedDemandRow[] = [];
   const conflicts: DemandGap[] = [];
   for (const [normalized, observations] of [...candidates.entries()].sort(([left], [right]) => left.localeCompare(right))) {
     const counts = [...new Set(observations.map((item) => item.count))];
@@ -302,7 +350,27 @@ async function assignedRowsForScope(calls: WordstatCall[]) {
       conflicts.push({ code: "WORDSTAT_ROW_COUNT_CONFLICT", detail: `Conflicting counts for normalized Wordstat row: ${normalized}.`, retry_after_seconds: null });
       continue;
     }
-    const ranked = observations
+    const classified = observations.map((item) => ({
+      ...item,
+      relevance: relevanceFor(item.phrase, clusterSpecs.get(item.call.cluster_id)),
+    }));
+    const eligible = classified.filter((item) => item.relevance.eligible);
+    if (!eligible.length) {
+      const scopeFingerprint = await sha256(JSON.parse(topScopeKey(observations[0].call)));
+      excludedRows.push({
+        row_id: `wordstat-excluded:${(await sha256({ scope: scopeFingerprint, normalized_phrase: normalized })).slice("sha256:".length)}`,
+        phrase: observations.map((item) => item.phrase).sort()[0],
+        normalized_phrase: normalized,
+        reason_code: "RELEVANCE_RULE_NO_MATCH",
+        classifier_version: classified.map((item) => item.relevance.version).sort()[0],
+        provenance: {
+          call_ids: [...new Set(observations.map((item) => item.call.call_id))].sort(),
+          seed_ids: [...new Set(observations.map((item) => item.call.seed_id))].sort(),
+        },
+      });
+      continue;
+    }
+    const ranked = eligible
       .map((item) => ({
         ...item,
         exact: normalized === normalizedPhrase(item.call.canonical_phrase),
@@ -328,7 +396,58 @@ async function assignedRowsForScope(calls: WordstatCall[]) {
       },
     });
   }
-  return { rows, conflicts };
+  return { rows, excludedRows, conflicts };
+}
+
+function median(values: number[]) {
+  const sorted = [...values].sort((left, right) => left - right);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function normalizedSeasonality(calls: WordstatCall[]) {
+  const available = calls.filter((call) => call.status === "AVAILABLE" && call.period === "monthly");
+  const scopes = available.map((call) => {
+    const points = call.rows
+      .map((row) => ({ date: normalizedText(row.date), share: finiteNonNegative(row.share) }))
+      .filter((row): row is { date: string; share: number } => Boolean(row.date) && row.share !== null)
+      .sort((left, right) => left.date.localeCompare(right.date));
+    const latest = points.at(-1) ?? null;
+    const month = latest?.date.slice(5, 7);
+    const historical = latest ? points.filter((point) => point.date < latest.date && point.date.slice(5, 7) === month).map((point) => point.share) : [];
+    const historicalMedian = median(historical);
+    return {
+      call_id: call.call_id,
+      scope: call.scope,
+      period: call.period,
+      from_date: call.from_date,
+      to_date: call.to_date,
+      latest_complete_share: latest?.share ?? null,
+      historical_same_period_median_share: historicalMedian,
+      ratio: latest && historicalMedian && historicalMedian > 0 ? latest.share / historicalMedian : null,
+      status: latest && historicalMedian !== null ? "AVAILABLE" : "INSUFFICIENT_HISTORY",
+      rows: call.rows,
+      gaps: call.gaps,
+    };
+  });
+  const allAvailable = calls.length > 0 && calls.every((call) => call.status === "AVAILABLE");
+  const status = !available.length
+    ? "UNAVAILABLE"
+    : !allAvailable ? "PARTIAL"
+      : scopes.every((scope) => scope.status === "AVAILABLE") ? "AVAILABLE" : "INSUFFICIENT_HISTORY";
+  return {
+    status,
+    source: "/v1/dynamics",
+    operator_profile: "DYNAMICS_BROAD",
+    period: scopes.length === 1 ? scopes[0].period : null,
+    from_date: scopes.length === 1 ? scopes[0].from_date : null,
+    to_date: scopes.length === 1 ? scopes[0].to_date : null,
+    latest_complete_share: scopes.length === 1 ? scopes[0].latest_complete_share : null,
+    historical_same_period_median_share: scopes.length === 1 ? scopes[0].historical_same_period_median_share : null,
+    ratio: scopes.length === 1 ? scopes[0].ratio : null,
+    scopes,
+  };
 }
 
 export async function buildScopedDemandEvidence(batch: WordstatObservationBatch, clusterSpecs: DemandClusterSpec[]) {
@@ -336,11 +455,14 @@ export async function buildScopedDemandEvidence(batch: WordstatObservationBatch,
   const availableTopCalls = topCalls.filter((call) => call.status === "AVAILABLE");
   const gaps: DemandGap[] = batch.calls.flatMap((call) => call.gaps);
   const byScope = Map.groupBy(availableTopCalls, topScopeKey);
+  const specsById = new Map(clusterSpecs.map((cluster) => [cluster.cluster_id, cluster]));
   const scopes: DemandScopeEvidence[] = [];
   const allRows: AssignedDemandRow[] = [];
+  const allExcludedRows: ExcludedDemandRow[] = [];
   for (const [scopeKey, calls] of [...byScope.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-    const { rows, conflicts } = await assignedRowsForScope(calls);
+    const { rows, excludedRows, conflicts } = await assignedRowsForScope(calls, specsById);
     gaps.push(...conflicts);
+    allExcludedRows.push(...excludedRows);
     const scope = JSON.parse(scopeKey) as Record<string, unknown>;
     const first = calls[0];
     const value = rows.reduce((sum, row) => sum + row.count, 0);
@@ -371,13 +493,25 @@ export async function buildScopedDemandEvidence(batch: WordstatObservationBatch,
   const clusters = clusterSpecs
     .map((cluster) => {
       const rows = allRows.filter((row) => row.assigned_cluster_id === cluster.cluster_id);
+      const clusterScopes = [...Map.groupBy(rows, (row) => row.scope_fingerprint).entries()]
+        .map(([scopeFingerprint, scopeRows]) => ({
+          scope_fingerprint: scopeFingerprint,
+          assigned_row_ids: scopeRows.map((row) => row.row_id).sort(),
+          observed_unique_count: {
+            value: scopeRows.reduce((sum, row) => sum + row.count, 0),
+            semantics: "LOWER_BOUND_OBSERVED_TOP_ROWS" as const,
+          },
+        }))
+        .sort((left, right) => left.scope_fingerprint.localeCompare(right.scope_fingerprint));
       return {
         cluster_id: cluster.cluster_id,
         semantic_key: cluster.semantic_key,
+        classifier_version: normalizedText(cluster.classification?.version) || "demand-relevance-rules-v1",
         status: rows.length ? status : "PARTIAL",
         assigned_row_ids: rows.map((row) => row.row_id).sort(),
+        scopes: clusterScopes,
         observed_unique_count: {
-          value: rows.length ? rows.reduce((sum, row) => sum + row.count, 0) : null,
+          value: clusterScopes.length === 1 ? clusterScopes[0].observed_unique_count.value : null,
           semantics: "LOWER_BOUND_OBSERVED_TOP_ROWS",
         },
       };
@@ -427,22 +561,17 @@ export async function buildScopedDemandEvidence(batch: WordstatObservationBatch,
     },
     scopes,
     unique_assigned_rows: allRows.sort((left, right) => left.row_id.localeCompare(right.row_id)),
+    excluded_rows: allExcludedRows.sort((left, right) => left.row_id.localeCompare(right.row_id)),
+    coverage: {
+      returned_rows: availableTopCalls.reduce((sum, call) => sum + call.rows.length, 0),
+      eligible_unique_rows: allRows.length,
+      excluded_unique_rows: allExcludedRows.length,
+      exclusion_reason_counts: allExcludedRows.length ? { RELEVANCE_RULE_NO_MATCH: allExcludedRows.length } : {},
+      classifier_versions: [...new Set(clusterSpecs.map((cluster) => normalizedText(cluster.classification?.version) || "demand-relevance-rules-v1"))].sort(),
+    },
     seed_matched_row_counts: seedMatchedRowCounts,
     clusters,
-    seasonality: {
-      status: dynamics.every((call) => call.status === "AVAILABLE") && dynamics.length ? "AVAILABLE" : "UNAVAILABLE",
-      source: "/v1/dynamics",
-      operator_profile: "DYNAMICS_BROAD",
-      observations: dynamics.map((call) => ({
-        call_id: call.call_id,
-        scope: call.scope,
-        period: call.period,
-        from_date: call.from_date,
-        to_date: call.to_date,
-        rows: call.rows,
-        gaps: call.gaps,
-      })),
-    },
+    seasonality: normalizedSeasonality(dynamics),
     geo_evidence: {
       status: regions.every((call) => call.status === "AVAILABLE") && regions.length ? "AVAILABLE" : "UNAVAILABLE",
       source: "/v1/regions",
@@ -541,6 +670,13 @@ export function selectCostEvidence(rawObservations: CostObservation[]) {
     if (selected) break;
   }
   const missingReasons = observations.filter((observation) => !qualifiedCost(observation)).map(costReason);
+  const qualified = observations.filter(qualifiedCost);
+  const conflicting = selected ? qualified.some((observation) => observation.observation_id !== selected?.observation_id
+    && observation.currency === selected?.currency
+    && observation.vat_treatment === selected?.vat_treatment
+    && Boolean(observation.range && selected?.range)
+    && (Number(observation.range?.high) < Number(selected?.range?.low) || Number(selected?.range?.high) < Number(observation.range?.low))) : false;
+  if (conflicting) missingReasons.push("CONFLICTING_COST_EVIDENCE");
   if (!selected) {
     if (!observations.length) missingReasons.push("NO_QUALIFIED_PRELAUNCH_COST_SOURCE");
     return {
@@ -559,7 +695,7 @@ export function selectCostEvidence(rawObservations: CostObservation[]) {
     };
   }
   return {
-    status: "AVAILABLE" as const,
+    status: conflicting ? "CONFLICTING" as const : "AVAILABLE" as const,
     compact_source: selected.source,
     scenario: selected.scenario,
     scope: selected.scope,
@@ -572,6 +708,136 @@ export function selectCostEvidence(rawObservations: CostObservation[]) {
     observations,
     missing_or_conflict_reasons: [...new Set(missingReasons)],
   };
+}
+
+const DIRECT_COST_ENDPOINTS = {
+  keywords: "https://api.direct.yandex.com/json/v501/keywords",
+  keyword_bids: "https://api.direct.yandex.com/json/v501/keywordbids",
+} as const;
+
+function unavailableAuctionObservation(input: {
+  account: string;
+  keyword_id: string;
+  expected_phrase: string;
+  currency: string;
+  vat_treatment: CostObservation["vat_treatment"];
+  comparability: { geography: unknown; placement: unknown; strategy: unknown; season: unknown };
+}, observedAt: string, reason: string): CostObservation {
+  return {
+    observation_id: `keywordbids:${input.keyword_id}:${observedAt}`,
+    source: "KEYWORDBIDS_V5_CURRENT_PROXY",
+    status: "UNAVAILABLE",
+    scenario: "current auction proxy for an existing comparable keyword",
+    scope: {
+      account: input.account,
+      keyword_id: input.keyword_id,
+      phrase: "UNKNOWN",
+      ...input.comparability,
+    },
+    as_of: observedAt,
+    currency: input.currency,
+    vat_treatment: input.vat_treatment,
+    sample_size: { unit: "auction_scenarios", value: 0 },
+    range: null,
+    qualification: { current: false, existing_comparable_keyword: false },
+    unavailable_reason: reason,
+  };
+}
+
+export async function collectCurrentAuctionCostObservation(input: {
+  token: string;
+  account: string;
+  keyword_id: string;
+  expected_phrase: string;
+  currency: string;
+  vat_treatment: CostObservation["vat_treatment"];
+  traffic_volumes: number[];
+  comparability: { geography: "SAME" | "MAPPED" | "DIFFERENT" | "UNKNOWN"; placement: "SAME" | "DIFFERENT" | "UNKNOWN"; strategy: "SAME" | "DIFFERENT" | "UNKNOWN"; season: "SAME" | "DIFFERENT" | "UNKNOWN" };
+}, fetchImpl: FetchLike, now: () => string): Promise<CostObservation> {
+  const observedAt = now();
+  if (!normalizedText(input.token) || !normalizedText(input.account) || !/^\d+$/u.test(input.keyword_id)) {
+    return unavailableAuctionObservation(input, observedAt, "KEYWORDBIDS_AUTHORITY_OR_KEYWORD_ID_UNAVAILABLE");
+  }
+  const headers = {
+    Authorization: `Bearer ${input.token}`,
+    "Client-Login": input.account,
+    Accept: "application/json",
+    "Accept-Language": "ru",
+    "Content-Type": "application/json; charset=utf-8",
+  };
+  try {
+    const keywordResponse = await fetchImpl(DIRECT_COST_ENDPOINTS.keywords, {
+      method: "POST",
+      redirect: "error",
+      headers,
+      body: JSONbig.stringify({
+        method: "get",
+        params: {
+          SelectionCriteria: { Ids: [BigInt(input.keyword_id)] },
+          FieldNames: ["Id", "Keyword", "AdGroupId", "CampaignId", "State", "Status"],
+        },
+      }),
+    });
+    if (!keywordResponse.ok) return unavailableAuctionObservation(input, observedAt, `KEYWORDS_GET_HTTP_${keywordResponse.status}`);
+    const keywordPayload = JSONbig.parse(await keywordResponse.text()) as {
+      error?: unknown;
+      result?: { Keywords?: Array<Record<string, unknown>> };
+    };
+    const keywords = keywordPayload.result?.Keywords ?? [];
+    const keyword = keywords.find((item) => String(item.Id ?? "") === input.keyword_id);
+    if (keywordPayload.error || !keyword || normalizedPhrase(keyword.Keyword) !== normalizedPhrase(input.expected_phrase)) {
+      return unavailableAuctionObservation(input, observedAt, "EXISTING_KEYWORD_NOT_NORMALIZED_EQUIVALENT");
+    }
+    const bidsResponse = await fetchImpl(DIRECT_COST_ENDPOINTS.keyword_bids, {
+      method: "POST",
+      redirect: "error",
+      headers,
+      body: JSONbig.stringify({
+        method: "get",
+        params: {
+          SelectionCriteria: { KeywordIds: [BigInt(input.keyword_id)] },
+          FieldNames: ["KeywordId", "AuctionBids"],
+        },
+      }),
+    });
+    if (!bidsResponse.ok) return unavailableAuctionObservation(input, observedAt, `KEYWORDBIDS_GET_HTTP_${bidsResponse.status}`);
+    const bidsPayload = JSONbig.parse(await bidsResponse.text()) as {
+      error?: unknown;
+      result?: { KeywordBids?: Array<Record<string, unknown>> };
+    };
+    const keywordBid = (bidsPayload.result?.KeywordBids ?? []).find((item) => String(item.KeywordId ?? "") === input.keyword_id);
+    const auctionBids = Array.isArray(keywordBid?.AuctionBids) ? keywordBid.AuctionBids as Array<Record<string, unknown>> : [];
+    const allowed = new Set(input.traffic_volumes.map(Number));
+    const prices = auctionBids
+      .filter((item) => allowed.size === 0 || allowed.has(Number(item.TrafficVolume)))
+      .map((item) => Number(item.Price) / 1_000_000)
+      .filter((value) => Number.isFinite(value) && value >= 0);
+    if (bidsPayload.error || !prices.length) {
+      return unavailableAuctionObservation(input, observedAt, "KEYWORDBIDS_AUCTION_BIDS_UNAVAILABLE");
+    }
+    return {
+      observation_id: `keywordbids:${input.keyword_id}:${observedAt}`,
+      source: "KEYWORDBIDS_V5_CURRENT_PROXY",
+      status: "AVAILABLE",
+      scenario: `Direct auction traffic volumes ${[...allowed].sort((left, right) => left - right).join(",") || "all returned"}`,
+      scope: {
+        account: input.account,
+        campaign_id: String(keyword.CampaignId ?? ""),
+        ad_group_id: String(keyword.AdGroupId ?? ""),
+        keyword_id: input.keyword_id,
+        phrase: "EXACT",
+        ...input.comparability,
+      },
+      as_of: observedAt,
+      currency: input.currency,
+      vat_treatment: input.vat_treatment,
+      sample_size: { unit: "auction_scenarios", value: prices.length },
+      range: { low: Math.min(...prices), high: Math.max(...prices), kind: "SCENARIO" },
+      qualification: { current: true, existing_comparable_keyword: true },
+    };
+  } catch {
+    return unavailableAuctionObservation(input, observedAt, "KEYWORDBIDS_PROVIDER_ERROR");
+  }
 }
 
 export type DemandRelationshipState = "EXACT_DUPLICATE" | "NEAR_DUPLICATE" | "ALREADY_COVERED_DEMAND" | "OVERLAP_RISK" | "OBSERVED_CANNIBALIZATION" | "UNKNOWN";
@@ -659,24 +925,29 @@ export type PackableDemandCluster = {
   capacity?: {
     status: "AVAILABLE" | "UNAVAILABLE";
     source: "LEGACY_LIVE4_SCENARIO" | "OWN_CALIBRATED_VOLUME_MODEL" | "KEYWORDBIDS_V5_CURRENT_PROXY" | null;
+    scope?: "DEDUPLICATED_DELIVERY_PACK";
+    demand_cluster_ids?: string[];
     forecast_clicks?: number;
     forecast_total_spend?: number;
   };
 };
 
-function capacityDecision(cluster: PackableDemandCluster) {
-  const capacity = cluster.capacity;
+function capacityDecision(group: PackableDemandCluster[]) {
+  const clusterIds = group.map((cluster) => cluster.cluster_id).sort();
+  const capacity = group.map((cluster) => cluster.capacity).find((candidate) => candidate?.scope === "DEDUPLICATED_DELIVERY_PACK"
+    && JSON.stringify([...(candidate.demand_cluster_ids ?? [])].sort()) === JSON.stringify(clusterIds));
   if (!capacity || capacity.status !== "AVAILABLE") return { supported: false, sufficient: false, reason: "STANDALONE_CAPACITY_UNAVAILABLE" };
   if (!(["LEGACY_LIVE4_SCENARIO", "OWN_CALIBRATED_VOLUME_MODEL"] as unknown[]).includes(capacity.source)) {
     return { supported: false, sufficient: false, reason: "CAPACITY_SOURCE_NOT_QUALIFIED" };
   }
   const clicks = Number(capacity.forecast_clicks);
   const spend = Number(capacity.forecast_total_spend);
+  const provisionalMonthlyBudget = Math.max(...group.map((item) => Number(item.provisional_monthly_budget)));
   if (!Number.isFinite(clicks) || !Number.isFinite(spend)) return { supported: false, sufficient: false, reason: "STANDALONE_CAPACITY_UNAVAILABLE" };
   return {
     supported: true,
-    sufficient: clicks > 0 && spend >= Number(cluster.provisional_monthly_budget),
-    reason: clicks > 0 && spend >= Number(cluster.provisional_monthly_budget)
+    sufficient: clicks > 0 && spend >= provisionalMonthlyBudget,
+    reason: clicks > 0 && spend >= provisionalMonthlyBudget
       ? "EVIDENCE_BACKED_STANDALONE_CAPACITY"
       : "INSUFFICIENT_STANDALONE_CAPACITY",
   };
@@ -721,7 +992,7 @@ export async function packDemandClusters(input: PackableDemandCluster[]) {
       for (const cluster of group) clusterDispositions[cluster.cluster_id] = { disposition: "PACKED", reason_codes: ["DELIVERY_KEY_COMPATIBLE"], delivery_bucket_id: bucketId };
       continue;
     }
-    const capacity = capacityDecision(group[0]);
+    const capacity = capacityDecision(group);
     if (capacity.supported && capacity.sufficient) {
       deliveryBuckets.push({
         delivery_bucket_id: bucketId,

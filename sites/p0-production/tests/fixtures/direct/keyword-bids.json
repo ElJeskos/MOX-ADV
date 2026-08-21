@@ -1,0 +1,13 @@
+{
+  "result": {
+    "KeywordBids": [
+      {
+        "KeywordId": 9007199254740993,
+        "AuctionBids": [
+          { "TrafficVolume": 65, "Bid": 150000000, "Price": 120000000 },
+          { "TrafficVolume": 100, "Bid": 220000000, "Price": 180000000 }
+        ]
+      }
+    ]
+  }
+}

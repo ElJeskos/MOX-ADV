@@ -230,7 +230,7 @@ async function marketEvidenceInput() {
       phrase: "участие в выставке",
       dynamics_phrase: "+участие +выставке",
       dynamics_period: "monthly",
-      dynamics_from_date: "2025-01-01",
+      dynamics_from_date: "2024-01-01",
       dynamics_to_date: "2026-07-31",
       operator_profile: "BROAD_CONTAINING",
       region_ids: [213],

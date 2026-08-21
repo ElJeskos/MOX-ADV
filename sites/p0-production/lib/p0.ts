@@ -21,8 +21,10 @@ import {
 import { researchPublicFirstPartySite } from "./site-research.ts";
 import { cleanText } from "./text.ts";
 import {
+  collectCurrentAuctionCostObservation,
   collectOfficialWordstatBatch,
   unavailableWordstatBatch,
+  type CostObservation,
   type MarketEvidenceInput,
   type WordstatSeed,
 } from "./market-evidence.ts";
@@ -386,48 +388,94 @@ async function readMarketEvidence({
     || regionIds.length === 0
     || regionNames.length !== regionIds.length
     || !["all", "desktop", "phone", "tablet"].includes(configuredDevice);
+  let wordstatBatch;
   if (configurationMissing) {
-    return {
-      wordstat_batch: await unavailableWordstatBatch(
-        "Scoped Wordstat authority, phrase, explicit regions or device is unavailable for this Model revision.",
-        generatedAt,
-      ),
-      demand_clusters: demandClusters,
-      cost_observations: [],
-    };
+    wordstatBatch = await unavailableWordstatBatch(
+      "Scoped Wordstat authority, phrase, explicit regions or device is unavailable for this Model revision.",
+      generatedAt,
+    );
+  } else {
+    const dynamicsPhrase = phrase
+      .replace(/[!"[\]()|+]/gu, " ")
+      .split(/\s+/u)
+      .map((item) => item.replace(/[^\p{L}\p{N}-]/gu, ""))
+      .filter(Boolean)
+      .map((item) => `+${item}`)
+      .join(" ");
+    const observedDate = new Date(generatedAt);
+    const dynamicsTo = new Date(Date.UTC(observedDate.getUTCFullYear(), observedDate.getUTCMonth(), 0));
+    const dynamicsFrom = new Date(Date.UTC(dynamicsTo.getUTCFullYear() - 3, dynamicsTo.getUTCMonth(), 1));
+    wordstatBatch = await collectOfficialWordstatBatch({
+      token: runtime.YANDEX_WORDSTAT_OAUTH_TOKEN ?? "",
+      clientId: runtime.YANDEX_WORDSTAT_CLIENT_ID ?? "",
+      seeds: [{
+        seed_id: "primary-product-demand",
+        cluster_id: clusterId,
+        phrase,
+        dynamics_phrase: dynamicsPhrase,
+        dynamics_period: "monthly",
+        dynamics_from_date: dynamicsFrom.toISOString().slice(0, 10),
+        dynamics_to_date: dynamicsTo.toISOString().slice(0, 10),
+        operator_profile: "BROAD_CONTAINING",
+        region_ids: regionIds,
+        region_names: regionNames,
+        device: configuredDevice,
+      }],
+    }, fetch, now);
   }
-  const dynamicsPhrase = phrase
-    .replace(/[!"[\]()|+]/gu, " ")
-    .split(/\s+/u)
-    .map((item) => item.replace(/[^\p{L}\p{N}-]/gu, ""))
-    .filter(Boolean)
-    .map((item) => `+${item}`)
-    .join(" ");
-  const observedDate = new Date(generatedAt);
-  const dynamicsTo = new Date(Date.UTC(observedDate.getUTCFullYear(), observedDate.getUTCMonth(), 0));
-  const dynamicsFrom = new Date(Date.UTC(dynamicsTo.getUTCFullYear() - 3, dynamicsTo.getUTCMonth(), 1));
-  const wordstatBatch = await collectOfficialWordstatBatch({
-    token: runtime.YANDEX_WORDSTAT_OAUTH_TOKEN ?? "",
-    clientId: runtime.YANDEX_WORDSTAT_CLIENT_ID ?? "",
-    seeds: [{
-      seed_id: "primary-product-demand",
-      cluster_id: clusterId,
-      phrase,
-      dynamics_phrase: dynamicsPhrase,
-      dynamics_period: "monthly",
-      dynamics_from_date: dynamicsFrom.toISOString().slice(0, 10),
-      dynamics_to_date: dynamicsTo.toISOString().slice(0, 10),
-      operator_profile: "BROAD_CONTAINING",
-      region_ids: regionIds,
-      region_names: regionNames,
-      device: configuredDevice,
-    }],
-  }, fetch, now);
+  const costObservations: CostObservation[] = [{
+    observation_id: `live4-preflight:${generatedAt}`,
+    source: "LEGACY_LIVE4_SCENARIO",
+    status: "UNAVAILABLE",
+    scenario: "account-specific documented Live 4 capability preflight",
+    scope: { account: cleanText(String(runtime.YANDEX_DIRECT_CLIENT_LOGIN ?? ""), 255) },
+    as_of: generatedAt,
+    currency: cleanText(String(runtime.YANDEX_DIRECT_CURRENCY ?? "RUB"), 10),
+    vat_treatment: "UNKNOWN",
+    sample_size: { unit: "forecast_phrases", value: 0 },
+    range: null,
+    qualification: { account_specific: true, capability_status: "UNAVAILABLE", exact_scope: false },
+    unavailable_reason: "LIVE4_CAPABILITY_PREFLIGHT_NOT_CONFIGURED",
+  }];
+  const comparableKeywordId = cleanText(String(runtime.P0_COMPARABLE_DIRECT_KEYWORD_ID ?? ""), 100);
+  if (comparableKeywordId) {
+    costObservations.push(await collectCurrentAuctionCostObservation({
+      token: runtime.YANDEX_DIRECT_OAUTH_TOKEN ?? "",
+      account: runtime.YANDEX_DIRECT_CLIENT_LOGIN ?? "",
+      keyword_id: comparableKeywordId,
+      expected_phrase: phrase,
+      currency: cleanText(String(runtime.YANDEX_DIRECT_CURRENCY ?? "RUB"), 10),
+      vat_treatment: runtime.YANDEX_DIRECT_INCLUDE_VAT === "true" ? "INCLUDED" : "EXCLUDED",
+      traffic_volumes: String(runtime.P0_COMPARABLE_TRAFFIC_VOLUMES ?? "")
+        .split(",")
+        .map(Number)
+        .filter((value) => Number.isFinite(value) && value > 0),
+      comparability: {
+        geography: runtime.P0_COMPARABLE_GEOGRAPHY === "MAPPED" ? "MAPPED" : runtime.P0_COMPARABLE_GEOGRAPHY === "SAME" ? "SAME" : "UNKNOWN",
+        placement: runtime.P0_COMPARABLE_PLACEMENT === "SAME" ? "SAME" : "UNKNOWN",
+        strategy: runtime.P0_COMPARABLE_STRATEGY === "SAME" ? "SAME" : "UNKNOWN",
+        season: runtime.P0_COMPARABLE_SEASON === "SAME" ? "SAME" : "UNKNOWN",
+      },
+    }, fetch, now));
+  }
+  costObservations.push({
+    observation_id: `direct-history:${generatedAt}`,
+    source: "DIRECT_HISTORY_OWN_EMPIRICAL",
+    status: "UNAVAILABLE",
+    scenario: "comparable first-party day-level CPC P25-P75",
+    scope: { account: cleanText(String(runtime.YANDEX_DIRECT_CLIENT_LOGIN ?? ""), 255), phrase: "UNKNOWN", geography: "UNKNOWN", placement: "UNKNOWN", strategy: "UNKNOWN", season: "UNKNOWN" },
+    as_of: generatedAt,
+    currency: cleanText(String(runtime.YANDEX_DIRECT_CURRENCY ?? "RUB"), 10),
+    vat_treatment: "UNKNOWN",
+    sample_size: { unit: "clicks", value: 0 },
+    range: null,
+    qualification: { first_party: true, clicks: 0 },
+    unavailable_reason: "DIRECT_HISTORY_COMPARABLE_REPORT_NOT_CONFIGURED",
+  });
   return {
     wordstat_batch: wordstatBatch,
     demand_clusters: demandClusters,
-    // Cost remains unavailable unless a separately qualified first-party observation is collected.
-    cost_observations: [],
+    cost_observations: costObservations,
   };
 }
 

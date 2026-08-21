@@ -14,7 +14,7 @@ function scopeSummary(scope: MarketEvidence) {
 }
 
 function costSummary(cost: MarketEvidence) {
-  if (cost.status !== "AVAILABLE" || !cost.range) return "Сопоставимая оценка цены недоступна";
+  if (!["AVAILABLE", "CONFLICTING"].includes(cost.status) || !cost.range) return "Сопоставимая оценка цены недоступна";
   return `${cost.range.low}–${cost.range.high} ${cost.currency}`;
 }
 
@@ -35,6 +35,7 @@ export function MarketEvidenceDisclosure({ evidence, context = "model" }: { evid
         <span>Wordstat · {frequency.method || "/v1/topRequests"}</span>
         <strong>{frequencySummary(frequency)}</strong>
         <small>{frequency.observed_unique_count?.semantics || "UNAVAILABLE — не нулевой спрос"}</small>
+        {scopes[0] && <small>{scopeSummary(scopes[0])} · собрано {frequency.batch_finished_at || evidence.batch_finished_at || "UNAVAILABLE"}</small>}
         <small>{rows.length} уникальных assigned rows · каждая учтена не более одного раза</small>
       </article>
       <article>
@@ -58,7 +59,7 @@ export function MarketEvidenceDisclosure({ evidence, context = "model" }: { evid
     <details>
       <summary>Раскрыть источник, сценарий и scope стоимости</summary>
       <div className="market-evidence-detail">
-        {cost.status === "AVAILABLE" ? <>
+        {["AVAILABLE", "CONFLICTING"].includes(cost.status) ? <>
           <p><b>Source:</b> {cost.compact_source}</p>
           <p><b>Scenario:</b> {cost.scenario}</p>
           <p><b>Scope:</b> <code>{JSON.stringify(cost.scope)}</code></p>

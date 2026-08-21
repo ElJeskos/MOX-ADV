@@ -1146,7 +1146,7 @@ export async function buildAnalyticsEvidence({
     }));
   }
 
-  if (marketEvidence.cost.status === "AVAILABLE") {
+  if (marketEvidence.cost.status !== "UNAVAILABLE") {
     const normalizedCost = marketEvidence.cost;
     const boundedCost = safeValue(normalizedCost);
     const identity = await contentHash({
@@ -1323,7 +1323,7 @@ export async function buildAnalyticsEvidence({
     : metrikaManagementReady ? "PARTIAL" : "UNAVAILABLE";
   const competitorStatus: EvidenceSourceStatus = sourceEvidence.competitors.length ? "PARTIAL" : "UNAVAILABLE";
   const wordstatStatus: EvidenceSourceStatus = marketEvidence.frequency.status === "AVAILABLE"
-    && marketEvidence.frequency.seasonality.status === "AVAILABLE"
+    && ["AVAILABLE", "INSUFFICIENT_HISTORY"].includes(marketEvidence.frequency.seasonality.status)
     && marketEvidence.frequency.geo_evidence.status === "AVAILABLE"
     ? "VERIFIED"
     : marketEvidence.frequency.status === "UNAVAILABLE" ? "UNAVAILABLE" : "PARTIAL";

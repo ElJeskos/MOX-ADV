@@ -62,7 +62,7 @@ test("Model disclosure renders scoped lower-bound frequency, batch, unique rows 
   const html = renderToStaticMarkup(React.createElement(MarketEvidenceDisclosure, { evidence: evidence(), context: "model" }));
   assert.match(html, /67\+ запросов/);
   assert.match(html, /LOWER_BOUND_OBSERVED_TOP_ROWS/);
-  assert.match(html, /Москва · desktop · BROAD_CONTAINING/);
+  assert.match(html, /Москва · desktop · BROAD_CONTAINING · собрано 2026-08-21T10:00:04.000Z/);
   assert.match(html, /sha256:batch-104/);
   assert.match(html, /3 уникальн/);
   assert.match(html, /точный конец окна API не раскрывает/);
