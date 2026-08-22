@@ -73,3 +73,22 @@ test("card shortlist controls, persistent exact footer and package Gate disclose
   assert.match(styles, /\.package-review \{[^}]*min-width: 0/u);
   assert.doesNotMatch(clientSource, /apply\("confirm_creation"/u);
 });
+
+test("confirmation renders independent durable item progress and dispatches only the exact Gate", () => {
+  assert.match(clientSource, /Исполнить подтверждённый пакет/u);
+  assert.match(clientSource, /apply\("dispatch_package"/u);
+  assert.match(clientSource, /package_id: gate\.package_id/u);
+  assert.match(clientSource, /gate_id: gate\.gate_id/u);
+  assert.match(clientSource, /aria-label="Package campaign executions"/u);
+  assert.match(clientSource, /Validation/u);
+  assert.match(clientSource, /Creation/u);
+  assert.match(clientSource, /Suspension/u);
+  assert.match(clientSource, /Child graph/u);
+  assert.match(clientSource, /Readback/u);
+  assert.match(clientSource, /Moderation/u);
+  assert.match(clientSource, /item\.ownership/u);
+  assert.match(clientSource, /item\.provider_issues/u);
+  assert.match(clientSource, /item\.containment/u);
+  assert.match(styles, /\.package-executions \{[^}]*min-width: 0/u);
+  assert.match(styles, /\.execution-progress \{[^}]*grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/u);
+});

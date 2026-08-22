@@ -8,7 +8,7 @@ import {
 } from "./campaign-fanout.ts";
 import { strategyAnswerValue } from "./campaign-strategy.ts";
 import { minimumWeeklyBudgetRub, validateWeeklyBudgetRub } from "./direct-limits.ts";
-import { type DirectProjection } from "./direct-write.ts";
+import { DirectWriteError, type DirectProjection } from "./direct-write.ts";
 import {
   executeSafeSingleCampaign,
   type DirectExecutionIdentity,
@@ -105,8 +105,8 @@ async function beginExecution(
   userKeyValue: string,
   account: string,
   projection: DirectProjection,
+  executionId = crypto.randomUUID(),
 ) {
-  const executionId = crypto.randomUUID();
   const timestamp = now();
   await runtimeEnv()
     .DB.prepare(
@@ -723,6 +723,85 @@ class D1P0ApplicationStore implements P0ApplicationStore {
   }
 }
 
+async function createPackageItemOutcome({
+  key,
+  state,
+  item_execution_id: itemExecutionId,
+  selection,
+  projection,
+  draft,
+}: {
+  key: string;
+  state: P0Document;
+  package_execution_id: string;
+  item_execution_id: string;
+  selection: NonNullable<P0Document["shortlist"]>["selections"][number];
+  projection: DirectProjection;
+  draft: NonNullable<P0Document["recommendation_set"]>["drafts"][number];
+}) {
+  const config = directWriteConfig();
+  if (!config.token || !config.account) throw new Error("Direct production credentials не настроены.");
+  if (!state.strategy || !state.context_state || !state.recommendation_set || !state.human_decision_gate) {
+    throw new Error("Exact package execution lineage отсутствует.");
+  }
+  const [binding, catalog, limits] = await Promise.all([
+    readDirectBinding(),
+    readCampaignCatalog(),
+    readCurrencyLimits(),
+  ]);
+  if (binding.account !== config.account || catalog.account !== binding.account) {
+    throw new Error("Direct write account не прошёл точный API binding preflight.");
+  }
+  validateWeeklyBudgetRub(strategyAnswerValue(state.strategy, "weekly_budget"), limits.minimum_weekly_budget_rub);
+  const existing = await runtimeEnv()
+    .DB.prepare("SELECT execution_id FROM p0_executions WHERE execution_id = ? AND user_key = ? AND account_key = ?")
+    .bind(itemExecutionId, key, config.account)
+    .first<{ execution_id: string }>();
+  if (!existing) {
+    if (hasDuplicateCampaignName(catalog.names, String(projection.direct.campaign.Name ?? ""))) {
+      return {
+        execution_id: itemExecutionId,
+        status: "SYSTEM_FAILED",
+        error_code: "P0_DUPLICATE_CAMPAIGN_NAME",
+        error_message: "MOX-ADV preflight обнаружил существующую активную кампанию с таким названием.",
+        containment: "NOT_CREATED",
+        account_lock: "RELEASED",
+      };
+    }
+    await beginExecution(key, config.account, projection, itemExecutionId);
+  }
+  const packageAuthority = state.human_decision_gate.authority;
+  try {
+    const result = await executeSafeSingleCampaign({
+      execution_id: itemExecutionId,
+      config,
+      projection,
+      authority: {
+        direct_account_binding: packageAuthority.direct_account_binding,
+        direct_capability_snapshot: packageAuthority.direct_capability_snapshot,
+        capability_profile: packageAuthority.capability_profile,
+        publish_fingerprint: selection.publish_fingerprint,
+        publication_blockers: campaignDraftPublishBlockers(draft),
+      },
+      journal: new D1DirectExecutionJournal(key, projection),
+      fetcher: fetch,
+      now,
+    });
+    return { execution_id: itemExecutionId, ...result };
+  } catch (error) {
+    if (!(error instanceof DirectWriteError)) throw error;
+    return {
+      execution_id: itemExecutionId,
+      ...error.partial,
+      status: error.partial.requires_reconciliation === true || error.partial.account_lock === "HELD_FOR_RECONCILIATION"
+        ? "RECONCILIATION_REQUIRED"
+        : error.partial.rejected === true ? "PROVIDER_REJECTED" : "SYSTEM_FAILED",
+      error_code: error.code,
+      error_message: error.message,
+    };
+  }
+}
+
 async function createExternalOutcome({
   key,
   state,
@@ -797,6 +876,7 @@ const application = new P0Application({
       return { ready: blockers.length === 0, blockers, account: config.account };
     },
     createExternalOutcome,
+    createPackageItemOutcome,
   },
 });
 

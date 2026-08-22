@@ -57,6 +57,16 @@ import {
   type PackageReview,
 } from "./campaign-decision-gate.ts";
 import {
+  beginPackageItemDispatch,
+  exactPackageDispatchPlans,
+  initializePackageExecution,
+  packageExecutionBlocksFollowingItems,
+  recordPackageItemOutcome,
+  verifyPackageExecution,
+  type PackageExecution,
+  type PackageItemExternalOutcome,
+} from "./campaign-package-execution.ts";
+import {
   CAMPAIGN_STRATEGY_SCHEMA,
   STRATEGY_QUESTIONNAIRE_SCHEMA,
   buildStrategyQuestionnaire,
@@ -90,9 +100,10 @@ import {
 } from "./landing-advisory.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.8.0";
-export const P0_DOCUMENT_SCHEMA = "p0-application-document-v5";
-const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4"]);
+export const P0_APPLICATION_CONTRACT_VERSION = "1.9.0";
+export const P0_DOCUMENT_SCHEMA = "p0-application-document-v6";
+const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4", "p0-application-document-v5"]);
+const P0_PRE_PACKAGE_AUTHORITY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4"]);
 export const P0_CONTEXT_SCHEMA = "p0-context-v2";
 const P0_LEGACY_CONTEXT_SCHEMA = "p0-context-v1";
 export const P0_CONTEXT_PREFLIGHT_MAX_AGE_MS = 5 * 60_000;
@@ -167,6 +178,7 @@ export type P0Document = {
   shortlist: P0Shortlist | null;
   package_review: PackageReview | null;
   human_decision_gate: HumanDecisionGate | null;
+  package_execution: PackageExecution | null;
   last_decision_invalidation: DecisionInvalidation | null;
   external_write_intent: {
     strategy_revision_id: string;
@@ -246,6 +258,15 @@ export interface P0ApplicationAdapters {
     state: P0Document;
     projection: DirectProjection;
   }): Promise<Record<string, unknown>>;
+  createPackageItemOutcome(input: {
+    key: string;
+    state: P0Document;
+    package_execution_id: string;
+    item_execution_id: string;
+    selection: P0Shortlist["selections"][number];
+    projection: DirectProjection;
+    draft: CampaignRecommendationSet["drafts"][number];
+  }): Promise<PackageItemExternalOutcome>;
 }
 
 export type P0Command = Record<string, unknown> & {
@@ -318,47 +339,57 @@ const WORKFLOW_STEPS = [
   { id: "confirmation", label: "Подтверждение", detail: "Guarded write" },
 ] as const;
 
+function packageNotDispatched(state: P0Document) {
+  return !state.package_execution && !state.campaign && !state.external_write_intent;
+}
+
 export const P0_COMMAND_TRUTH_TABLE = {
-  analyze_site: (state: P0Document) => !state.campaign && !state.external_write_intent,
+  analyze_site: (state: P0Document) => packageNotDispatched(state),
   confirm_context_goal: (state: P0Document) => Boolean(
-    state.context_state && state.site_analysis && !state.campaign && !state.external_write_intent,
+    state.context_state && state.site_analysis && packageNotDispatched(state),
   ),
   save_business_model: (state: P0Document) => Boolean(
-    state.site_analysis && state.business_model && !state.campaign && !state.external_write_intent,
+    state.site_analysis && state.business_model && packageNotDispatched(state),
   ),
   approve_strategy: (state: P0Document) => (
     state.business_model?.source === "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION"
     && state.strategy_questionnaire?.schema_version === STRATEGY_QUESTIONNAIRE_SCHEMA
-    && !state.campaign
-    && !state.external_write_intent
+    && packageNotDispatched(state)
   ),
   run_landing_advisory: (state: P0Document) => Boolean(
-    state.strategy && !state.campaign && !state.external_write_intent,
+    state.strategy && packageNotDispatched(state),
   ),
   recalculate_recommendations: (state: P0Document) => Boolean(
-    state.strategy && state.recommendation_set && !state.campaign && !state.external_write_intent,
+    state.strategy && state.recommendation_set && packageNotDispatched(state),
   ),
   save_draft: (state: P0Document) => Boolean(
-    state.strategy && state.recommendation_set && !state.campaign && !state.external_write_intent,
+    state.strategy && state.recommendation_set && packageNotDispatched(state),
   ),
   add_to_shortlist: (state: P0Document) => Boolean(
-    state.strategy && state.recommendation_set && state.shortlist && !state.campaign && !state.external_write_intent,
+    state.strategy && state.recommendation_set && state.shortlist && packageNotDispatched(state),
   ),
   remove_from_shortlist: (state: P0Document) => Boolean(
-    state.strategy && state.recommendation_set && state.shortlist?.selections.length && !state.campaign && !state.external_write_intent,
+    state.strategy && state.recommendation_set && state.shortlist?.selections.length && packageNotDispatched(state),
   ),
   restore_to_shortlist: (state: P0Document) => Boolean(
-    state.strategy && state.recommendation_set && state.shortlist?.removed_selections.length && !state.campaign && !state.external_write_intent,
+    state.strategy && state.recommendation_set && state.shortlist?.removed_selections.length && packageNotDispatched(state),
   ),
   review_package: (state: P0Document) => Boolean(
-    state.strategy && state.recommendation_set && state.shortlist?.selections.length && !state.campaign && !state.external_write_intent,
+    state.strategy && state.recommendation_set && state.shortlist?.selections.length && packageNotDispatched(state),
   ),
   confirm_package: (state: P0Document) => Boolean(
-    state.package_review && !state.human_decision_gate && state.shortlist?.selections.length && !state.campaign && !state.external_write_intent,
+    state.package_review && !state.human_decision_gate && state.shortlist?.selections.length && packageNotDispatched(state),
   ),
-  // Legacy one-Draft dispatch stays fail closed until the package execution slices integrate it.
+  dispatch_package: (state: P0Document) => Boolean(
+    state.package_review
+      && state.human_decision_gate
+      && (!state.package_execution || state.package_execution.status === "DISPATCHING")
+      && !state.campaign
+      && !state.external_write_intent,
+  ),
+  // Legacy one-Draft dispatch remains unavailable; package execution is authoritative.
   confirm_creation: () => false,
-  reset: (state: P0Document) => !state.campaign && !state.external_write_intent,
+  reset: (state: P0Document) => packageNotDispatched(state),
 } as const;
 
 type CommandName = keyof typeof P0_COMMAND_TRUTH_TABLE;
@@ -388,6 +419,7 @@ function emptyDocument(): P0Document {
     shortlist: null,
     package_review: null,
     human_decision_gate: null,
+    package_execution: null,
     last_decision_invalidation: null,
     external_write_intent: null,
     campaign: null,
@@ -1144,6 +1176,7 @@ function invalidateContextDownstream(state: P0Document) {
   state.shortlist = null;
   state.package_review = null;
   state.human_decision_gate = null;
+  state.package_execution = null;
   state.external_write_intent = null;
   state.recommendation_recalculation = null;
 }
@@ -1156,6 +1189,7 @@ function invalidateStrategyDownstream(state: P0Document) {
   state.shortlist = null;
   state.package_review = null;
   state.human_decision_gate = null;
+  state.package_execution = null;
   state.external_write_intent = null;
   state.recommendation_recalculation = null;
 }
@@ -1268,6 +1302,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
   }
   const state = raw as unknown as P0Document;
   const legacyDocument = version !== P0_DOCUMENT_SCHEMA;
+  const legacyAuthorityDocument = version === undefined || P0_PRE_PACKAGE_AUTHORITY_DOCUMENT_SCHEMAS.has(String(version));
   const legacyShortlistPresent = Boolean(record(raw.shortlist).shortlist_revision_id);
   let changed = legacyDocument;
   if (changed) state.schema_version = P0_DOCUMENT_SCHEMA;
@@ -1319,17 +1354,18 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     lineageError("Campaign Strategy не связана с моделью бизнеса.");
   }
 
-  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "landing_advisory_run", "recommendation_set", "draft", "shortlist", "package_review", "human_decision_gate", "last_decision_invalidation", "external_write_intent", "campaign", "recommendation_recalculation", "last_cascade"] as const) {
+  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "landing_advisory_run", "recommendation_set", "draft", "shortlist", "package_review", "human_decision_gate", "package_execution", "last_decision_invalidation", "external_write_intent", "campaign", "recommendation_recalculation", "last_cascade"] as const) {
     if (!(key in state)) {
       if (!legacyDocument) lineageError(`same-schema document field ${key} отсутствует.`);
       state[key] = null as never;
       changed = true;
     }
   }
-  if (legacyDocument) {
+  if (legacyAuthorityDocument) {
     state.shortlist = null;
     state.package_review = null;
     state.human_decision_gate = null;
+    state.package_execution = null;
   }
   if (state.analytics_evidence_snapshot && !await verifyAnalyticsEvidenceSnapshot(state.analytics_evidence_snapshot)) {
     lineageError("Analytics Evidence Snapshot hash verification failed.");
@@ -1553,7 +1589,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
   }
 
   if (strategy && state.recommendation_set) {
-    if (legacyDocument) {
+    if (legacyAuthorityDocument) {
       state.shortlist = await emptyShortlist({
         shortlistRevisionId: `p0-shortlist-r${Math.max(1, revision + 1)}`,
         strategyRevisionId: String(strategy.strategy_revision_id ?? ""),
@@ -1596,8 +1632,17 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
         lineageError("Human Decision Gate confirmation или package authority не прошли проверку.");
       }
     }
-  } else if (state.shortlist || state.package_review || state.human_decision_gate) {
-    lineageError("shortlist/package authority существует без Strategy и Recommendation Set.");
+    if (state.package_execution) {
+      if (!state.human_decision_gate || !await verifyPackageExecution({
+        execution: state.package_execution,
+        gate: state.human_decision_gate,
+        recommendationSet: state.recommendation_set,
+      })) {
+        lineageError("package execution identity, item order или durable outcome hash не прошли проверку.");
+      }
+    }
+  } else if (state.shortlist || state.package_review || state.human_decision_gate || state.package_execution) {
+    lineageError("shortlist/package authority или execution существует без Strategy и Recommendation Set.");
   }
   if (state.last_decision_invalidation && !await verifyDecisionInvalidation(state.last_decision_invalidation)) {
     lineageError("decision invalidation audit hash verification failed.");
@@ -1677,7 +1722,7 @@ function decisionReadiness(state: P0Document) {
     blockers,
     confirmed: Boolean(state.human_decision_gate),
     independent_execution: true,
-    external_writes_performed: false,
+    external_writes_performed: Boolean(state.package_execution),
   };
 }
 
@@ -1822,8 +1867,14 @@ export class P0Application {
     if (["REQUIRED", "PENDING"].includes(String(state.last_cascade?.recomputation_status ?? ""))) {
       blockers.push("Downstream recomputation ещё не завершён");
     }
-    blockers.push("Package execution не входит в Human Decision Gate и будет подключено только в следующих execution slices.");
-    return { ready: false, blockers: [...new Set(blockers)] };
+    if (!state.package_review || !state.human_decision_gate) {
+      blockers.push("Точный package review и Human Decision Gate ещё не подтверждены");
+    }
+    if (state.package_execution) {
+      blockers.push(`Package execution уже создано со статусом ${state.package_execution.status}`);
+    }
+    const uniqueBlockers = [...new Set(blockers)];
+    return { ready: uniqueBlockers.length === 0, blockers: uniqueBlockers };
   }
 
   async query(key: string) {
@@ -2488,6 +2539,106 @@ export class P0Application {
         fail("P0_PACKAGE_STALE", "Package review больше не совпадает с current authoritative state.");
       }
       state.human_decision_gate = await buildHumanDecisionGate(state.package_review, confirmedAt);
+    } else if (action === "dispatch_package") {
+      if (!state.package_review || !state.human_decision_gate || !state.recommendation_set || !state.context_state) {
+        fail("P0_PACKAGE_AUTHORITY_MISSING", "Package dispatch требует current package review, exact Human Decision Gate, Recommendation Set и Context.");
+      }
+      if (payload.package_id !== state.human_decision_gate.package_id || payload.gate_id !== state.human_decision_gate.gate_id) {
+        fail("P0_PACKAGE_IDENTITY_STALE", "Dispatch identity не совпадает с current exact Human Decision Gate.");
+      }
+      const preflightAt = this.adapters.now();
+      const preflightContext = sanitizeContext(await this.adapters.readContext());
+      this.assertContextPreflight(preflightContext, preflightAt);
+      this.assertPersistedBindings(state, preflightContext);
+      const configuration = this.adapters.externalWriteConfiguration();
+      if (!configuration.ready) {
+        fail("P0_WRITE_NOT_READY", configuration.blockers[0] ?? "Direct production credentials не настроены.");
+      }
+      if (configuration.account !== state.human_decision_gate.authority.direct_account_binding.account) {
+        fail("P0_CONTEXT_ACCOUNT_MISMATCH", "Direct write account не совпадает с exact package Gate binding.");
+      }
+      let plans;
+      try {
+        plans = await exactPackageDispatchPlans({
+          review: state.package_review,
+          gate: state.human_decision_gate,
+          recommendationSet: state.recommendation_set,
+        });
+      } catch (error) {
+        fail("P0_PACKAGE_DISPATCH_BLOCKED", errorMessage(error));
+      }
+      const persistPackageCheckpoint = async (checkpointAt: string) => {
+        const checkpoint: P0StoredRow = {
+          revision: persistedRevision + 1,
+          updated_at: checkpointAt,
+          value_json: JSON.stringify(state),
+        };
+        if (!await this.store.compareAndSwap(key, persistedRevision, checkpoint)) {
+          fail("P0_REVISION_CONFLICT", "P0 изменился в другой вкладке. Package checkpoint не сохранён.");
+        }
+        persistedRevision = checkpoint.revision;
+      };
+      if (!state.package_execution) {
+        state.package_execution = await initializePackageExecution({
+          review: state.package_review,
+          gate: state.human_decision_gate,
+          plans,
+          startedAt: preflightAt,
+        });
+        await persistPackageCheckpoint(preflightAt);
+      }
+      for (const plan of plans) {
+        const currentItem = state.package_execution.items.find((item) => item.item_execution_id === plan.item_execution_id);
+        if (!currentItem || !["QUEUED", "DISPATCHING"].includes(currentItem.status)) continue;
+        if (packageExecutionBlocksFollowingItems(state.package_execution)) break;
+        const itemStartedAt = this.adapters.now();
+        state.package_execution = await beginPackageItemDispatch(state.package_execution, plan.item_execution_id, itemStartedAt);
+        await persistPackageCheckpoint(itemStartedAt);
+        let outcome: PackageItemExternalOutcome;
+        try {
+          outcome = await this.adapters.createPackageItemOutcome({
+            key,
+            state,
+            package_execution_id: state.package_execution.package_execution_id,
+            item_execution_id: plan.item_execution_id,
+            selection: plan.selection,
+            projection: plan.projection,
+            draft: plan.draft,
+          });
+        } catch (error) {
+          const failure = error as Error & { code?: string; partial?: Record<string, unknown> };
+          const partial = record(failure.partial);
+          outcome = {
+            execution_id: plan.item_execution_id,
+            ...partial,
+            status: partial.requires_reconciliation === true || partial.account_lock === "HELD_FOR_RECONCILIATION"
+              ? "RECONCILIATION_REQUIRED"
+              : partial.rejected === true ? "PROVIDER_REJECTED" : "SYSTEM_FAILED",
+            error_code: failure.code ?? "P0_PACKAGE_ITEM_SYSTEM_FAILURE",
+            error_message: failure.message || "Package item execution failed.",
+          };
+        }
+        if (outcome.execution_id !== plan.item_execution_id) {
+          outcome = {
+            status: "RECONCILIATION_REQUIRED",
+            execution_id: plan.item_execution_id,
+            requires_reconciliation: true,
+            account_lock: "HELD_FOR_RECONCILIATION",
+            containment: "RECONCILIATION_REQUIRED",
+            error_code: "P0_PACKAGE_ITEM_IDENTITY_MISMATCH",
+            error_message: "External item outcome did not match the durable package execution identity.",
+          };
+        }
+        const itemUpdatedAt = this.adapters.now();
+        state.package_execution = await recordPackageItemOutcome(
+          state.package_execution,
+          plan.item_execution_id,
+          outcome,
+          itemUpdatedAt,
+        );
+        await persistPackageCheckpoint(itemUpdatedAt);
+        if (packageExecutionBlocksFollowingItems(state.package_execution)) break;
+      }
     } else if (action === "confirm_creation") {
 
       if (payload.confirmation !== "CREATE_NON_SERVING_CAMPAIGN") {
@@ -2550,7 +2701,7 @@ export class P0Application {
     if (!await this.store.compareAndSwap(key, persistedRevision, next)) {
       fail("P0_REVISION_CONFLICT", "P0 изменился в другой вкладке. Обновите страницу.");
     }
-    const decisionOnly = action === "review_package" || action === "confirm_package";
+    const decisionOnly = action === "review_package" || action === "confirm_package" || action === "dispatch_package";
     const context = decisionOnly
       ? persistedDecisionContext(state)
       : sanitizeContext(await this.adapters.readContext());

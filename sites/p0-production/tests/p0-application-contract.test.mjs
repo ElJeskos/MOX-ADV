@@ -1694,6 +1694,8 @@ test("ordered multi-Draft shortlist supports add/remove/positional restore, exac
   assert.deepEqual(result.state.human_decision_gate.authority, review.authority);
   assert.equal(result.state.human_decision_gate.external_transactionality_promised, false);
   assert.equal(result.state.human_decision_gate.external_writes_performed, false);
+  assert.equal(result.write_readiness.ready, true);
+  assert.equal(result.workflow.allowed_commands.includes("dispatch_package"), true);
   const confirmedGate = JSON.stringify(result.state.human_decision_gate);
   const confirmedReview = JSON.stringify(result.state.package_review);
   const readsBeforeReopen = value.contextReads();
@@ -1708,6 +1710,355 @@ test("ordered multi-Draft shortlist supports add/remove/positional restore, exac
   assert.equal(value.externalWrites(), 0);
   const afterRestart = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
   assert.equal(afterRestart.state.human_decision_gate.gate_id, result.state.human_decision_gate.gate_id);
+});
+
+test("confirmed package dispatches every selected Draft independently and preserves mixed item outcomes", async (t) => {
+  const value = await packageFixture(t);
+  const eligible = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE");
+  const selected = eligible.slice(0, 2);
+  assert.equal(selected.length, 2);
+  let result = await reviewAndConfirm(value.application, value.result, selected.map((draft) => draft.draft_id));
+  const calls = [];
+  value.adapter.createPackageItemOutcome = async ({ item_execution_id, selection, projection }) => {
+    calls.push({ item_execution_id, selection, projection });
+    if (selection.draft_id === selected[0].draft_id) {
+      return {
+        execution_id: item_execution_id,
+        status: "MODERATION_PENDING",
+        campaign_id: "90071992547409931",
+        ad_group_id: "90071992547409932",
+        keyword_id: "90071992547409933",
+        ad_id: "90071992547409934",
+        campaign_state: "SUSPENDED",
+        moderation_status: "MODERATION",
+        semantic_graph: { campaign: { State: "SUSPENDED" } },
+        steps: ["CAMPAIGN_CREATED", "NON_SERVING_CONFIRMED", "AD_GROUP_CREATED", "KEYWORD_CREATED", "AD_CREATED", "OBJECT_GRAPH_VERIFIED", "MODERATION_SUBMITTED"],
+        provider_issues: [],
+        spend_started: false,
+      };
+    }
+    return {
+      execution_id: item_execution_id,
+      status: "PROVIDER_REJECTED",
+      error_code: "P0_DIRECT_ITEM_FAILED",
+      error_message: "Direct rejected this exact item.",
+      rejected: true,
+      provider_issues: [{ operation: "Campaigns.add", severity: "ERROR", code: 5001, message: "Rejected", details: "Provider detail" }],
+      containment: "NOT_CREATED",
+      account_lock: "RELEASED",
+    };
+  };
+
+  const confirmedGate = JSON.stringify(result.state.human_decision_gate);
+  result = await value.application.command("owner", {
+    action: "dispatch_package",
+    expected_revision: result.revision,
+    package_id: result.state.human_decision_gate.package_id,
+    gate_id: result.state.human_decision_gate.gate_id,
+  });
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map((call) => call.selection.draft_id), selected.map((draft) => draft.draft_id));
+  assert.equal(calls.every((call) => call.projection.lineage.draft_revision_id === call.selection.draft_revision_id), true);
+  assert.equal(new Set(calls.map((call) => call.item_execution_id)).size, 2);
+  assert.equal(JSON.stringify(result.state.human_decision_gate), confirmedGate);
+  assert.equal(result.state.package_execution.package_id, result.state.human_decision_gate.package_id);
+  assert.equal(result.state.package_execution.gate_id, result.state.human_decision_gate.gate_id);
+  assert.equal(result.state.package_execution.atomic_transaction, false);
+  assert.equal(result.state.package_execution.status, "PENDING");
+  assert.deepEqual(result.state.package_execution.items.map((item) => item.selection.draft_id), selected.map((draft) => draft.draft_id));
+  assert.equal(result.state.package_execution.items[0].status, "MODERATION_PENDING");
+  assert.equal(result.state.package_execution.items[0].ownership, "PENDING_PROVIDER_OUTCOME");
+  assert.equal(result.state.package_execution.items[0].progress.suspension, "CONFIRMED_SUSPENDED");
+  assert.equal(result.state.package_execution.items[0].progress.child_graph, "CREATED");
+  assert.equal(result.state.package_execution.items[0].progress.readback, "VERIFIED");
+  assert.equal(result.state.package_execution.items[0].progress.moderation, "PENDING");
+  assert.equal(result.state.package_execution.items[0].provider_ids.campaign_id, "90071992547409931");
+  assert.equal(result.state.package_execution.items[1].status, "PROVIDER_REJECTED");
+  assert.equal(result.state.package_execution.items[1].ownership, "PROVIDER");
+  assert.equal(result.state.package_execution.items[1].provider_issues[0].details, "Provider detail");
+  assert.equal(result.state.package_execution.items[1].containment, "NOT_CREATED");
+  assert.equal(result.state.package_execution.items[1].progress.creation, "REJECTED");
+  assert.equal(result.decision_readiness.external_writes_performed, true);
+  assert.equal(result.write_readiness.ready, false);
+
+  const restarted = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
+  assert.deepEqual(restarted.state.package_execution, result.state.package_execution);
+  assert.equal(restarted.workflow.allowed_commands.includes("dispatch_package"), false);
+});
+
+test("package dispatch continues after contained system failure but stops unsafe remaining items behind reconciliation", async (t) => {
+  await t.test("contained system failure does not hide or stop the next independent item", async (t) => {
+    const value = await packageFixture(t);
+    const selected = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE").slice(0, 2);
+    let result = await reviewAndConfirm(value.application, value.result, selected.map((draft) => draft.draft_id));
+    const calls = [];
+    value.adapter.createPackageItemOutcome = async ({ item_execution_id, selection }) => {
+      calls.push(selection.draft_id);
+      if (selection.draft_id === selected[0].draft_id) {
+        return {
+          execution_id: item_execution_id,
+          status: "SYSTEM_FAILED",
+          error_code: "P0_DIRECT_GRAPH_MISMATCH",
+          error_message: "Provider silently altered a selected field.",
+          campaign_id: "101",
+          campaign_state: "SUSPENDED",
+          steps: ["CAMPAIGN_CREATED", "NON_SERVING_CONFIRMED"],
+          containment: "NON_SERVING_CONFIRMED",
+          account_lock: "RELEASED",
+        };
+      }
+      return {
+        execution_id: item_execution_id,
+        status: "MODERATION_PENDING",
+        campaign_id: "201",
+        ad_group_id: "202",
+        keyword_id: "203",
+        ad_id: "204",
+        campaign_state: "SUSPENDED",
+        moderation_status: "PREACCEPTED",
+        semantic_graph: { campaign: { State: "SUSPENDED" } },
+        steps: ["CAMPAIGN_CREATED", "NON_SERVING_CONFIRMED", "AD_GROUP_CREATED", "KEYWORD_CREATED", "AD_CREATED", "OBJECT_GRAPH_VERIFIED", "MODERATION_SUBMITTED"],
+        account_lock: "RELEASED",
+      };
+    };
+
+    result = await value.application.command("owner", {
+      action: "dispatch_package",
+      expected_revision: result.revision,
+      package_id: result.state.human_decision_gate.package_id,
+      gate_id: result.state.human_decision_gate.gate_id,
+    });
+
+    assert.deepEqual(calls, selected.map((draft) => draft.draft_id));
+    assert.equal(result.state.package_execution.items[0].ownership, "SYSTEM");
+    assert.equal(result.state.package_execution.items[0].containment, "CONFIRMED_SUSPENDED");
+    assert.equal(result.state.package_execution.items[0].failure.code, "P0_DIRECT_GRAPH_MISMATCH");
+    assert.equal(result.state.package_execution.items[1].ownership, "PENDING_PROVIDER_OUTCOME");
+    assert.equal(result.state.package_execution.items[1].progress.moderation, "PENDING");
+  });
+
+  await t.test("created item without exact SUSPENDED proof leaves the package fail closed", async (t) => {
+    const value = await packageFixture(t);
+    const selected = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE").slice(0, 2);
+    let result = await reviewAndConfirm(value.application, value.result, selected.map((draft) => draft.draft_id));
+    const calls = [];
+    value.adapter.createPackageItemOutcome = async ({ item_execution_id, selection }) => {
+      calls.push(selection.draft_id);
+      return {
+        execution_id: item_execution_id,
+        status: "PROVIDER_REJECTED",
+        rejected: true,
+        campaign_id: "301",
+        containment: "NON_SERVING_CONFIRMED",
+        account_lock: "RELEASED",
+        provider_issues: [{ operation: "AdGroups.add", severity: "ERROR", code: 5002, message: "Child rejected", details: "" }],
+      };
+    };
+
+    result = await value.application.command("owner", {
+      action: "dispatch_package",
+      expected_revision: result.revision,
+      package_id: result.state.human_decision_gate.package_id,
+      gate_id: result.state.human_decision_gate.gate_id,
+    });
+
+    assert.equal(result.state.package_execution.items[0].provider_ids.campaign_id, "301");
+    assert.equal(result.state.package_execution.items[0].progress.suspension, "FAILED");
+    assert.equal(result.state.package_execution.status, "FAIL_CLOSED");
+    assert.deepEqual(calls, [selected[0].draft_id]);
+    assert.equal(result.state.package_execution.items[1].status, "QUEUED");
+  });
+
+  await t.test("mismatched durable item execution identity is unknown and blocks later dispatch", async (t) => {
+    const value = await packageFixture(t);
+    const selected = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE").slice(0, 2);
+    let result = await reviewAndConfirm(value.application, value.result, selected.map((draft) => draft.draft_id));
+    const calls = [];
+    value.adapter.createPackageItemOutcome = async ({ selection }) => {
+      calls.push(selection.draft_id);
+      return {
+        execution_id: "forged-execution-id",
+        status: "MODERATION_PENDING",
+        campaign_id: "501",
+        campaign_state: "SUSPENDED",
+        moderation_status: "MODERATION",
+        account_lock: "RELEASED",
+      };
+    };
+
+    result = await value.application.command("owner", {
+      action: "dispatch_package",
+      expected_revision: result.revision,
+      package_id: result.state.human_decision_gate.package_id,
+      gate_id: result.state.human_decision_gate.gate_id,
+    });
+
+    assert.deepEqual(calls, [selected[0].draft_id]);
+    assert.equal(result.state.package_execution.status, "RECONCILIATION_REQUIRED");
+    assert.equal(result.state.package_execution.items[0].ownership, "UNKNOWN");
+    assert.equal(result.state.package_execution.items[0].failure.code, "P0_PACKAGE_ITEM_IDENTITY_MISMATCH");
+    assert.equal(result.state.package_execution.items[1].status, "QUEUED");
+  });
+
+  await t.test("ambiguous item holds the account boundary and leaves later items undispatched", async (t) => {
+    const value = await packageFixture(t);
+    const selected = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE").slice(0, 2);
+    let result = await reviewAndConfirm(value.application, value.result, selected.map((draft) => draft.draft_id));
+    const calls = [];
+    value.adapter.createPackageItemOutcome = async ({ item_execution_id, selection }) => {
+      calls.push(selection.draft_id);
+      return {
+        execution_id: item_execution_id,
+        status: "RECONCILIATION_REQUIRED",
+        error_code: "P0_DIRECT_OUTCOME_AMBIGUOUS",
+        error_message: "Campaigns.add outcome is unknown.",
+        requires_reconciliation: true,
+        containment: "RECONCILIATION_REQUIRED",
+        account_lock: "HELD_FOR_RECONCILIATION",
+      };
+    };
+
+    result = await value.application.command("owner", {
+      action: "dispatch_package",
+      expected_revision: result.revision,
+      package_id: result.state.human_decision_gate.package_id,
+      gate_id: result.state.human_decision_gate.gate_id,
+    });
+
+    assert.deepEqual(calls, [selected[0].draft_id]);
+    assert.equal(result.state.package_execution.status, "RECONCILIATION_REQUIRED");
+    assert.equal(result.state.package_execution.items[0].ownership, "UNKNOWN");
+    assert.equal(result.state.package_execution.items[0].account_lock, "HELD_FOR_RECONCILIATION");
+    assert.equal(result.state.package_execution.items[1].status, "QUEUED");
+    assert.equal(result.state.package_execution.items[1].progress.creation, "PENDING");
+  });
+});
+
+test("package dispatch blocks the whole set before durable intent when current account binding changed", async (t) => {
+  const value = await packageFixture(t);
+  const selected = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE").slice(0, 2);
+  const confirmed = await reviewAndConfirm(value.application, value.result, selected.map((draft) => draft.draft_id));
+  const changedContext = structuredClone(context());
+  changedContext.direct.account = "other-account";
+  changedContext.direct.client_id = "client-other";
+  changedContext.direct.binding.expected_account = "other-account";
+  changedContext.direct.binding.api_account = "other-account";
+  changedContext.direct.capability_snapshot.account = "other-account";
+  let externalCalls = 0;
+  const changedAdapter = adapters({
+    async readContext() { return changedContext; },
+    async createPackageItemOutcome() { externalCalls += 1; throw new Error("must not dispatch"); },
+  });
+  const changedApplication = new P0Application({ store: value.store, adapters: changedAdapter });
+
+  await assert.rejects(
+    changedApplication.command("owner", {
+      action: "dispatch_package",
+      expected_revision: confirmed.revision,
+      package_id: confirmed.state.human_decision_gate.package_id,
+      gate_id: confirmed.state.human_decision_gate.gate_id,
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_CONTEXT_PREFLIGHT_CHANGED",
+  );
+  assert.equal(externalCalls, 0);
+  const unchanged = await value.store.load("owner");
+  assert.equal(JSON.parse(unchanged.value_json).package_execution, null);
+});
+
+test("restart resumes a durable DISPATCHING item with the same deterministic execution identity", async (t) => {
+  const value = await packageFixture(t);
+  const selected = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE").slice(0, 1);
+  const confirmed = await reviewAndConfirm(value.application, value.result, selected.map((draft) => draft.draft_id));
+  const originalCompareAndSwap = value.store.compareAndSwap.bind(value.store);
+  let rejectOutcomeCheckpoint = false;
+  value.store.compareAndSwap = async (...args) => {
+    if (rejectOutcomeCheckpoint) {
+      rejectOutcomeCheckpoint = false;
+      return false;
+    }
+    return originalCompareAndSwap(...args);
+  };
+  const calls = [];
+  value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => {
+    calls.push(item_execution_id);
+    if (calls.length === 1) rejectOutcomeCheckpoint = true;
+    return {
+      execution_id: item_execution_id,
+      status: "MODERATION_PENDING",
+      campaign_id: "401",
+      ad_group_id: "402",
+      keyword_id: "403",
+      ad_id: "404",
+      campaign_state: "SUSPENDED",
+      moderation_status: "MODERATION",
+      semantic_graph: { campaign: { State: "SUSPENDED" } },
+      steps: ["CAMPAIGN_CREATED", "NON_SERVING_CONFIRMED", "AD_GROUP_CREATED", "KEYWORD_CREATED", "AD_CREATED", "OBJECT_GRAPH_VERIFIED", "MODERATION_SUBMITTED"],
+      account_lock: "RELEASED",
+    };
+  };
+
+  await assert.rejects(
+    value.application.command("owner", {
+      action: "dispatch_package",
+      expected_revision: confirmed.revision,
+      package_id: confirmed.state.human_decision_gate.package_id,
+      gate_id: confirmed.state.human_decision_gate.gate_id,
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_REVISION_CONFLICT",
+  );
+  value.store.compareAndSwap = originalCompareAndSwap;
+  const interrupted = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
+  assert.equal(interrupted.state.package_execution.items[0].status, "DISPATCHING");
+  assert.equal(interrupted.workflow.allowed_commands.includes("dispatch_package"), true);
+
+  const recovered = await new P0Application({ store: value.store, adapters: value.adapter }).command("owner", {
+    action: "dispatch_package",
+    expected_revision: interrupted.revision,
+    package_id: interrupted.state.human_decision_gate.package_id,
+    gate_id: interrupted.state.human_decision_gate.gate_id,
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0], calls[1]);
+  assert.equal(recovered.state.package_execution.items[0].item_execution_id, calls[0]);
+  assert.equal(recovered.state.package_execution.items[0].provider_ids.campaign_id, "401");
+  assert.equal(recovered.state.package_execution.items[0].status, "MODERATION_PENDING");
+});
+
+test("same-schema package item outcome tampering fails closed before UI reuse", async (t) => {
+  const value = await packageFixture(t);
+  const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+  const result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+  value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => ({
+    execution_id: item_execution_id,
+    status: "MODERATION_PENDING",
+    campaign_id: "601",
+    ad_group_id: "602",
+    keyword_id: "603",
+    ad_id: "604",
+    campaign_state: "SUSPENDED",
+    moderation_status: "MODERATION",
+    semantic_graph: { campaign: { State: "SUSPENDED" } },
+    steps: ["CAMPAIGN_CREATED", "NON_SERVING_CONFIRMED", "AD_GROUP_CREATED", "KEYWORD_CREATED", "AD_CREATED", "OBJECT_GRAPH_VERIFIED", "MODERATION_SUBMITTED"],
+    account_lock: "RELEASED",
+  });
+  await value.application.command("owner", {
+    action: "dispatch_package",
+    expected_revision: result.revision,
+    package_id: result.state.human_decision_gate.package_id,
+    gate_id: result.state.human_decision_gate.gate_id,
+  });
+  const row = await value.store.load("owner");
+  const corrupted = JSON.parse(row.value_json);
+  corrupted.package_execution.items[0].provider_ids.campaign_id = "forged-provider-id";
+  await value.store.seed("owner", { ...row, value_json: JSON.stringify(corrupted) });
+
+  await assert.rejects(
+    new P0Application({ store: value.store, adapters: value.adapter }).query("owner"),
+    (error) => error instanceof P0ApplicationError
+      && error.code === "P0_MIGRATION_LINEAGE_INVALID"
+      && /package execution/iu.test(error.message),
+  );
 });
 
 test("authoritative shortlist command rejects blocked and evidence-gap Drafts without rewriting candidate or evidence audit", async (t) => {
@@ -1728,6 +2079,24 @@ test("authoritative shortlist command rejects blocked and evidence-gap Drafts wi
   assert.equal(typeof after.shortlist_controls.find((item) => item.draft_id === blocked.draft_id).disabled_reason, "string");
 });
 
+test("v5 package authority migrates to v6 without discarding the exact confirmed Gate", async (t) => {
+  const value = await packageFixture(t);
+  const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+  const confirmed = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+  const row = await value.store.load("owner");
+  const legacy = JSON.parse(row.value_json);
+  legacy.schema_version = "p0-application-document-v5";
+  delete legacy.package_execution;
+  await value.store.seed("owner", { ...row, value_json: JSON.stringify(legacy) });
+
+  const migrated = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
+  assert.equal(migrated.state.schema_version, P0_DOCUMENT_SCHEMA);
+  assert.equal(migrated.state.package_execution, null);
+  assert.deepEqual(migrated.state.package_review, confirmed.state.package_review);
+  assert.deepEqual(migrated.state.human_decision_gate, confirmed.state.human_decision_gate);
+  assert.equal(migrated.workflow.allowed_commands.includes("dispatch_package"), true);
+});
+
 test("same-schema shortlist, package and confirmation tampering all fail closed on restart", async (t) => {
   const value = await packageFixture(t);
   const eligible = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE");
@@ -1743,7 +2112,7 @@ test("same-schema shortlist, package and confirmation tampering all fail closed 
   ];
   for (const [name, mutate] of cases) {
     const corrupted = JSON.parse(row.value_json);
-    assert.equal(corrupted.schema_version, "p0-application-document-v5");
+    assert.equal(corrupted.schema_version, P0_DOCUMENT_SCHEMA);
     mutate(corrupted);
     await value.store.seed("owner", { ...row, value_json: JSON.stringify(corrupted) });
     await assert.rejects(

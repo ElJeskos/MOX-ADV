@@ -39,7 +39,7 @@ type Payload = {
     confirmation_requires_recomputation: boolean;
   };
   shortlist_controls: Array<{ draft_id: string; status: "SELECTED" | "REMOVED" | "AVAILABLE" | "BLOCKED"; disabled_reason: string | null }>;
-  decision_readiness: { ready: boolean; blockers: string[]; confirmed: boolean; independent_execution: true; external_writes_performed: false };
+  decision_readiness: { ready: boolean; blockers: string[]; confirmed: boolean; independent_execution: true; external_writes_performed: boolean };
   revision_history?: Array<Record<string, any>>;
   write_readiness: { ready: boolean; blockers: string[] };
 };
@@ -94,7 +94,9 @@ export default function P0Client() {
         ? "Проверяю точные API bindings и исследую безопасный first-party target…"
         : action === "confirm_context_goal"
           ? "Сохраняю решение владельца и начинаю полную аналитику…"
-          : "Сохраняю production-ревизию…",
+          : action === "dispatch_package"
+            ? "Исполняю exact package независимо по каждой кампании…"
+            : "Сохраняю production-ревизию…",
     );
     try {
       const result = await request("/api/p0", {
@@ -181,7 +183,7 @@ export default function P0Client() {
               <Connection label="Яндекс Метрика" ready={metrika.ready === true} detail={metrika.ready ? `Счётчик ${metrika.counter_id} · цель ${metrika.goal_id} · API` : metrika.blockers?.[0]} />
               <Connection label="Последний реальный срез" ready={Boolean(performance)} detail={performance ? `${performance.period_start} — ${performance.period_end} · ${performance.display_metrics.goal_visits} целей` : "Нет подтверждённого среза"} />
             </section>
-            <section className="write-boundary"><span>Human Decision Gate</span><strong>{payload.decision_readiness.confirmed ? "Authority подтверждена" : payload.state.package_review ? "Пакет reviewed" : "Требует package review"}</strong><small>{payload.decision_readiness.confirmed ? "External writes не выполнялись; кампании будут исполняться независимо." : payload.decision_readiness.blockers[0] || "Точный пакет готов к подтверждению."}</small></section>
+            <section className="write-boundary"><span>Human Decision Gate</span><strong>{payload.state.package_execution ? `Package · ${payload.state.package_execution.status}` : payload.decision_readiness.confirmed ? "Authority подтверждена" : payload.state.package_review ? "Пакет reviewed" : "Требует package review"}</strong><small>{payload.state.package_execution ? `${payload.state.package_execution.dispatched_count}/${payload.state.package_execution.selected_count} item executions durable; atomic transaction: NO.` : payload.decision_readiness.confirmed ? "Authority готова к независимому item dispatch." : payload.decision_readiness.blockers[0] || "Точный пакет готов к подтверждению."}</small></section>
           </aside>
 
           <section className="artifact">
@@ -634,10 +636,36 @@ function DraftStep({ payload, apply, back, openReview }: { payload: Payload; app
   </>;
 }
 
+const executionProgressLabels = {
+  validation: "Validation",
+  creation: "Creation",
+  suspension: "Suspension",
+  child_graph: "Child graph",
+  readback: "Readback",
+  moderation: "Moderation",
+} as const;
+
+function PackageExecutionPanel({ execution }: { execution: Record<string, any> }) {
+  const items = Array.isArray(execution.items) ? execution.items : [];
+  return <section className="package-executions" aria-label="Package campaign executions">
+    <header><div><p className="eyebrow">DURABLE INDEPENDENT EXECUTIONS</p><h3>Результат каждого Campaign Draft сохранён отдельно</h3><p>Package status {execution.status}. Это accountability selected set, а не атомарная транзакция и не финальный moderation verdict.</p></div><strong>{execution.dispatched_count}/{execution.selected_count}</strong></header>
+    <ol>{items.map((item: Record<string, any>) => <li key={item.item_execution_id} className={`package-execution-item ${String(item.ownership || "unknown").toLowerCase()}`}>
+      <header><div><span>#{Number(item.position) + 1}</span><strong>{item.selection?.draft_revision_id}</strong><code>{item.item_execution_id}</code></div><div><b>{item.status}</b><small>Ownership · {item.ownership}</small></div></header>
+      <dl className="execution-progress">{Object.entries(executionProgressLabels).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{item.progress?.[key] || "PENDING"}</dd></div>)}</dl>
+      <div className="execution-identifiers"><span>Campaign <code>{item.provider_ids?.campaign_id || "—"}</code></span><span>Ad group <code>{item.provider_ids?.ad_group_id || "—"}</code></span><span>Keyword <code>{item.provider_ids?.keyword_id || "—"}</code></span><span>Ads <code>{item.provider_ids?.ad_ids?.join(", ") || "—"}</code></span></div>
+      <footer><span>Containment · <strong>{item.containment}</strong></span><span>Account lock · <strong>{item.account_lock}</strong></span></footer>
+      {item.failure && <p className="execution-failure" role="status"><strong>{item.failure.code}</strong> · {item.failure.message}</p>}
+      {Array.isArray(item.provider_issues) && item.provider_issues.length > 0 && <details><summary>Provider details · {item.provider_issues.length}</summary><ul>{item.provider_issues.map((issue: Record<string, any>, index: number) => <li key={`${issue.operation}-${issue.code}-${index}`}><strong>{issue.operation} · {issue.code}</strong><span>{issue.message}{issue.details ? ` · ${issue.details}` : ""}</span></li>)}</ul></details>}
+      {item.readback && <details><summary>Semantic readback</summary><code>{JSON.stringify(item.readback)}</code></details>}
+    </li>)}</ol>
+  </section>;
+}
+
 function ConfirmationStep({ payload, apply, busy, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; busy: boolean; back: () => void }) {
   const [confirmed, setConfirmed] = useState(false);
   const review = payload.state.package_review;
   const gate = payload.state.human_decision_gate;
+  const execution = payload.state.package_execution;
   const authority = review?.authority;
   const selections = Array.isArray(authority?.ordered_selections) ? authority.ordered_selections : [];
   if (!review || !authority) {
@@ -667,7 +695,10 @@ function ConfirmationStep({ payload, apply, busy, back }: { payload: Payload; ap
       </dl>
     </section>
     <div className="confirmation"><p className="eyebrow">НЕАТОМАРНЫЙ ПАКЕТ</p><h3>Кампании исполняются и оцениваются независимо</h3><p>{authority.orchestration.disclosure} Confirmation сохраняет durable authority и timestamp, но не вызывает Direct, не deploy’ит, не запускает показы и не начинает spend.</p></div>
-    {gate ? <section className="gate-confirmed" role="status"><strong>Human Decision Gate подтверждён</strong><p>{gate.confirmed_at} · {gate.gate_id}</p><small>External writes performed: NO · transactionality promised: NO</small></section> : <div className="decision-confirm"><input aria-label="Подтверждаю точный пакет и независимое исполнение кампаний" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю точный reviewed package</strong><small>Authority относится только к package {String(review.package_id).slice(0, 20)}…; каждая выбранная кампания будет dispatch/contain/moderate/evaluate независимо.</small></span></div>}
-    <footer className="actions"><span>Ревизия {payload.revision} · durable decision only · no external write</span><button type="button" className="secondary" disabled={busy} onClick={back}>Назад к shortlist</button><button type="button" disabled={busy || Boolean(gate) || !confirmed} onClick={() => void apply("confirm_package", undefined, { confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id })}>{gate ? "Gate уже подтверждён" : "Подтвердить authority пакета"}</button></footer>
+    {gate ? <section className="gate-confirmed" role="status"><strong>Human Decision Gate подтверждён</strong><p>{gate.confirmed_at} · {gate.gate_id}</p><small>External writes performed: {execution ? "YES, independently" : "NO"} · transactionality promised: NO</small></section> : <div className="decision-confirm"><input aria-label="Подтверждаю точный пакет и независимое исполнение кампаний" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю точный reviewed package</strong><small>Authority относится только к package {String(review.package_id).slice(0, 20)}…; каждая выбранная кампания будет dispatch/contain/moderate/evaluate независимо.</small></span></div>}
+    {execution && <PackageExecutionPanel execution={execution} />}
+    <footer className="actions"><span>Ревизия {payload.revision} · independent durable item executions</span><button type="button" className="secondary" disabled={busy} onClick={back}>Назад к shortlist</button>{!gate
+      ? <button type="button" disabled={busy || !confirmed} onClick={() => void apply("confirm_package", undefined, { confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id })}>Подтвердить authority пакета</button>
+      : <button type="button" disabled={busy || !payload.workflow.allowed_commands.includes("dispatch_package")} onClick={() => void apply("dispatch_package", undefined, { package_id: gate.package_id, gate_id: gate.gate_id })}>{execution?.status === "DISPATCHING" ? "Продолжить безопасное исполнение" : execution ? "Package dispatch зафиксирован" : "Исполнить подтверждённый пакет"}</button>}</footer>
   </>;
 }
