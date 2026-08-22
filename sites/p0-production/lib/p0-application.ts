@@ -34,6 +34,27 @@ import {
   type DirectCapabilitySnapshot,
 } from "./campaign-fanout.ts";
 import {
+  buildDecisionInvalidation,
+  buildHumanDecisionGate,
+  buildPackageReview,
+  emptyShortlist,
+  PACKAGE_CONFIRMATION_TOKEN,
+  rebaseShortlist,
+  reviseShortlist,
+  selectionForDraft,
+  shortlistSelectionBlockReason,
+  verifyDecisionInvalidation,
+  verifyHumanDecisionGate,
+  verifyPackageReview,
+  verifyShortlist,
+  type DecisionInvalidation,
+  type DecisionInvalidationReason,
+  type DirectAccountBinding,
+  type HumanDecisionGate,
+  type P0Shortlist,
+  type PackageReview,
+} from "./campaign-decision-gate.ts";
+import {
   CAMPAIGN_STRATEGY_SCHEMA,
   STRATEGY_QUESTIONNAIRE_SCHEMA,
   buildStrategyQuestionnaire,
@@ -67,9 +88,9 @@ import {
 } from "./landing-advisory.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.7.0";
-export const P0_DOCUMENT_SCHEMA = "p0-application-document-v4";
-const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3"]);
+export const P0_APPLICATION_CONTRACT_VERSION = "1.8.0";
+export const P0_DOCUMENT_SCHEMA = "p0-application-document-v5";
+const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4"]);
 export const P0_CONTEXT_SCHEMA = "p0-context-v2";
 const P0_LEGACY_CONTEXT_SCHEMA = "p0-context-v1";
 export const P0_CONTEXT_PREFLIGHT_MAX_AGE_MS = 5 * 60_000;
@@ -141,13 +162,10 @@ export type P0Document = {
   landing_advisory_run: LandingAdvisoryRun | null;
   recommendation_set: CampaignRecommendationSet | null;
   draft: Record<string, unknown> | null;
-  shortlist: {
-    schema_version: "p0-shortlist-v1";
-    shortlist_revision_id: string;
-    strategy_revision_id: string;
-    draft_revision_ids: string[];
-    updated_at: string;
-  } | null;
+  shortlist: P0Shortlist | null;
+  package_review: PackageReview | null;
+  human_decision_gate: HumanDecisionGate | null;
+  last_decision_invalidation: DecisionInvalidation | null;
   external_write_intent: {
     strategy_revision_id: string;
     draft_revision_id: string;
@@ -321,13 +339,23 @@ export const P0_COMMAND_TRUTH_TABLE = {
   save_draft: (state: P0Document) => Boolean(
     state.strategy && state.recommendation_set && !state.campaign && !state.external_write_intent,
   ),
-  confirm_creation: (state: P0Document) => Boolean(
-    state.last_cascade?.recomputation_status !== "PENDING"
-    && state.draft?.publish_projection
-    && state.shortlist?.draft_revision_ids.includes(String(state.draft.draft_revision_id ?? ""))
-    && (!state.context_state || state.context_state.status === "GOAL_CONFIRMED")
-    && !state.campaign,
+  add_to_shortlist: (state: P0Document) => Boolean(
+    state.strategy && state.recommendation_set && state.shortlist && !state.campaign && !state.external_write_intent,
   ),
+  remove_from_shortlist: (state: P0Document) => Boolean(
+    state.strategy && state.recommendation_set && state.shortlist?.selections.length && !state.campaign && !state.external_write_intent,
+  ),
+  restore_to_shortlist: (state: P0Document) => Boolean(
+    state.strategy && state.recommendation_set && state.shortlist?.removed_selections.length && !state.campaign && !state.external_write_intent,
+  ),
+  review_package: (state: P0Document) => Boolean(
+    state.strategy && state.recommendation_set && state.shortlist?.selections.length && !state.campaign && !state.external_write_intent,
+  ),
+  confirm_package: (state: P0Document) => Boolean(
+    state.package_review && !state.human_decision_gate && state.shortlist?.selections.length && !state.campaign && !state.external_write_intent,
+  ),
+  // Legacy one-Draft dispatch stays fail closed until the package execution slices integrate it.
+  confirm_creation: () => false,
   reset: (state: P0Document) => !state.campaign && !state.external_write_intent,
 } as const;
 
@@ -356,6 +384,9 @@ function emptyDocument(): P0Document {
     recommendation_set: null,
     draft: null,
     shortlist: null,
+    package_review: null,
+    human_decision_gate: null,
+    last_decision_invalidation: null,
     external_write_intent: null,
     campaign: null,
     recommendation_recalculation: null,
@@ -1029,6 +1060,79 @@ function cascadeRecord(
   };
 }
 
+async function invalidateDecisionAuthority(
+  state: P0Document,
+  reasonCode: DecisionInvalidationReason,
+  reason: string,
+  invalidatedAt: string,
+) {
+  state.last_decision_invalidation = await buildDecisionInvalidation({
+    reason_code: reasonCode,
+    reason: cleanText(reason, 500),
+    invalidated_at: invalidatedAt,
+    previous_shortlist_revision_id: state.shortlist?.shortlist_revision_id ?? null,
+    previous_package_review_id: state.package_review?.package_review_id ?? null,
+    previous_package_id: state.package_review?.package_id ?? state.human_decision_gate?.package_id ?? null,
+    previous_gate_id: state.human_decision_gate?.gate_id ?? null,
+  });
+  state.package_review = null;
+  state.human_decision_gate = null;
+}
+
+function directAccountBinding(state: P0Document): DirectAccountBinding | null {
+  const direct = state.context_state?.facts.direct;
+  if (!direct?.account || !direct.client_id || direct.source_kind !== "YANDEX_DIRECT_API_V501") return null;
+  return {
+    source_kind: "YANDEX_DIRECT_API_V501",
+    account: direct.account,
+    client_id: direct.client_id,
+    verified: true,
+  };
+}
+
+function persistedDecisionContext(state: P0Document): P0Context {
+  const facts = state.context_state?.facts;
+  if (!facts) fail("P0_CONTEXT_STATE_MISSING", "Persisted Context facts отсутствуют для decision response.");
+  return {
+    environment: "PRODUCTION",
+    test_scenario: false,
+    direct: {
+      ready: true,
+      inventory_ready: true,
+      authority: "VERIFIED",
+      access: "YANDEX_DIRECT_API_V501",
+      account: facts.direct.account,
+      client_id: facts.direct.client_id,
+      binding: { expected_account: facts.direct.account, api_account: facts.direct.account, matched: true },
+      campaigns_total: facts.direct.campaigns_total,
+      minimum_weekly_budget_rub: facts.direct.minimum_weekly_budget_rub,
+      observed_at: facts.direct.observed_at,
+      capability_snapshot: facts.direct.capability_snapshot,
+      read_limitations: {
+        inventory_complete: true,
+        limited_by: null,
+        methods_read: ["PERSISTED_CONTEXT_FACTS"],
+        methods_not_read: [],
+        statistics_provisional_days: 3,
+      },
+      blockers: [],
+    },
+    metrika: {
+      ready: true,
+      authority: "VERIFIED",
+      access: "YANDEX_METRIKA_MANAGEMENT_AND_REPORTS_API",
+      counter_id: facts.metrika.counter_id,
+      goal_id: facts.metrika.goal_id,
+      binding: { expected_counter_id: facts.metrika.counter_id, api_counter_id: facts.metrika.counter_id, matched: true },
+      goal_binding: { expected_goal_id: facts.metrika.goal_id, api_goal_id: facts.metrika.goal_id, matched: true },
+      observed_at: facts.metrika.observed_at,
+      blockers: [],
+    },
+    campaign_catalog: null,
+    performance: null,
+  };
+}
+
 function invalidateContextDownstream(state: P0Document) {
   state.strategy_questionnaire = null;
   state.strategy = null;
@@ -1036,6 +1140,8 @@ function invalidateContextDownstream(state: P0Document) {
   state.recommendation_set = null;
   state.draft = null;
   state.shortlist = null;
+  state.package_review = null;
+  state.human_decision_gate = null;
   state.external_write_intent = null;
   state.recommendation_recalculation = null;
 }
@@ -1046,6 +1152,8 @@ function invalidateStrategyDownstream(state: P0Document) {
   state.recommendation_set = null;
   state.draft = null;
   state.shortlist = null;
+  state.package_review = null;
+  state.human_decision_gate = null;
   state.external_write_intent = null;
   state.recommendation_recalculation = null;
 }
@@ -1157,7 +1265,9 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     fail("P0_DOCUMENT_SCHEMA_UNSUPPORTED", `Persisted P0 document использует неподдерживаемую схему ${String(version)}.`);
   }
   const state = raw as unknown as P0Document;
-  let changed = version !== P0_DOCUMENT_SCHEMA;
+  const legacyDocument = version !== P0_DOCUMENT_SCHEMA;
+  const legacyShortlistPresent = Boolean(record(raw.shortlist).shortlist_revision_id);
+  let changed = legacyDocument;
   if (changed) state.schema_version = P0_DOCUMENT_SCHEMA;
   const legacyModel = record(state.business_model);
   if (!state.analytics_evidence_snapshot && legacyModel.analysis_evidence) {
@@ -1197,8 +1307,8 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
   if (state.draft && (!state.strategy || !state.business_model)) {
     lineageError("Campaign Draft не связан с Campaign Strategy и моделью бизнеса.");
   }
-  if (state.shortlist && !state.draft) {
-    lineageError("shortlist не связан с Campaign Draft.");
+  if (state.shortlist && (!state.strategy || !state.recommendation_set)) {
+    lineageError("shortlist не связан с Campaign Strategy и Recommendation Set.");
   }
   if (state.recommendation_set && !state.strategy) {
     lineageError("Recommendation Set не связан с Campaign Strategy.");
@@ -1207,11 +1317,17 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     lineageError("Campaign Strategy не связана с моделью бизнеса.");
   }
 
-  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "landing_advisory_run", "recommendation_set", "draft", "shortlist", "external_write_intent", "campaign", "recommendation_recalculation", "last_cascade"] as const) {
+  for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "landing_advisory_run", "recommendation_set", "draft", "shortlist", "package_review", "human_decision_gate", "last_decision_invalidation", "external_write_intent", "campaign", "recommendation_recalculation", "last_cascade"] as const) {
     if (!(key in state)) {
+      if (!legacyDocument) lineageError(`same-schema document field ${key} отсутствует.`);
       state[key] = null as never;
       changed = true;
     }
+  }
+  if (legacyDocument) {
+    state.shortlist = null;
+    state.package_review = null;
+    state.human_decision_gate = null;
   }
   if (state.analytics_evidence_snapshot && !await verifyAnalyticsEvidenceSnapshot(state.analytics_evidence_snapshot)) {
     lineageError("Analytics Evidence Snapshot hash verification failed.");
@@ -1267,6 +1383,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     state.analytics_evidence_snapshot = null;
     state.strategy_questionnaire = null;
     state.last_cascade = cascadeRecord(state, "MODEL", updatedAt, ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"]);
+    await invalidateDecisionAuthority(state, "MODEL_MATERIAL_CHANGE", "Legacy Model normalization changed material Campaign Strategy lineage.", updatedAt);
     invalidateStrategyDownstream(state);
   }
 
@@ -1431,32 +1548,57 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
       } as typeof recommendationSet.drafts[number];
       changed = true;
     }
-    const draftScore = record(draft.viability_score);
-    const shortlistEligible = draft.shortlist_eligible === true
-      && record(draftScore.eligibility).status === "ELIGIBLE"
-      && record(draftScore.evidence_gaps).status === "RESOLVED"
-      && draft.visibility === "VISIBLE";
-    if (!shortlistEligible && state.shortlist) {
-      state.shortlist = null;
-      changed = true;
-    } else if (shortlistEligible) {
-      if (!state.shortlist) {
-        state.shortlist = {
-          schema_version: "p0-shortlist-v1",
-          shortlist_revision_id: `p0-shortlist-r${Math.max(1, revision)}`,
-          strategy_revision_id: String(strategy.strategy_revision_id ?? ""),
-          draft_revision_ids: [String(draft.draft_revision_id ?? "")],
-          updated_at: updatedAt,
-        };
-        changed = true;
+  }
+
+  if (strategy && state.recommendation_set) {
+    if (legacyDocument) {
+      state.shortlist = await emptyShortlist({
+        shortlistRevisionId: `p0-shortlist-r${Math.max(1, revision + 1)}`,
+        strategyRevisionId: String(strategy.strategy_revision_id ?? ""),
+        recommendationSetId: state.recommendation_set.recommendation_set_id,
+        updatedAt,
+      });
+      if (legacyShortlistPresent) {
+        await invalidateDecisionAuthority(
+          state,
+          "LEGACY_AUTHORITY_REQUIRES_REVIEW",
+          "Legacy provisional one-Draft shortlist was discarded; exact package review is required.",
+          updatedAt,
+        );
       }
-      if (
-        state.shortlist.strategy_revision_id !== strategy.strategy_revision_id
-        || !state.shortlist.draft_revision_ids.includes(String(draft.draft_revision_id ?? ""))
-      ) {
-        lineageError("shortlist ссылается на другую Strategy или Draft revision.");
+      changed = true;
+    } else if (!state.shortlist) {
+      lineageError("versioned shortlist отсутствует у текущего Recommendation Set.");
+    } else if (!await verifyShortlist(state.shortlist, state.recommendation_set, String(strategy.strategy_revision_id ?? ""))) {
+      lineageError("shortlist content hash, order или exact Draft lineage не прошли проверку.");
+    }
+    const binding = directAccountBinding(state);
+    const capabilitySnapshot = state.context_state?.facts.direct.capability_snapshot;
+    const evidenceSnapshotId = state.analytics_evidence_snapshot?.snapshot_id;
+    if (state.package_review) {
+      if (!binding || !capabilitySnapshot || !evidenceSnapshotId || !state.shortlist
+        || !await verifyPackageReview({
+          review: state.package_review,
+          shortlist: state.shortlist,
+          recommendationSet: state.recommendation_set,
+          strategyRevisionId: String(strategy.strategy_revision_id ?? ""),
+          accountBinding: binding,
+          capabilitySnapshot: capabilitySnapshot as unknown as Record<string, unknown>,
+          analyticsEvidenceSnapshotId: evidenceSnapshotId,
+        })) {
+        lineageError("package review identity или exact authority snapshot не прошли проверку.");
       }
     }
+    if (state.human_decision_gate) {
+      if (!state.package_review || !await verifyHumanDecisionGate(state.human_decision_gate, state.package_review)) {
+        lineageError("Human Decision Gate confirmation или package authority не прошли проверку.");
+      }
+    }
+  } else if (state.shortlist || state.package_review || state.human_decision_gate) {
+    lineageError("shortlist/package authority существует без Strategy и Recommendation Set.");
+  }
+  if (state.last_decision_invalidation && !await verifyDecisionInvalidation(state.last_decision_invalidation)) {
+    lineageError("decision invalidation audit hash verification failed.");
   }
 
   if (state.external_write_intent && state.draft && strategy) {
@@ -1488,7 +1630,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
 }
 
 function currentStep(state: P0Document) {
-  if (state.draft?.publish_projection) return 4;
+  if (state.package_review || state.human_decision_gate) return 4;
   if (state.strategy) return 3;
   if (state.business_model?.source === "REAL_SITE_RESEARCH_PLUS_OWNER_CONFIRMATION") return 2;
   if (state.business_model) return 1;
@@ -1508,6 +1650,32 @@ function workflow(state: P0Document) {
     maximum_reachable_step: currentStep(state),
     allowed_commands: allowedCommands(state),
     transition_contract: P0_APPLICATION_CONTRACT_VERSION,
+  };
+}
+
+function shortlistControls(state: P0Document) {
+  if (!state.recommendation_set || !state.shortlist) return [];
+  return state.recommendation_set.drafts.map((draft) => {
+    const selected = state.shortlist?.selections.find((item) => item.draft_id === draft.draft_id);
+    if (selected) return { draft_id: draft.draft_id, status: "SELECTED" as const, disabled_reason: null };
+    const removed = state.shortlist?.removed_selections.find((item) => item.draft_id === draft.draft_id);
+    const blocker = shortlistSelectionBlockReason(draft);
+    if (blocker) return { draft_id: draft.draft_id, status: "BLOCKED" as const, disabled_reason: blocker };
+    return { draft_id: draft.draft_id, status: removed ? "REMOVED" as const : "AVAILABLE" as const, disabled_reason: null };
+  });
+}
+
+function decisionReadiness(state: P0Document) {
+  const blockers: string[] = [];
+  if (!state.shortlist) blockers.push("Versioned shortlist ещё не создан.");
+  else if (!state.shortlist.selections.length) blockers.push("Shortlist пуст: выберите хотя бы один publish-ready Draft.");
+  if (!state.package_review) blockers.push("Точный package review ещё не выполнен.");
+  return {
+    ready: blockers.length === 0,
+    blockers,
+    confirmed: Boolean(state.human_decision_gate),
+    independent_execution: true,
+    external_writes_performed: false,
   };
 }
 
@@ -1652,13 +1820,8 @@ export class P0Application {
     if (["REQUIRED", "PENDING"].includes(String(state.last_cascade?.recomputation_status ?? ""))) {
       blockers.push("Downstream recomputation ещё не завершён");
     }
-    if (!state.draft?.publish_projection) blockers.push("Campaign Draft ещё не зафиксирован");
-    if (!state.shortlist?.draft_revision_ids.includes(String(state.draft?.draft_revision_id ?? ""))) {
-      blockers.push("shortlist требует пересчёта после Context change");
-    }
-    blockers.push(...campaignDraftPublishBlockers(state.draft));
-    if (state.campaign) blockers.push("Кампания по этой ревизии уже создана");
-    return { ready: blockers.length === 0, blockers };
+    blockers.push("Package execution не входит в Human Decision Gate и будет подключено только в следующих execution slices.");
+    return { ready: false, blockers: [...new Set(blockers)] };
   }
 
   async query(key: string) {
@@ -1681,6 +1844,8 @@ export class P0Application {
         maximum_age_ms: P0_CONTEXT_PREFLIGHT_MAX_AGE_MS,
       },
       context_change_policy: contextChangePolicy(),
+      shortlist_controls: shortlistControls(viewState),
+      decision_readiness: decisionReadiness(viewState),
       revision_history: await this.history(key, stored.revision),
       write_readiness: this.writeReadiness(viewState, context, timestamp),
     };
@@ -1725,6 +1890,17 @@ export class P0Application {
         const lastMaterialChange = hasPreviousContext ? invalidationRecord(state, timestamp) : null;
         if (hasPreviousContext) {
           state.last_cascade = cascadeRecord(state, "CONTEXT", timestamp, ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"]);
+          const capabilityChanged = previousContext
+            && JSON.stringify(directCapabilityMaterialFacts(previousContext.facts.direct.capability_snapshot))
+              !== JSON.stringify(providerMaterialFacts(context).direct.capability_snapshot);
+          await invalidateDecisionAuthority(
+            state,
+            capabilityChanged ? "ACCOUNT_OR_CAPABILITY_LINEAGE_CHANGED" : "CONTEXT_MATERIAL_CHANGE",
+            capabilityChanged
+              ? "Exact Direct account or capability lineage changed during Context reanalysis."
+              : "Material Context research changed after package review.",
+            timestamp,
+          );
         }
         state.context_state = {
           schema_version: P0_CONTEXT_SCHEMA,
@@ -1758,6 +1934,7 @@ export class P0Application {
       if (changedConfirmedGoal) {
         state.context_state.last_material_change = invalidationRecord(state, timestamp);
         state.last_cascade = cascadeRecord(state, "CONTEXT", timestamp, ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"]);
+        await invalidateDecisionAuthority(state, "CONTEXT_MATERIAL_CHANGE", "Confirmed Context goal changed materially.", timestamp);
         invalidateContextDownstream(state);
       }
       const contextDecisionChanged = !previousDecision || changedConfirmedGoal;
@@ -1807,6 +1984,7 @@ export class P0Application {
       this.assertPersistedBindings(state, context);
       if (materialModelChange && (state.strategy || state.draft || state.shortlist)) {
         state.last_cascade = cascadeRecord(state, "MODEL", modelApprovedAt, ["campaign_strategy", "recommendation_set", "campaign_drafts", "shortlist", "confirmation"]);
+        await invalidateDecisionAuthority(state, "MODEL_MATERIAL_CHANGE", "Material Model evidence or owner-confirmed facts changed.", modelApprovedAt);
         invalidateStrategyDownstream(state);
       }
       const modelRecomputationRequired = !state.analytics_evidence_snapshot;
@@ -1888,6 +2066,9 @@ export class P0Application {
           ...cascadeRecord(state, "STRATEGY", approvedAt, ["recommendation_set", "campaign_drafts", "shortlist", "confirmation"]),
           recomputation_status: "PENDING",
         };
+        if (existingStrategy || state.package_review || state.human_decision_gate || state.shortlist?.selections.length) {
+          await invalidateDecisionAuthority(state, "STRATEGY_MATERIAL_CHANGE", "Material Campaign Strategy revision changed.", approvedAt);
+        }
         const pendingRow: P0StoredRow = {
           revision: persistedRevision + 1,
           updated_at: approvedAt,
@@ -1928,7 +2109,14 @@ export class P0Application {
           });
           state.landing_advisory_run = await this.buildLandingAdvisory(state);
           state.draft = null;
-          state.shortlist = null;
+          state.shortlist = await emptyShortlist({
+            shortlistRevisionId: `p0-shortlist-r${persistedRevision + 1}`,
+            strategyRevisionId: String(state.strategy.strategy_revision_id ?? ""),
+            recommendationSetId: state.recommendation_set.recommendation_set_id,
+            updatedAt: approvedAt,
+          });
+          state.package_review = null;
+          state.human_decision_gate = null;
           state.external_write_intent = null;
           state.recommendation_recalculation = null;
           state.last_cascade.recomputation_status = "COMPLETE";
@@ -1968,9 +2156,15 @@ export class P0Application {
         });
         changes = recommendationRecalculationChanges(previousSet, currentSet);
         const replacement = correspondingDraft(state.draft, currentSet);
+        await invalidateDecisionAuthority(state, "PLAYBOOK_REGENERATION", "Active governed playbook regeneration changed exact Recommendation Set lineage.", recalculatedAt);
         state.recommendation_set = currentSet;
         state.draft = replacement;
-        state.shortlist = null;
+        state.shortlist = await emptyShortlist({
+          shortlistRevisionId: `p0-shortlist-r${current.revision + 1}`,
+          strategyRevisionId: String(state.strategy.strategy_revision_id ?? ""),
+          recommendationSetId: currentSet.recommendation_set_id,
+          updatedAt: recalculatedAt,
+        });
         state.external_write_intent = null;
       }
       state.recommendation_recalculation = {
@@ -2162,20 +2356,136 @@ export class P0Application {
         recommendationSet.coverage.hidden_count = recommendationSet.candidate_audit.length - Number(recommendationSet.coverage.visible_count);
         recommendationSet.coverage.visible_drafts = recommendationSet.drafts.filter((item) => item.visibility === "VISIBLE").length;
         recommendationSet.coverage.hidden_drafts = recommendationSet.drafts.length - Number(recommendationSet.coverage.visible_drafts);
+        await invalidateDecisionAuthority(state, "DRAFT_MATERIAL_CHANGE", "A material publishable Campaign Draft edit changed exact package lineage.", editedAt);
+        if (!state.shortlist) fail("P0_SHORTLIST_MISSING", "Versioned shortlist отсутствует у current Recommendation Set.");
+        state.shortlist = await rebaseShortlist({
+          previous: state.shortlist,
+          recommendationSet,
+          shortlistRevisionId: `p0-shortlist-r${current.revision + 1}`,
+          updatedAt: editedAt,
+        });
       }
-      const currentScore = record(state.draft?.viability_score);
-      state.shortlist = state.draft?.shortlist_eligible === true
-        && record(currentScore.eligibility).status === "ELIGIBLE"
-        && record(currentScore.evidence_gaps).status === "RESOLVED"
-        && state.draft.visibility === "VISIBLE"
-        ? {
-            schema_version: "p0-shortlist-v1",
-            shortlist_revision_id: `p0-shortlist-r${current.revision + 1}`,
-            strategy_revision_id: String(state.strategy.strategy_revision_id ?? ""),
-            draft_revision_ids: [String(state.draft.draft_revision_id ?? "")],
-            updated_at: editedAt,
-          }
-        : null;
+    } else if (action === "add_to_shortlist" || action === "remove_from_shortlist" || action === "restore_to_shortlist") {
+      if (!state.strategy || !state.recommendation_set || !state.shortlist) {
+        fail("P0_SHORTLIST_MISSING", "Shortlist mutation требует current Strategy и Recommendation Set.");
+      }
+      const draftId = requiredInput(payload.draft_id, "Campaign Draft", 255);
+      const draft = state.recommendation_set.drafts.find((item) => item.draft_id === draftId);
+      if (!draft) fail("P0_DRAFT_INVALID", "Draft отсутствует в current Recommendation Set.");
+      const changedAt = this.adapters.now();
+      const selections = structuredClone(state.shortlist.selections);
+      let removedSelections = structuredClone(state.shortlist.removed_selections);
+      if (action === "add_to_shortlist") {
+        if (selections.some((item) => item.draft_id === draftId)) {
+          fail("P0_SHORTLIST_DUPLICATE", "Draft уже присутствует в ordered shortlist.");
+        }
+        if (removedSelections.some((item) => item.draft_id === draftId)) {
+          fail("P0_SHORTLIST_RESTORE_REQUIRED", "Removed Draft нужно вернуть через restore, чтобы сохранить positional semantics.");
+        }
+        try {
+          selections.push(selectionForDraft(draft, state.recommendation_set));
+        } catch (error) {
+          fail("P0_SHORTLIST_BLOCKED", errorMessage(error));
+        }
+      } else if (action === "remove_from_shortlist") {
+        const index = selections.findIndex((item) => item.draft_id === draftId);
+        if (index < 0) fail("P0_SHORTLIST_NOT_SELECTED", "Draft отсутствует в ordered shortlist.");
+        const [removed] = selections.splice(index, 1);
+        removedSelections = [
+          ...removedSelections.filter((item) => item.draft_id !== draftId),
+          { ...removed, removed_at: changedAt, removed_index: index },
+        ];
+      } else {
+        const removed = removedSelections.find((item) => item.draft_id === draftId);
+        if (!removed) fail("P0_SHORTLIST_NOT_REMOVED", "Draft не имеет current removed disposition для restore.");
+        let exact;
+        try {
+          exact = selectionForDraft(draft, state.recommendation_set);
+        } catch (error) {
+          fail("P0_SHORTLIST_BLOCKED", errorMessage(error));
+        }
+        const removedIndex = removed.removed_index;
+        const removedIdentity = {
+          draft_id: removed.draft_id,
+          draft_revision_id: removed.draft_revision_id,
+          publish_fingerprint: removed.publish_fingerprint,
+          strategy_revision_id: removed.strategy_revision_id,
+          capability_profile_id: removed.capability_profile_id,
+          capability_profile_version: removed.capability_profile_version,
+          recommendation_set_id: removed.recommendation_set_id,
+        };
+        if (JSON.stringify(removedIdentity) !== JSON.stringify(exact)) {
+          fail("P0_SHORTLIST_STALE", "Removed Draft revision больше не совпадает с current authoritative Draft.");
+        }
+        selections.splice(Math.min(removedIndex, selections.length), 0, exact);
+        removedSelections = removedSelections.filter((item) => item.draft_id !== draftId);
+      }
+      await invalidateDecisionAuthority(
+        state,
+        action === "restore_to_shortlist" ? "SHORTLIST_ORDER_CHANGED" : "SHORTLIST_MEMBERSHIP_CHANGED",
+        action === "add_to_shortlist"
+          ? "Draft added to ordered shortlist."
+          : action === "remove_from_shortlist"
+            ? "Draft removed from ordered shortlist without changing Recommendation Set evidence or candidate audit."
+            : "Removed Draft restored at its previous shortlist position.",
+        changedAt,
+      );
+      state.shortlist = await reviseShortlist({
+        previous: state.shortlist,
+        shortlistRevisionId: `p0-shortlist-r${current.revision + 1}`,
+        updatedAt: changedAt,
+        selections,
+        removedSelections,
+      });
+    } else if (action === "review_package") {
+      if (!state.strategy || !state.recommendation_set || !state.shortlist || !state.analytics_evidence_snapshot || !state.context_state) {
+        fail("P0_PACKAGE_PREREQUISITE_MISSING", "Package review требует current Strategy, Recommendation Set, shortlist, Context и Evidence Snapshot.");
+      }
+      if (!state.shortlist.selections.length) fail("P0_PACKAGE_EMPTY", "Empty shortlist cannot be reviewed.");
+      const reviewedAt = this.adapters.now();
+      const binding = directAccountBinding(state);
+      if (!binding) fail("P0_PACKAGE_ACCOUNT_BINDING_INVALID", "Exact Direct account binding отсутствует.");
+      if (state.package_review || state.human_decision_gate) {
+        await invalidateDecisionAuthority(state, "PACKAGE_REVIEW_REPLACED", "A fresh immutable package review replaced prior review authority.", reviewedAt);
+      }
+      try {
+        state.package_review = await buildPackageReview({
+          shortlist: state.shortlist,
+          recommendationSet: state.recommendation_set,
+          strategyRevisionId: String(state.strategy.strategy_revision_id ?? ""),
+          accountBinding: binding,
+          capabilitySnapshot: state.context_state.facts.direct.capability_snapshot as unknown as Record<string, unknown>,
+          analyticsEvidenceSnapshotId: state.analytics_evidence_snapshot.snapshot_id,
+          reviewedAt,
+        });
+      } catch (error) {
+        fail("P0_PACKAGE_STALE", errorMessage(error));
+      }
+      state.human_decision_gate = null;
+    } else if (action === "confirm_package") {
+      if (payload.confirmation !== PACKAGE_CONFIRMATION_TOKEN) {
+        fail("P0_PACKAGE_CONFIRMATION_REQUIRED", `Нужно точное подтверждение ${PACKAGE_CONFIRMATION_TOKEN}.`);
+      }
+      if (!state.package_review || !state.shortlist || !state.recommendation_set || !state.strategy || !state.context_state || !state.analytics_evidence_snapshot) {
+        fail("P0_PACKAGE_REVIEW_MISSING", "Сначала выполните current package review.");
+      }
+      if (payload.package_review_id !== state.package_review.package_review_id || payload.package_id !== state.package_review.package_id) {
+        fail("P0_PACKAGE_IDENTITY_STALE", "Package review identity изменилась; повторите review и confirmation.");
+      }
+      const confirmedAt = this.adapters.now();
+      const binding = directAccountBinding(state);
+      if (!binding || !await verifyPackageReview({
+        review: state.package_review,
+        shortlist: state.shortlist,
+        recommendationSet: state.recommendation_set,
+        strategyRevisionId: String(state.strategy.strategy_revision_id ?? ""),
+        accountBinding: binding,
+        capabilitySnapshot: state.context_state.facts.direct.capability_snapshot as unknown as Record<string, unknown>,
+        analyticsEvidenceSnapshotId: state.analytics_evidence_snapshot.snapshot_id,
+      })) {
+        fail("P0_PACKAGE_STALE", "Package review больше не совпадает с current authoritative state.");
+      }
+      state.human_decision_gate = await buildHumanDecisionGate(state.package_review, confirmedAt);
     } else if (action === "confirm_creation") {
 
       if (payload.confirmation !== "CREATE_NON_SERVING_CAMPAIGN") {
@@ -2238,7 +2548,10 @@ export class P0Application {
     if (!await this.store.compareAndSwap(key, persistedRevision, next)) {
       fail("P0_REVISION_CONFLICT", "P0 изменился в другой вкладке. Обновите страницу.");
     }
-    const context = sanitizeContext(await this.adapters.readContext());
+    const decisionOnly = action === "review_package" || action === "confirm_package";
+    const context = decisionOnly
+      ? persistedDecisionContext(state)
+      : sanitizeContext(await this.adapters.readContext());
     const responseAt = this.adapters.now();
     return {
       contract: contractMetadata("command"),
@@ -2256,6 +2569,8 @@ export class P0Application {
         maximum_age_ms: P0_CONTEXT_PREFLIGHT_MAX_AGE_MS,
       },
       context_change_policy: contextChangePolicy(),
+      shortlist_controls: shortlistControls(state),
+      decision_readiness: decisionReadiness(state),
       revision_history: await this.history(key, next.revision),
       write_readiness: this.writeReadiness(state, context, responseAt),
     };

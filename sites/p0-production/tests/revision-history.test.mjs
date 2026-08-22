@@ -11,6 +11,9 @@ const state = {
     draft_revision_id: "draft-7-r2",
     publish_fingerprint: "abcdef0123456789",
   },
+  shortlist: { shortlist_revision_id: "p0-shortlist-r7" },
+  package_review: { package_review_id: "package-review-7", package_id: "package-7" },
+  human_decision_gate: { gate_id: "gate-7", package_id: "package-7", confirmed_at: "2026-08-21T12:01:00.000Z" },
   campaign: { campaign_id: "123", campaign_state: "SUSPENDED" },
 };
 
@@ -29,6 +32,11 @@ test("keeps superseded Strategy and Draft lineage audit-visible", () => {
       draft_id: "draft-7",
       draft_revision_id: "draft-7-r2",
       publish_fingerprint: "abcdef0123456789",
+      shortlist_revision_id: "p0-shortlist-r7",
+      package_review_id: "package-review-7",
+      package_id: "package-7",
+      human_decision_gate_id: "gate-7",
+      package_confirmed_at: "2026-08-21T12:01:00.000Z",
       campaign_id: "123",
       campaign_state: "SUSPENDED",
     },

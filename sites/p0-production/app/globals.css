@@ -430,8 +430,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .campaign-draft-card > footer { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: auto; padding-top: 10px; font-size: 7px; }
 .campaign-draft-card > footer b { grid-column: 1 / -1; color: var(--danger); }
 .campaign-draft-card > small { display: block; margin-top: 5px; color: var(--danger); font-size: 6px; overflow-wrap: anywhere; }
-.draft-card-shell > button { min-height: 38px; padding: 0 12px; border: 0; border-top: 1px solid var(--line); border-radius: 0; color: var(--green-dark); background: #f8fbf8; font-size: 8px; font-weight: 800; text-align: center; }
-.draft-card-shell > button:hover { background: var(--green-soft); }
+.draft-card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+.draft-card-actions button { min-height: 42px; padding: 6px 10px; border: 0; border-left: 1px solid var(--line); border-radius: 0; color: var(--green-dark); background: #f8fbf8; font-size: 7px; font-weight: 800; text-align: center; }
+.draft-card-actions button:first-child { border-left: 0; }
+.draft-card-actions button:hover:not(:disabled) { background: var(--green-soft); }
+.shortlist-disabled-reason { display: block; padding: 7px 10px; border-top: 1px solid #e3b9b4; color: var(--danger); background: #fff8f7; font-size: 6px; line-height: 1.4; overflow-wrap: anywhere; }
 .canvas-empty { grid-column: 1 / -1; margin: 0; padding: 18px; border: 1px dashed var(--line-strong); border-radius: 9px; color: var(--muted); background: white; font-size: 9px; text-align: center; }
 .drawer-layer { position: fixed; z-index: 80; inset: 0; display: flex; justify-content: flex-end; background: rgba(19,34,26,.38); }
 .campaign-drawer { display: flex; width: min(760px, calc(100vw - 80px)); min-width: 0; height: 100dvh; flex-direction: column; overflow: hidden; border-left: 1px solid var(--line-strong); background: var(--canvas); box-shadow: -24px 0 60px rgba(19,34,26,.2); }
@@ -478,6 +481,38 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .recommendation-recalculated strong { font-size: 11px; }
 .recommendation-recalculated p { margin: 5px 0 0; color: var(--muted); font-size: 8px; }
 .recommendation-recalculated ul { margin: 6px 0 0; padding-left: 16px; font-size: 7px; }
+
+/* Versioned ordered shortlist + package Human Decision Gate */
+.shortlist-footer { position: sticky; z-index: 12; bottom: 10px; display: grid; grid-template-columns: minmax(190px, .9fr) minmax(0, 1.6fr) auto; gap: 14px; align-items: center; margin-top: 16px; padding: 14px 16px; border: 1px solid #8ebda2; border-radius: 10px; background: rgba(247,252,248,.98); box-shadow: 0 14px 35px rgba(19,34,26,.15); backdrop-filter: blur(12px); }
+.shortlist-footer > div { min-width: 0; }
+.shortlist-footer > div > strong, .shortlist-footer > div > small { display: block; }
+.shortlist-footer > div > strong { margin-top: 4px; font-size: 10px; }
+.shortlist-footer > div > small { margin-top: 4px; color: var(--muted); font-size: 7px; line-height: 1.4; }
+.shortlist-footer ol { display: flex; min-width: 0; max-height: 74px; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.shortlist-footer li { display: grid; min-width: 145px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: white; }
+.shortlist-footer li span, .shortlist-footer li code { min-width: 0; font-size: 6px; overflow-wrap: anywhere; }
+.shortlist-footer li code { margin-top: 3px; color: var(--muted); }
+.shortlist-footer > button { min-height: 42px; padding: 0 15px; border: 1px solid var(--green); border-radius: 7px; color: white; background: var(--green); font-size: 9px; font-weight: 800; }
+.decision-invalidation { margin: 9px 0 0; padding: 9px 11px; border: 1px solid #e5ccaa; border-radius: 7px; color: var(--muted); background: var(--amber-soft); font-size: 7px; line-height: 1.5; }
+.decision-invalidation strong { color: var(--danger); }
+.package-review { min-width: 0; margin-top: 18px; padding: 16px; border: 1px solid var(--line-strong); border-radius: 10px; background: white; }
+.package-review > header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.package-review > header h3 { margin: 4px 0 0; font-size: 20px; }
+.package-review > header > strong { color: var(--muted); font-size: 8px; }
+.package-review > ol { display: grid; gap: 6px; margin: 13px 0 0; padding: 0; list-style: none; }
+.package-review > ol li { display: grid; grid-template-columns: 27px minmax(0, 1fr); gap: 9px; align-items: center; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: #f8faf7; }
+.package-review > ol li > span { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 50%; color: var(--green-dark); background: var(--green-soft); font-size: 8px; font-weight: 800; }
+.package-review > ol strong, .package-review > ol code, .package-review > ol small { display: block; min-width: 0; overflow-wrap: anywhere; }
+.package-review > ol strong { font-size: 8px; }
+.package-review > ol code, .package-review > ol small { margin-top: 3px; color: var(--muted); font-size: 6px; }
+.package-review > dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 12px 0 0; }
+.package-review > dl div { min-width: 0; padding: 9px 10px; border-radius: 6px; background: #f4f6f2; }
+.package-review dt { color: var(--muted); font-size: 6px; text-transform: uppercase; }
+.package-review dd { margin: 4px 0 0; font-size: 7px; font-weight: 700; overflow-wrap: anywhere; }
+.package-review dd code { white-space: normal; overflow-wrap: anywhere; }
+.gate-confirmed { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--green); border-radius: 9px; background: var(--green-soft); }
+.gate-confirmed strong { font-size: 12px; }
+.gate-confirmed p, .gate-confirmed small { display: block; margin: 5px 0 0; color: var(--muted); font-size: 7px; overflow-wrap: anywhere; }
 
 @media (max-width: 1280px) {
   .page { width: calc(100% - 40px); }

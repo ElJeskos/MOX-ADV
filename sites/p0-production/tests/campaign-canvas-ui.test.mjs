@@ -49,3 +49,25 @@ test("blocked review, normalization feedback and playbook recalculation remain v
   assert.match(clientSource, /previous_normalized_value/u);
   assert.doesNotMatch(clientSource, /evaluator.trace|chain.of.thought/iu);
 });
+
+test("card shortlist controls, persistent exact footer and package Gate disclose independent non-transactional execution", () => {
+  assert.match(clientSource, /Исключить из shortlist/u);
+  assert.match(clientSource, /Вернуть в shortlist/u);
+  assert.match(clientSource, /Добавить в shortlist/u);
+  assert.match(clientSource, /disabled_reason/u);
+  assert.match(clientSource, /aria-label="Persistent shortlist summary"/u);
+  assert.match(clientSource, /draft_revision_id/u);
+  assert.match(clientSource, /publish_fingerprint/u);
+  assert.match(clientSource, /Открыть package review/u);
+  assert.match(clientSource, /Точный immutable package review/u);
+  assert.match(clientSource, /Analytics Evidence Snapshot/u);
+  assert.match(clientSource, /Direct account binding/u);
+  assert.match(clientSource, /Capability profile/u);
+  assert.match(clientSource, /Подтверждаю точный пакет и независимое исполнение кампаний/u);
+  assert.match(clientSource, /CONFIRM_EXACT_SHORTLIST_PACKAGE/u);
+  assert.match(clientSource, /Confirmation не выполняет Direct writes/u);
+  assert.match(clientSource, /Кампании исполняются и оцениваются независимо/u);
+  assert.match(styles, /\.shortlist-footer \{[^}]*position: sticky/u);
+  assert.match(styles, /\.package-review \{[^}]*min-width: 0/u);
+  assert.doesNotMatch(clientSource, /apply\("confirm_creation"/u);
+});

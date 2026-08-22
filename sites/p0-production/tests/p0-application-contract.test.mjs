@@ -94,6 +94,7 @@ function context() {
       authority: "VERIFIED",
       access: "YANDEX_DIRECT_API_V501",
       account: "owner-account",
+      client_id: "client-4242",
       binding: {
         expected_account: "owner-account",
         api_account: "owner-account",
@@ -638,7 +639,7 @@ test("Strategy and Model material changes cascade while technical normalization 
     strategy: result.state.strategy.strategy_revision_id,
     recommendation: result.state.recommendation_set.recommendation_set_id,
     draft: result.state.draft.draft_revision_id,
-    shortlist: null,
+    shortlist: JSON.stringify(result.state.shortlist),
     snapshot: result.state.analytics_evidence_snapshot.snapshot_id,
   };
 
@@ -655,7 +656,7 @@ test("Strategy and Model material changes cascade while technical normalization 
   assert.equal(result.state.strategy.strategy_revision_id, original.strategy);
   assert.equal(result.state.recommendation_set.recommendation_set_id, original.recommendation);
   assert.equal(result.state.draft.draft_revision_id, original.draft);
-  assert.equal(result.state.shortlist, null);
+  assert.equal(JSON.stringify(result.state.shortlist), original.shortlist);
 
   const tabA = await application.query("owner");
   const tabB = await application.query("owner");
@@ -696,7 +697,8 @@ test("Strategy and Model material changes cascade while technical normalization 
   assert.equal(result.state.strategy.lineage.previous_strategy_revision_id, original.strategy);
   assert.notEqual(result.state.recommendation_set.recommendation_set_id, original.recommendation);
   assert.equal(result.state.draft, null);
-  assert.equal(result.state.shortlist, null);
+  assert.equal(result.state.shortlist.schema_version, "p0-shortlist-v2");
+  assert.deepEqual(result.state.shortlist.selections, []);
   assert.equal(result.state.last_cascade.trigger, "STRATEGY");
   assert.deepEqual(result.state.last_cascade.affected_steps, ["recommendation_set", "campaign_drafts", "shortlist", "confirmation"]);
   assert.equal(result.state.last_cascade.recomputation_status, "COMPLETE");
@@ -851,7 +853,7 @@ test("one query/command contract drives and persists the current five-step path"
     },
   });
   assert.equal(result.revision, 6);
-  assert.equal(result.workflow.current_step, 4);
+  assert.equal(result.workflow.current_step, 3);
   assert.equal(result.state.draft.strategy_revision_id, result.state.strategy.strategy_revision_id);
   assert.match(result.state.draft.publish_fingerprint, /^sha256:[a-f0-9]{64}$/u);
 
@@ -865,7 +867,8 @@ test("one query/command contract drives and persists the current five-step path"
   );
   const afterBlockedWrite = await restarted.query("owner");
   assert.equal(afterBlockedWrite.revision, 6);
-  assert.equal(afterBlockedWrite.state.shortlist, null);
+  assert.equal(afterBlockedWrite.state.shortlist.schema_version, "p0-shortlist-v2");
+  assert.deepEqual(afterBlockedWrite.state.shortlist.selections, []);
   assert.equal(afterBlockedWrite.state.campaign, null);
 });
 
@@ -1188,6 +1191,7 @@ test("substantive Direct capability changes fail closed and reanalysis invalidat
   assert.equal(result.state.context_state.facts.direct.capability_snapshot.restrictions[0].value, 2_999);
   assert.equal(result.state.context_state.last_material_change.previous_lineage.strategy_revision_id, original.strategy_revision_id);
   assert.equal(result.state.context_state.last_material_change.previous_lineage.recommendation_set_id, original.recommendation_set_id);
+  assert.equal(result.state.last_decision_invalidation.reason_code, "ACCOUNT_OR_CAPABILITY_LINEAGE_CHANGED");
   assert.equal(result.state.last_cascade.trigger, "CONTEXT");
   assert.equal(result.state.last_cascade.recomputation_status, "REQUIRED");
 });
@@ -1222,7 +1226,8 @@ test("a material Context change names and invalidates downstream lineage while n
   const lineage = {
     strategy: result.state.strategy.strategy_revision_id,
     draft: result.state.draft.draft_revision_id,
-    shortlist: null,
+    shortlist: JSON.stringify(result.state.shortlist),
+    shortlist_revision_id: result.state.shortlist.shortlist_revision_id,
   };
   const staleContext = context();
   staleContext.metrika.observed_at = "2026-08-21T09:00:00.000Z";
@@ -1244,7 +1249,7 @@ test("a material Context change names and invalidates downstream lineage while n
   });
   assert.equal(result.state.strategy.strategy_revision_id, lineage.strategy);
   assert.equal(result.state.draft.draft_revision_id, lineage.draft);
-  assert.equal(result.state.shortlist, null);
+  assert.equal(JSON.stringify(result.state.shortlist), lineage.shortlist);
   assert.equal(result.state.context_state.last_material_change, null);
 
   const changedResearch = adapters({
@@ -1276,7 +1281,7 @@ test("a material Context change names and invalidates downstream lineage while n
   ]);
   assert.equal(result.state.context_state.last_material_change.previous_lineage.strategy_revision_id, lineage.strategy);
   assert.equal(result.state.context_state.last_material_change.previous_lineage.draft_revision_id, lineage.draft);
-  assert.equal(result.state.context_state.last_material_change.previous_lineage.shortlist_revision_id, lineage.shortlist);
+  assert.equal(result.state.context_state.last_material_change.previous_lineage.shortlist_revision_id, lineage.shortlist_revision_id);
   assert.equal(result.state.last_cascade.trigger, "CONTEXT");
   assert.equal(result.state.last_cascade.recomputation_status, "REQUIRED");
   assert.equal(result.write_readiness.ready, false);
@@ -1366,7 +1371,8 @@ test("legacy Sites state migrates with lineage but cannot bypass current eligibi
   assert.match(result.state.draft.publish_fingerprint, /^sha256:[a-f0-9]{64}$/u);
   assert.equal(result.revision_history.at(-1).revision, 7);
 
-  assert.equal(result.state.shortlist, null);
+  assert.equal(result.state.shortlist.schema_version, "p0-shortlist-v2");
+  assert.deepEqual(result.state.shortlist.selections, []);
   assert.equal(result.workflow.allowed_commands.includes("confirm_creation"), false);
   await assert.rejects(
     application.command("owner", {
@@ -1498,6 +1504,7 @@ test("normalization-only Draft save reports a no-op without inventing a Draft or
   assert.equal(result.state.draft.publish_fingerprint, before.publish_fingerprint);
   assert.equal(result.state.recommendation_set.recommendation_set_id, before.recommendation_set_id);
   assert.deepEqual(result.state.draft.viability_score, before.score);
+  const shortlistBeforeNormalization = JSON.stringify(approved.state.shortlist);
   assert.deepEqual(result.state.draft.draft_save_result, {
     schema_version: "p0-draft-save-result-v1",
     material_change: false,
@@ -1508,7 +1515,7 @@ test("normalization-only Draft save reports a no-op without inventing a Draft or
     current_publish_fingerprint: before.publish_fingerprint,
     changed_fields: [],
   });
-  assert.equal(result.state.shortlist, null);
+  assert.equal(JSON.stringify(result.state.shortlist), shortlistBeforeNormalization);
 });
 
 async function governedPlaybookRelease({ releaseId, releaseVersion, family, decisionId }) {
@@ -1542,6 +1549,290 @@ async function governedPlaybookRelease({ releaseId, releaseVersion, family, deci
     }],
   });
 }
+
+async function packageFixture(t, { release } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), "mox-p0-package-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new JsonDurableStore(join(directory, "state.json"));
+  let releases = [release ?? await governedPlaybookRelease({
+    releaseId: "fixture-release-package",
+    releaseVersion: "1.0.0",
+    family: "QUALIFIED_ACTION",
+    decisionId: "decision-package",
+  })];
+  let externalWrites = 0;
+  let contextReads = 0;
+  const adapter = adapters({
+    async readContext() { contextReads += 1; return context(); },
+    async readMarketEvidence() { return marketEvidenceInput(); },
+    async readPlaybookReleases() { return releases; },
+    async createExternalOutcome() {
+      externalWrites += 1;
+      throw new Error("Package review and confirmation must never call the external adapter.");
+    },
+  });
+  const application = new P0Application({ store, adapters: adapter });
+  let result = await application.command("owner", { action: "analyze_site", expected_revision: 0, url: "https://owner.example/" });
+  result = await application.command("owner", { action: "confirm_context_goal", expected_revision: result.revision, confirmation: "CONFIRM_CONTEXT_GOAL", goal: result.state.context_state.provisional_business_goal.value });
+  result = await application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: ownerModel(result.state) });
+  result = await approveStrategy(application, result);
+  return {
+    directory,
+    store,
+    application,
+    adapter,
+    result,
+    externalWrites: () => externalWrites,
+    contextReads: () => contextReads,
+    setReleases(value) { releases = value; },
+  };
+}
+
+async function reviewAndConfirm(application, result, draftIds) {
+  for (const draftId of draftIds) {
+    result = await application.command("owner", { action: "add_to_shortlist", expected_revision: result.revision, draft_id: draftId });
+  }
+  result = await application.command("owner", { action: "review_package", expected_revision: result.revision });
+  return application.command("owner", {
+    action: "confirm_package",
+    expected_revision: result.revision,
+    confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE",
+    package_review_id: result.state.package_review.package_review_id,
+    package_id: result.state.package_review.package_id,
+  });
+}
+
+test("ordered multi-Draft shortlist supports add/remove/positional restore, exact review and a durable no-write Gate", async (t) => {
+  const value = await packageFixture(t);
+  let result = value.result;
+  const eligible = result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible === true && draft.visibility === "VISIBLE");
+  assert.equal(eligible.length >= 2, true);
+  const [first, second] = eligible;
+  const recommendationBefore = JSON.stringify(result.state.recommendation_set);
+  const evidenceBefore = JSON.stringify(result.state.analytics_evidence_snapshot);
+  assert.equal(result.state.shortlist.schema_version, "p0-shortlist-v2");
+  assert.deepEqual(result.state.shortlist.selections, []);
+
+  const staleBeforeAdd = await value.application.query("owner");
+  result = await value.application.command("owner", { action: "add_to_shortlist", expected_revision: result.revision, draft_id: first.draft_id });
+  await assert.rejects(
+    value.application.command("owner", { action: "add_to_shortlist", expected_revision: staleBeforeAdd.revision, draft_id: second.draft_id }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_REVISION_CONFLICT",
+  );
+  await assert.rejects(
+    value.application.command("owner", { action: "add_to_shortlist", expected_revision: result.revision, draft_id: first.draft_id }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_SHORTLIST_DUPLICATE",
+  );
+  result = await value.application.command("owner", { action: "add_to_shortlist", expected_revision: result.revision, draft_id: second.draft_id });
+  assert.deepEqual(result.state.shortlist.selections.map((item) => item.draft_id), [first.draft_id, second.draft_id]);
+  assert.equal(result.state.shortlist.selections.every((item) => item.recommendation_set_id === result.state.recommendation_set.recommendation_set_id), true);
+
+  const removeTab = await value.application.query("owner");
+  const staleRemoveTab = await value.application.query("owner");
+  result = await value.application.command("owner", { action: "remove_from_shortlist", expected_revision: removeTab.revision, draft_id: first.draft_id });
+  assert.deepEqual(result.state.shortlist.selections.map((item) => item.draft_id), [second.draft_id]);
+  assert.equal(result.state.shortlist.removed_selections[0].removed_index, 0);
+  await assert.rejects(
+    value.application.command("owner", { action: "remove_from_shortlist", expected_revision: staleRemoveTab.revision, draft_id: second.draft_id }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_REVISION_CONFLICT",
+  );
+  result = await value.application.command("owner", { action: "restore_to_shortlist", expected_revision: result.revision, draft_id: first.draft_id });
+  assert.deepEqual(result.state.shortlist.selections.map((item) => item.draft_id), [first.draft_id, second.draft_id]);
+  assert.deepEqual(result.state.shortlist.removed_selections, []);
+  assert.equal(JSON.stringify(result.state.recommendation_set), recommendationBefore);
+  assert.equal(JSON.stringify(result.state.analytics_evidence_snapshot), evidenceBefore);
+
+  const restarted = new P0Application({ store: value.store, adapters: value.adapter });
+  result = await restarted.query("owner");
+  assert.deepEqual(result.state.shortlist.selections.map((item) => item.draft_id), [first.draft_id, second.draft_id]);
+  const reviewTab = await restarted.query("owner");
+  const staleReviewTab = await restarted.query("owner");
+  const readsBeforeReview = value.contextReads();
+  result = await restarted.command("owner", { action: "review_package", expected_revision: reviewTab.revision });
+  assert.equal(value.contextReads(), readsBeforeReview, "package review must use persisted authoritative state without provider adapter reads");
+  await assert.rejects(
+    restarted.command("owner", { action: "review_package", expected_revision: staleReviewTab.revision }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_REVISION_CONFLICT",
+  );
+  const review = result.state.package_review;
+  assert.deepEqual(review.authority.ordered_selections, result.state.shortlist.selections);
+  assert.equal(review.authority.strategy_revision_id, result.state.strategy.strategy_revision_id);
+  assert.equal(review.authority.recommendation_set_id, result.state.recommendation_set.recommendation_set_id);
+  assert.equal(review.authority.direct_account_binding.account, "owner-account");
+  assert.equal(review.authority.direct_capability_snapshot.snapshot_id, result.state.context_state.facts.direct.capability_snapshot.snapshot_id);
+  assert.equal(review.authority.capability_profile.profile_id, result.state.recommendation_set.capability_profile.profile_id);
+  assert.equal(review.authority.analytics_evidence_snapshot_id, result.state.analytics_evidence_snapshot.snapshot_id);
+  assert.match(review.package_id, /^sha256:[a-f0-9]{64}$/u);
+  assert.match(review.package_review_id, /^sha256:[a-f0-9]{64}$/u);
+  assert.equal(review.authority.orchestration.selected_campaigns_execute_independently, true);
+  assert.match(review.authority.orchestration.disclosure, /независимо/u);
+
+  await assert.rejects(
+    restarted.command("owner", { action: "confirm_package", expected_revision: result.revision, confirmation: "CONFIRM_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_PACKAGE_CONFIRMATION_REQUIRED",
+  );
+  await assert.rejects(
+    restarted.command("owner", { action: "confirm_package", expected_revision: result.revision, confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: "stale-review", package_id: review.package_id }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_PACKAGE_IDENTITY_STALE",
+  );
+  const confirmTab = await restarted.query("owner");
+  const staleConfirmTab = await restarted.query("owner");
+  const readsBeforeConfirmation = value.contextReads();
+  result = await restarted.command("owner", { action: "confirm_package", expected_revision: confirmTab.revision, confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id });
+  assert.equal(value.contextReads(), readsBeforeConfirmation, "Gate confirmation must not call provider adapters");
+  await assert.rejects(
+    restarted.command("owner", { action: "confirm_package", expected_revision: staleConfirmTab.revision, confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_REVISION_CONFLICT",
+  );
+  assert.match(result.state.human_decision_gate.gate_id, /^sha256:[a-f0-9]{64}$/u);
+  assert.equal(result.state.human_decision_gate.confirmed_at.includes("2026-08-21T10:00:"), true);
+  assert.deepEqual(result.state.human_decision_gate.authority, review.authority);
+  assert.equal(result.state.human_decision_gate.external_transactionality_promised, false);
+  assert.equal(result.state.human_decision_gate.external_writes_performed, false);
+  await assert.rejects(
+    restarted.command("owner", { action: "confirm_package", expected_revision: result.revision, confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_TRANSITION_INVALID",
+  );
+  assert.equal(value.externalWrites(), 0);
+  const afterRestart = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
+  assert.equal(afterRestart.state.human_decision_gate.gate_id, result.state.human_decision_gate.gate_id);
+});
+
+test("authoritative shortlist command rejects blocked and evidence-gap Drafts without rewriting candidate or evidence audit", async (t) => {
+  const { application, result: approved } = await approvedDraftFixture(t);
+  const blocked = approved.state.recommendation_set.drafts[0];
+  const recommendationBefore = JSON.stringify(approved.state.recommendation_set);
+  const evidenceBefore = JSON.stringify(approved.state.analytics_evidence_snapshot);
+  await assert.rejects(
+    application.command("owner", { action: "add_to_shortlist", expected_revision: approved.revision, draft_id: blocked.draft_id }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_SHORTLIST_BLOCKED" && /playbook|evidence|Draft/iu.test(error.message),
+  );
+  const after = await application.query("owner");
+  assert.equal(after.revision, approved.revision);
+  assert.equal(JSON.stringify(after.state.recommendation_set), recommendationBefore);
+  assert.equal(JSON.stringify(after.state.analytics_evidence_snapshot), evidenceBefore);
+  assert.deepEqual(after.state.shortlist.selections, []);
+  assert.equal(after.shortlist_controls.find((item) => item.draft_id === blocked.draft_id).status, "BLOCKED");
+  assert.equal(typeof after.shortlist_controls.find((item) => item.draft_id === blocked.draft_id).disabled_reason, "string");
+});
+
+test("same-schema shortlist, package and confirmation tampering all fail closed on restart", async (t) => {
+  const value = await packageFixture(t);
+  const eligible = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE");
+  const confirmed = await reviewAndConfirm(value.application, value.result, eligible.slice(0, 2).map((draft) => draft.draft_id));
+  const row = await value.store.load("owner");
+  const cases = [
+    ["selected Draft ID", (state) => { state.shortlist.selections[0].draft_id = "draft-forged"; }],
+    ["selected Draft revision", (state) => { state.shortlist.selections[0].draft_revision_id = "draft-forged-r9"; }],
+    ["selected publish fingerprint", (state) => { state.shortlist.selections[0].publish_fingerprint = `sha256:${"0".repeat(64)}`; }],
+    ["package contents", (state) => { state.package_review.authority.direct_account_binding.account = "other-account"; }],
+    ["confirmation token", (state) => { state.human_decision_gate.confirmation_token = "FORGED"; }],
+    ["confirmation timestamp", (state) => { state.human_decision_gate.confirmed_at = "2030-01-01T00:00:00.000Z"; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const corrupted = JSON.parse(row.value_json);
+    assert.equal(corrupted.schema_version, "p0-application-document-v5");
+    mutate(corrupted);
+    await value.store.seed("owner", { ...row, value_json: JSON.stringify(corrupted) });
+    await assert.rejects(
+      new P0Application({ store: value.store, adapters: value.adapter }).query("owner"),
+      (error) => error instanceof P0ApplicationError && error.code === "P0_MIGRATION_LINEAGE_INVALID",
+      name,
+    );
+    assert.equal((await value.store.load("owner")).value_json, JSON.stringify(corrupted));
+  }
+  await value.store.seed("owner", row);
+  const restarted = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
+  assert.equal(restarted.state.human_decision_gate.gate_id, confirmed.state.human_decision_gate.gate_id);
+});
+
+test("normalization preserves exact package Gate while a material Draft edit invalidates and rebases shortlist lineage", async (t) => {
+  const value = await packageFixture(t);
+  const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+  let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+  const reviewBefore = JSON.stringify(result.state.package_review);
+  const gateBefore = JSON.stringify(result.state.human_decision_gate);
+  result = await value.application.command("owner", {
+    action: "save_draft",
+    expected_revision: result.revision,
+    value: editableDraftValue(draft, { campaign_name: `  ${draft.campaign_name.replaceAll(" ", "   ")}  ` }),
+  });
+  assert.equal(result.state.draft.draft_save_result.material_change, false);
+  assert.equal(JSON.stringify(result.state.package_review), reviewBefore);
+  assert.equal(JSON.stringify(result.state.human_decision_gate), gateBefore);
+
+  result = await value.application.command("owner", {
+    action: "save_draft",
+    expected_revision: result.revision,
+    value: editableDraftValue(result.state.draft, { campaign_name: `${draft.campaign_name} · material owner edit` }),
+  });
+  assert.equal(result.state.draft.draft_save_result.material_change, true);
+  assert.equal(result.state.package_review, null);
+  assert.equal(result.state.human_decision_gate, null);
+  assert.equal(result.state.last_decision_invalidation.reason_code, "DRAFT_MATERIAL_CHANGE");
+  assert.equal(result.state.shortlist.selections[0].draft_id, draft.draft_id);
+  assert.equal(result.state.shortlist.selections[0].draft_revision_id, result.state.draft.draft_revision_id);
+  assert.equal(result.state.shortlist.selections[0].publish_fingerprint, result.state.draft.publish_fingerprint);
+  assert.equal(result.state.shortlist.selections[0].recommendation_set_id, result.state.recommendation_set.recommendation_set_id);
+});
+
+test("Strategy, Model, Context and playbook material paths invalidate current Gate with an audit-visible reason", async (t) => {
+  await t.test("Strategy", async (t) => {
+    const value = await packageFixture(t);
+    const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+    let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+    result = await approveStrategy(value.application, result, { core_message: "Материально новое сообщение владельца" });
+    assert.equal(result.state.package_review, null);
+    assert.equal(result.state.human_decision_gate, null);
+    assert.equal(result.state.last_decision_invalidation.reason_code, "STRATEGY_MATERIAL_CHANGE");
+    assert.deepEqual(result.state.shortlist.selections, []);
+  });
+
+  await t.test("Model evidence lineage", async (t) => {
+    const value = await packageFixture(t);
+    const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+    let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+    const changed = ownerModel(result.state);
+    changed.product = "Материально другое предложение";
+    result = await value.application.command("owner", { action: "save_business_model", expected_revision: result.revision, value: changed });
+    assert.equal(result.state.package_review, null);
+    assert.equal(result.state.human_decision_gate, null);
+    assert.equal(result.state.last_decision_invalidation.reason_code, "MODEL_MATERIAL_CHANGE");
+    assert.equal(result.state.analytics_evidence_snapshot.snapshot_id === value.result.state.analytics_evidence_snapshot.snapshot_id, false);
+  });
+
+  await t.test("Context", async (t) => {
+    const value = await packageFixture(t);
+    const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+    let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+    const baseResearch = value.adapter.researchSite.bind(value.adapter);
+    const changedAdapter = {
+      ...value.adapter,
+      async researchSite(url) {
+        const site = await baseResearch(url);
+        site.description = "Материально новая first-party услуга.";
+        site.pages[0].description = site.description;
+        return site;
+      },
+    };
+    result = await new P0Application({ store: value.store, adapters: changedAdapter }).command("owner", { action: "analyze_site", expected_revision: result.revision, url: "https://owner.example/" });
+    assert.equal(result.state.package_review, null);
+    assert.equal(result.state.human_decision_gate, null);
+    assert.equal(result.state.last_decision_invalidation.reason_code, "CONTEXT_MATERIAL_CHANGE");
+  });
+
+  await t.test("playbook regeneration", async (t) => {
+    const value = await packageFixture(t);
+    const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+    let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+    value.setReleases([await governedPlaybookRelease({ releaseId: "fixture-release-replacement", releaseVersion: "2.0.0", family: "MESSAGE_OFFER", decisionId: "decision-replacement" })]);
+    result = await value.application.command("owner", { action: "recalculate_recommendations", expected_revision: result.revision });
+    assert.equal(result.state.package_review, null);
+    assert.equal(result.state.human_decision_gate, null);
+    assert.equal(result.state.last_decision_invalidation.reason_code, "PLAYBOOK_REGENERATION");
+    assert.deepEqual(result.state.shortlist.selections, []);
+  });
+});
 
 test("same exact active playbook release preserves a material owner Draft revision and every downstream decision", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "mox-p0-playbook-no-change-"));
@@ -1638,7 +1929,8 @@ test("active playbook rollback persists a visible exact-lineage notice with trut
   assert.equal(previousDraftIds.every((draftId) => notice.changes.some((change) => change.previous_draft_id === draftId)), true);
   assert.equal(result.state.recommendation_set.drafts.every((draft) => notice.changes.some((change) => change.current_draft_id === draft.draft_id)), true);
   assert.equal(result.state.draft, null);
-  assert.equal(result.state.shortlist, null);
+  assert.equal(result.state.shortlist.schema_version, "p0-shortlist-v2");
+  assert.deepEqual(result.state.shortlist.selections, []);
   assert.equal(result.state.recommendation_set.playbook_release.release_id, "fixture-release-rollback");
 });
 
@@ -1682,6 +1974,7 @@ test("every editable Direct field round-trips into a material immutable Draft re
     }
     assert.equal(result.state.recommendation_set.coverage.generated_count, result.state.recommendation_set.coverage.visible_count + result.state.recommendation_set.coverage.hidden_count);
     assert.equal(result.state.recommendation_set.coverage.generated_count, result.state.recommendation_set.candidate_audit.length);
-    assert.equal(result.state.shortlist, null);
+    assert.equal(result.state.shortlist.schema_version, "p0-shortlist-v2");
+    assert.deepEqual(result.state.shortlist.selections, []);
   }
 });

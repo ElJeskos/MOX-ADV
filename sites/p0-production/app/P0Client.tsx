@@ -38,6 +38,8 @@ type Payload = {
     normalization_only_changes_invalidate: boolean;
     confirmation_requires_recomputation: boolean;
   };
+  shortlist_controls: Array<{ draft_id: string; status: "SELECTED" | "REMOVED" | "AVAILABLE" | "BLOCKED"; disabled_reason: string | null }>;
+  decision_readiness: { ready: boolean; blockers: string[]; confirmed: boolean; independent_execution: true; external_writes_performed: false };
   revision_history?: Array<Record<string, any>>;
   write_readiness: { ready: boolean; blockers: string[] };
 };
@@ -179,7 +181,7 @@ export default function P0Client() {
               <Connection label="Яндекс Метрика" ready={metrika.ready === true} detail={metrika.ready ? `Счётчик ${metrika.counter_id} · цель ${metrika.goal_id} · API` : metrika.blockers?.[0]} />
               <Connection label="Последний реальный срез" ready={Boolean(performance)} detail={performance ? `${performance.period_start} — ${performance.period_end} · ${performance.display_metrics.goal_visits} целей` : "Нет подтверждённого среза"} />
             </section>
-            <section className="write-boundary"><span>Готовность внешней записи</span><strong>{payload.write_readiness.ready ? "Готова к подтверждению" : "Заблокирована"}</strong><small>{payload.write_readiness.ready ? "Реальный Direct API · показы останутся выключенными" : payload.write_readiness.blockers[0]}</small></section>
+            <section className="write-boundary"><span>Human Decision Gate</span><strong>{payload.decision_readiness.confirmed ? "Authority подтверждена" : payload.state.package_review ? "Пакет reviewed" : "Требует package review"}</strong><small>{payload.decision_readiness.confirmed ? "External writes не выполнялись; кампании будут исполняться независимо." : payload.decision_readiness.blockers[0] || "Точный пакет готов к подтверждению."}</small></section>
           </aside>
 
           <section className="artifact">
@@ -189,7 +191,7 @@ export default function P0Client() {
             {step === 1 && <ModelStep payload={payload} apply={apply} back={() => setStep(0)} />}
             {step === 2 && <StrategyStep payload={payload} apply={apply} back={() => setStep(1)} />}
             {step === 3 && <DraftStep payload={payload} apply={apply} back={() => setStep(2)} />}
-            {step === 4 && <ConfirmationStep payload={payload} apply={apply} busy={Boolean(busy)} back={() => setStep(3)} editStrategy={() => setStep(2)} />}
+            {step === 4 && <ConfirmationStep payload={payload} apply={apply} busy={Boolean(busy)} back={() => setStep(3)} />}
             {busy && <p className="notice">{busy}</p>}
             {error && <p className="notice error">{error}</p>}
           </section>
@@ -476,9 +478,12 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
   </>;
 }
 
-function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>) => Promise<void>; back: () => void }) {
+function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; back: () => void }) {
   const existing = payload.state.draft || {};
   const recommendationSet = payload.state.recommendation_set || {};
+  const shortlist = payload.state.shortlist || { selections: [], removed_selections: [] };
+  const shortlistSelections = Array.isArray(shortlist.selections) ? shortlist.selections : [];
+  const shortlistControlByDraft = new Map(payload.shortlist_controls.map((control) => [control.draft_id, control]));
   const drafts = Array.isArray(recommendationSet.drafts) ? recommendationSet.drafts : [];
   const revisionHistory = (Array.isArray(payload.revision_history) ? payload.revision_history : [])
     .filter((item: Record<string, any>) => item.strategy_revision_id || item.draft_revision_id);
@@ -578,13 +583,36 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
       <label className="show-hidden"><input type="checkbox" checked={includeHidden} onChange={(event) => setIncludeHidden(event.target.checked)} /><span>Показать hidden Drafts с suppression reasons</span></label>
     </section>
     <section className="draft-canvas" aria-label="Ranked Campaign Draft cards">
-      {filteredDrafts.map((item: Record<string, any>) => <article key={item.draft_id} className={`draft-card-shell ${item.draft_id === selected?.draft_id ? "selected" : ""}`}>
-        <CampaignDraftCard draft={item} selected={item.draft_id === selected?.draft_id} />
-        <button type="button" aria-label={`Открыть Draft ${item.draft_id}`} onClick={(event) => openDrawer(item.draft_id, event.currentTarget)}>Открыть точную Direct projection</button>
-      </article>)}
+      {filteredDrafts.map((item: Record<string, any>) => {
+        const control = shortlistControlByDraft.get(item.draft_id);
+        const shortlistAction = control?.status === "SELECTED"
+          ? "remove_from_shortlist"
+          : control?.status === "REMOVED"
+            ? "restore_to_shortlist"
+            : "add_to_shortlist";
+        const shortlistLabel = control?.status === "SELECTED"
+          ? "Исключить из shortlist"
+          : control?.status === "REMOVED"
+            ? "Вернуть в shortlist"
+            : "Добавить в shortlist";
+        return <article key={item.draft_id} className={`draft-card-shell ${item.draft_id === selected?.draft_id ? "selected" : ""}`}>
+          <CampaignDraftCard draft={item} selected={item.draft_id === selected?.draft_id} />
+          <div className="draft-card-actions">
+            <button type="button" aria-label={`${shortlistLabel}: ${item.draft_id}`} disabled={!control || control.status === "BLOCKED"} onClick={() => void apply(shortlistAction, undefined, { draft_id: item.draft_id })}>{shortlistLabel}</button>
+            <button type="button" aria-label={`Открыть Draft ${item.draft_id}`} onClick={(event) => openDrawer(item.draft_id, event.currentTarget)}>Открыть точную Direct projection</button>
+          </div>
+          {control?.status === "BLOCKED" && <small className="shortlist-disabled-reason" role="status">Shortlist недоступен: {control.disabled_reason}</small>}
+        </article>;
+      })}
       {filteredDrafts.length === 0 && <p className="canvas-empty">Нет Drafts для выбранных deterministic filters. Измените variant/evidence filter; кандидаты остаются в audit.</p>}
     </section>
     {revisionHistory.length > 0 && <details className="hidden-drafts revision-history"><summary>История Strategy и Draft · {revisionHistory.length}</summary><ul>{revisionHistory.map((item: Record<string, any>) => <li key={item.revision}><strong>Ревизия {item.revision} · {item.status}</strong><span>{item.strategy_revision_id}{item.draft_revision_id ? ` · ${item.draft_revision_id}` : " · Draft ещё не зафиксирован"}{item.publish_fingerprint ? ` · ${String(item.publish_fingerprint).slice(0, 12)}…` : ""}</span></li>)}</ul></details>}
+    <section className="shortlist-footer" aria-label="Persistent shortlist summary">
+      <div><p className="eyebrow">ORDERED SHORTLIST · {shortlistSelections.length}</p><strong>{shortlistSelections.length ? "Точный пакет выбранных Campaign Drafts" : "Добавьте publish-ready Drafts"}</strong><small>Footer не зависит от card filters. Порядок выбора фиксируется в package authority.</small></div>
+      <ol>{shortlistSelections.map((item: Record<string, any>) => <li key={item.draft_id}><span>{item.draft_revision_id}</span><code>{String(item.publish_fingerprint || "").slice(0, 18)}…</code></li>)}</ol>
+      <button type="button" disabled={!shortlistSelections.length} onClick={() => void apply("review_package")}>Открыть package review</button>
+    </section>
+    {payload.state.last_decision_invalidation && <p className="decision-invalidation" role="status"><strong>Предыдущая authority инвалидирована:</strong> {payload.state.last_decision_invalidation.reason}</p>}
     <footer className="actions"><span>{filteredDrafts.length} Drafts в canvas · {drafts.length} persisted Draft candidates</span><button type="button" className="secondary" onClick={() => void apply("recalculate_recommendations")}>Проверить active playbook</button><button type="button" className="secondary" onClick={back}>Назад</button></footer>
     {drawerOpen && selected?.draft_id && <div className="drawer-layer">
       <aside ref={drawerRef} className="campaign-drawer" role="dialog" aria-modal="true" aria-labelledby="campaign-drawer-title">
@@ -606,29 +634,41 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
   </>;
 }
 
-function ConfirmationStep({ payload, apply, busy, back, editStrategy }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; busy: boolean; back: () => void; editStrategy: () => void }) {
+function ConfirmationStep({ payload, apply, busy, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; busy: boolean; back: () => void }) {
   const [confirmed, setConfirmed] = useState(false);
-  const campaign = payload.state.campaign;
-  if (campaign) {
+  const review = payload.state.package_review;
+  const gate = payload.state.human_decision_gate;
+  const authority = review?.authority;
+  const selections = Array.isArray(authority?.ordered_selections) ? authority.ordered_selections : [];
+  if (!review || !authority) {
     return <>
-      <ArtifactHead eyebrow="Шаг 5 · Direct readback" title="Реальная кампания создана, показы выключены" copy="MOX-ADV подтвердил состояние в Яндекс Директе после записи." badge={String(campaign.campaign_state || "OFF")} />
-      <div className="confirmation"><p className="eyebrow">Production result</p><h3>Показы и списания не начались</h3><p>Campaign ID {campaign.campaign_id} · {campaign.status} · модерация: {campaign.moderation_status}</p></div>
-      <Actions revision={payload.revision} label="Создание завершено" disabled back={back} />
+      <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Package review недоступен" copy="Вернитесь в Campaign Canvas, сформируйте непустой ordered shortlist и откройте точный review из persistent footer." badge="FAIL CLOSED" />
+      <ul className="blockers">{payload.decision_readiness.blockers.map((item, index) => <li key={item}><span>{index + 1}</span>{item}</li>)}</ul>
+      <Actions revision={payload.revision} label="Вернуться к shortlist" disabled back={back} />
     </>;
   }
-  const ready = payload.write_readiness.ready;
-  const draft = payload.state.draft || {};
-  const strategy = payload.state.strategy || {};
-  const budgetBlocked = payload.write_readiness.blockers.some((item) => item.includes("Недельный бюджет"));
-  const period = strategyAnswer(strategy, "period") || {};
-  const weeklyBudget = strategyAnswer(strategy, "weekly_budget");
-  const landingPage = strategyAnswer(strategy, "landing_page");
+  const binding = authority.direct_account_binding || {};
+  const capability = authority.direct_capability_snapshot || {};
+  const profile = authority.capability_profile || {};
   return <>
-    <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Создать реальную кампанию с выключенными показами" copy="Это единственное критическое решение: после подтверждения модуль выполнит официальный Direct API-контур и проверит non-serving readback." badge={ready ? "READY" : "FAIL CLOSED"} />
-    <div className="context-strip"><Metric label="Кампания" value={draft.campaign_name} copy={payload.context.direct.account} /><Metric label="Экспозиция" value={`${weeklyBudget} ₽ / неделю`} copy={`${period.start_date} — ${period.end_date}`} /><Metric label="Посадочная" value={String(landingPage || "—")} copy="Search only · сети выключены" /></div>
-    <div className="confirmation"><p className="eyebrow">Обещание безопасности</p><h3>Показы и списания не начнутся</h3><p>Campaigns.add → безусловный suspend → readback SUSPENDED → группа → фраза → объявление → модерация → повторный readback SUSPENDED. Campaigns.resume отсутствует.</p></div>
-    {!ready && <ul className="blockers">{payload.write_readiness.blockers.map((item, index) => <li key={item}><span>{index + 1}</span>{item}</li>)}</ul>}
-    {ready && <div className="decision-confirm"><input aria-label="Подтверждаю создание реальной кампании" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю создание реальной кампании</strong><small>Кампания появится в аккаунте {payload.context.direct.account}, но показы останутся выключенными.</small></span></div>}
-    <footer className="actions"><span>Ревизия {payload.revision} · production write</span><button type="button" className="secondary" disabled={busy} onClick={budgetBlocked ? editStrategy : back}>{budgetBlocked ? "Исправить Strategy" : "Назад"}</button><button type="button" disabled={busy || !ready || !confirmed} onClick={() => void apply("confirm_creation", undefined, { confirmation: "CREATE_NON_SERVING_CAMPAIGN" })}>Создать с выключенными показами</button></footer>
+    <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Точный immutable package review" copy="Gate даёт authority только этому ordered set revisions и fingerprints. Confirmation не выполняет Direct writes и не обещает атомарную внешнюю транзакцию." badge={gate ? "AUTHORITY CONFIRMED" : "REVIEWED"} />
+    <section className="package-review" aria-labelledby="package-review-title">
+      <header><div><p className="eyebrow">PACKAGE IDENTITY</p><h3 id="package-review-title">{selections.length} независимых Campaign Drafts</h3></div><strong>{review.reviewed_at}</strong></header>
+      <ol>{selections.map((item: Record<string, any>, index: number) => <li key={item.draft_id}><span>{index + 1}</span><div><strong>{item.draft_id}</strong><code>{item.draft_revision_id}</code><small>{item.publish_fingerprint}</small></div></li>)}</ol>
+      <dl>
+        <div><dt>Package ID</dt><dd><code>{review.package_id}</code></dd></div>
+        <div><dt>Package review ID</dt><dd><code>{review.package_review_id}</code></dd></div>
+        <div><dt>Recommendation Set</dt><dd><code>{authority.recommendation_set_id}</code></dd></div>
+        <div><dt>Strategy revision</dt><dd><code>{authority.strategy_revision_id}</code></dd></div>
+        <div><dt>Direct account binding</dt><dd>{binding.account} · client {binding.client_id} · {binding.source_kind}</dd></div>
+        <div><dt>Capability snapshot</dt><dd><code>{capability.snapshot_id}</code></dd></div>
+        <div><dt>Capability profile</dt><dd><code>{profile.profile_id}@{profile.profile_version}</code></dd></div>
+        <div><dt>Analytics Evidence Snapshot</dt><dd><code>{authority.analytics_evidence_snapshot_id}</code></dd></div>
+      </dl>
+    </section>
+    <div className="confirmation"><p className="eyebrow">НЕАТОМАРНЫЙ ПАКЕТ</p><h3>Кампании исполняются и оцениваются независимо</h3><p>{authority.orchestration.disclosure} Confirmation сохраняет durable authority и timestamp, но не вызывает Direct, не deploy’ит, не запускает показы и не начинает spend.</p></div>
+    {payload.state.last_decision_invalidation && <p className="decision-invalidation"><strong>Последняя invalidation:</strong> {payload.state.last_decision_invalidation.reason}</p>}
+    {gate ? <section className="gate-confirmed" role="status"><strong>Human Decision Gate подтверждён</strong><p>{gate.confirmed_at} · {gate.gate_id}</p><small>External writes performed: NO · transactionality promised: NO</small></section> : <div className="decision-confirm"><input aria-label="Подтверждаю точный пакет и независимое исполнение кампаний" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю точный reviewed package</strong><small>Authority относится только к package {String(review.package_id).slice(0, 20)}…; каждая выбранная кампания будет dispatch/contain/moderate/evaluate независимо.</small></span></div>}
+    <footer className="actions"><span>Ревизия {payload.revision} · durable decision only · no external write</span><button type="button" className="secondary" disabled={busy} onClick={back}>Назад к shortlist</button><button type="button" disabled={busy || Boolean(gate) || !confirmed} onClick={() => void apply("confirm_package", undefined, { confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id })}>{gate ? "Gate уже подтверждён" : "Подтвердить authority пакета"}</button></footer>
   </>;
 }
