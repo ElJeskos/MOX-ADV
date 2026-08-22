@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import JSONbigFactory from "json-bigint";
 
 import { buildPublishProjection } from "../lib/campaign-draft.ts";
+
+const JSONbig = JSONbigFactory({ useNativeBigInt: true });
 import { createSuspendedCampaign, DirectWriteError } from "../lib/direct-write.ts";
 
 function jsonResponse(result, status = 200) {
@@ -38,8 +41,10 @@ function projection() {
   );
 }
 
-function successfulFetcher(calls, adId = "401") {
+function successfulFetcher(calls, adId = "401", options = {}) {
+  const expected = projection();
   let campaignGetCalls = 0;
+  let adGetCalls = 0;
   return async (url, init) => {
     const rawBody = String(init.body);
     const body = JSON.parse(rawBody);
@@ -51,20 +56,49 @@ function successfulFetcher(calls, adId = "401") {
       "campaigns.suspend": { SuspendResults: [{ Id: 101 }] },
       "adgroups.add": { AddResults: [{ Id: 201 }] },
       "keywords.add": { AddResults: [{ Id: 301 }] },
-      "ads.moderate": { ModerateResults: [{ Id: adId }] },
+      "ads.moderate": { ModerateResults: [{ Id: options.moderateId ?? adId }] },
     };
     if (key === "campaigns.get") {
       campaignGetCalls += 1;
-      const campaign = campaignGetCalls === 1
-        ? { Id: 101, State: "SUSPENDED", Status: "DRAFT" }
-        : { Id: 101, State: "SUSPENDED", Status: "MODERATION" };
-      return jsonResponse({ Campaigns: [campaign] });
+      return jsonResponse({ Campaigns: [{
+        Id: 101,
+        Name: expected.direct.campaign.Name,
+        Type: "UNIFIED_CAMPAIGN",
+        State: "SUSPENDED",
+        Status: campaignGetCalls < 3 ? "DRAFT" : "MODERATION",
+        StartDate: expected.direct.campaign.StartDate,
+        EndDate: expected.direct.campaign.EndDate,
+        UnifiedCampaign: expected.direct.campaign.UnifiedCampaign,
+      }] });
+    }
+    if (key === "adgroups.get") {
+      return jsonResponse({ AdGroups: [{
+        Id: 201,
+        CampaignId: 101,
+        Type: "UNIFIED_AD_GROUP",
+        Status: "ACCEPTED",
+        ServingStatus: "ELIGIBLE",
+        ...expected.direct.ad_group,
+      }] });
+    }
+    if (key === "keywords.get") {
+      return jsonResponse({ Keywords: [{ Id: 301, AdGroupId: 201, Keyword: "иннопром стать участником", Status: "ACCEPTED", State: "ON" }] });
     }
     if (key === "ads.add") {
       return new Response(`{"result":{"AddResults":[{"Id":${adId}}]}}`, { headers: { "Content-Type": "application/json" } });
     }
     if (key === "ads.get") {
-      return new Response(`{"result":{"Ads":[{"Id":${adId},"Status":"DRAFT","State":"OFF"}]}}`, { headers: { "Content-Type": "application/json" } });
+      adGetCalls += 1;
+      return new Response(JSONbig.stringify({ result: { Ads: [{
+        Id: BigInt(adId),
+        CampaignId: 101,
+        AdGroupId: 201,
+        Type: "TEXT_AD",
+        Status: adGetCalls === 1 ? "DRAFT" : "MODERATION",
+        State: "OFF",
+        StatusClarification: null,
+        TextAd: expected.direct.ad.TextAd,
+      }] } }), { headers: { "Content-Type": "application/json" } });
     }
     return jsonResponse(results[key]);
   };
@@ -87,7 +121,11 @@ test("creates a real-shape Direct graph and ends owner-suspended after moderatio
   assert.deepEqual(progress, [
     "CAMPAIGN_CREATED",
     "NON_SERVING_CONFIRMED",
-    "OBJECT_GRAPH_CREATED",
+    "AD_GROUP_CREATED",
+    "KEYWORD_CREATED",
+    "AD_CREATED",
+    "OBJECT_GRAPH_VERIFIED",
+    "MODERATION_SUBMITTED",
     "MODERATION_PENDING",
   ]);
   assert.equal(calls.some((call) => call.method === "resume"), false);
@@ -96,6 +134,13 @@ test("creates a real-shape Direct graph and ends owner-suspended after moderatio
     calls.slice(0, 4).map((call) => `${call.service}.${call.method}`),
     ["campaigns.add", "campaigns.suspend", "campaigns.get", "adgroups.add"],
   );
+  assert.equal(calls.filter((call) => call.service === "campaigns" && call.method === "get").length, 3);
+  assert.equal(calls.filter((call) => call.service === "adgroups" && call.method === "get").length, 2);
+  assert.equal(calls.filter((call) => call.service === "keywords" && call.method === "get").length, 2);
+  assert.equal(calls.filter((call) => call.service === "ads" && call.method === "get").length, 2);
+  const moderationIndex = calls.findIndex((call) => call.service === "ads" && call.method === "moderate");
+  assert.ok(calls.slice(0, moderationIndex).some((call) => call.service === "adgroups" && call.method === "get"));
+  assert.ok(calls.slice(moderationIndex + 1).some((call) => call.service === "adgroups" && call.method === "get"));
   assert.equal(
     calls[0].params.Campaigns[0].UnifiedCampaign.BiddingStrategy.Network.BiddingStrategyType,
     "SERVING_OFF",
@@ -136,7 +181,7 @@ test("continues an owned object graph without duplicating children", async () =>
     projection(),
     successfulFetcher(calls, "1919036093096389375"),
     () => undefined,
-    { campaignId: "101", adGroupId: "201", keywordId: "301" },
+    { campaignId: "101", adGroupId: "201", keywordId: "301", adId: "1919036093096389375" },
   );
   assert.equal(result.campaign_id, "101");
   assert.equal(result.ad_group_id, "201");
@@ -246,6 +291,83 @@ test("marks a lost Campaigns.add response for reconciliation before any retry", 
       assert.ok(error instanceof DirectWriteError);
       assert.equal(error.partial.add_attempted, true);
       assert.equal(error.partial.containment, "RECONCILIATION_REQUIRED");
+      return true;
+    },
+  );
+});
+
+test("rejects a moderation acknowledgement for any ID other than the exact submitted ad", async () => {
+  const calls = [];
+  await assert.rejects(
+    () => createSuspendedCampaign(
+      { token: "secret", account: "moxstudio" },
+      projection(),
+      successfulFetcher(calls, "401", { moderateId: "999" }),
+    ),
+    (error) => {
+      assert.ok(error instanceof DirectWriteError);
+      assert.equal(error.code, "P0_DIRECT_ACTION_FAILED");
+      assert.equal(error.partial.containment, "NON_SERVING_CONFIRMED");
+      return true;
+    },
+  );
+});
+
+test("rejects a silently altered selected field in the complete Direct graph", async () => {
+  const expected = projection();
+  let campaignGetCalls = 0;
+  const fetcher = async (url, init) => {
+    const body = JSON.parse(String(init.body));
+    const service = new URL(url).pathname.split("/").at(-1);
+    const key = `${service}.${body.method}`;
+    if (key === "campaigns.add") return jsonResponse({ AddResults: [{ Id: 101 }] });
+    if (key === "campaigns.suspend") return jsonResponse({ SuspendResults: [{ Id: 101 }] });
+    if (key === "campaigns.get") {
+      campaignGetCalls += 1;
+      return jsonResponse({ Campaigns: [{
+        Id: 101,
+        Name: expected.direct.campaign.Name,
+        Type: "UNIFIED_CAMPAIGN",
+        Status: campaignGetCalls === 1 ? "DRAFT" : "MODERATION",
+        State: "SUSPENDED",
+        StartDate: expected.direct.campaign.StartDate,
+        EndDate: expected.direct.campaign.EndDate,
+        UnifiedCampaign: expected.direct.campaign.UnifiedCampaign,
+      }] });
+    }
+    if (key === "adgroups.add") return jsonResponse({ AddResults: [{ Id: 201 }] });
+    if (key === "adgroups.get") return jsonResponse({ AdGroups: [{
+      Id: 201,
+      CampaignId: 101,
+      Type: "UNIFIED_AD_GROUP",
+      ...expected.direct.ad_group,
+    }] });
+    if (key === "keywords.add") return jsonResponse({ AddResults: [{ Id: 301 }] });
+    if (key === "keywords.get") return jsonResponse({ Keywords: [{
+      Id: 301,
+      AdGroupId: 201,
+      Keyword: "silently altered keyword",
+    }] });
+    if (key === "ads.add") return jsonResponse({ AddResults: [{ Id: 401 }] });
+    if (key === "ads.moderate") return jsonResponse({ ModerateResults: [{ Id: 401 }] });
+    if (key === "ads.get") return jsonResponse({ Ads: [{
+      Id: 401,
+      CampaignId: 101,
+      AdGroupId: 201,
+      Type: "TEXT_AD",
+      Status: "MODERATION",
+      State: "OFF",
+      TextAd: expected.direct.ad.TextAd,
+    }] });
+    throw new Error(`Unexpected call ${key}`);
+  };
+
+  await assert.rejects(
+    () => createSuspendedCampaign({ token: "secret", account: "moxstudio" }, expected, fetcher),
+    (error) => {
+      assert.ok(error instanceof DirectWriteError);
+      assert.equal(error.code, "P0_DIRECT_GRAPH_MISMATCH");
+      assert.equal(error.partial.containment, "NON_SERVING_CONFIRMED");
       return true;
     },
   );

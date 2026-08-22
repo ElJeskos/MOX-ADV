@@ -25,15 +25,17 @@ export type DirectProjection = {
   };
 };
 
-type DirectConfig = {
+export type DirectConfig = {
   token: string;
   account: string;
 };
 
-type DirectRecovery = {
+export type DirectRecovery = {
   campaignId: string;
   adGroupId?: string;
   keywordId?: string;
+  adId?: string;
+  moderationSubmitted?: boolean;
 };
 
 type DirectResult = Record<string, unknown>;
@@ -60,8 +62,13 @@ export class DirectWriteError extends Error {
   readonly code: string;
   readonly partial: Record<string, unknown>;
 
-  constructor(code: string, message: string, partial: Record<string, unknown> = {}) {
-    super(message);
+  constructor(
+    code: string,
+    message: string,
+    partial: Record<string, unknown> = {},
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
     this.name = "DirectWriteError";
     this.code = code;
     this.partial = partial;
@@ -115,52 +122,126 @@ function directId(value: string) {
   return BigInt(value);
 }
 
-function addedId(result: DirectResult, key: string, operation: string) {
+function preservedIssues(operation: string, severity: "WARNING" | "ERROR", issues: DirectApiIssue[]) {
+  return issues.map((issue) => ({ operation, severity, ...issue }));
+}
+
+function appendWarnings(
+  target: Record<string, unknown>,
+  operation: string,
+  value: unknown,
+) {
+  const warnings = directApiIssues(value);
+  if (!warnings.length) return;
+  const current = Array.isArray(target.provider_issues) ? target.provider_issues : [];
+  target.provider_issues = [...current, ...preservedIssues(operation, "WARNING", warnings)];
+}
+
+function addedId(
+  result: DirectResult,
+  key: string,
+  operation: string,
+  progress: Record<string, unknown>,
+) {
   const rows = result[key];
   const issues = directApiIssues(Array.isArray(rows) ? rows[0]?.Errors : undefined);
   if (!Array.isArray(rows) || rows.length !== 1 || issues.length || !rows[0]?.Id) {
     throw new DirectWriteError(
       "P0_DIRECT_ITEM_FAILED",
       issues.length ? `${operation}: ${issues.map(issueMessage).join("; ")}` : `${operation} отклонил объект.`,
-      issues.length ? { rejected: true, api_errors: issues } : {},
+      issues.length ? {
+        rejected: true,
+        api_errors: issues,
+        provider_issues: preservedIssues(operation, "ERROR", issues),
+      } : {},
     );
   }
+  appendWarnings(progress, operation, rows[0]?.Warnings);
   return String(rows[0].Id);
 }
 
-function actionAccepted(result: DirectResult, key: string, operation: string) {
+function actionAccepted(
+  result: DirectResult,
+  key: string,
+  operation: string,
+  progress: Record<string, unknown>,
+  expectedIds: string[],
+) {
   const rows = result[key];
   const issues = directApiIssues(Array.isArray(rows) ? rows[0]?.Errors : undefined);
   if (!Array.isArray(rows) || rows.length !== 1 || issues.length) {
     throw new DirectWriteError(
       "P0_DIRECT_ACTION_FAILED",
       issues.length ? `${operation}: ${issues.map(issueMessage).join("; ")}` : `${operation} не подтверждён.`,
-      { rejected: true, api_errors: issues },
+      issues.length ? {
+        rejected: true,
+        api_errors: issues,
+        provider_issues: preservedIssues(operation, "ERROR", issues),
+      } : {},
     );
   }
+  const returnedIds = rows.map((row) => String(row?.Id ?? ""));
+  if (JSON.stringify(returnedIds) !== JSON.stringify(expectedIds)) {
+    throw new DirectWriteError(
+      "P0_DIRECT_ACTION_FAILED",
+      `${operation} acknowledged unexpected or missing provider IDs.`,
+      { expected_ids: expectedIds, returned_ids: returnedIds },
+    );
+  }
+  appendWarnings(progress, operation, rows[0]?.Warnings);
+}
+
+function readbackRow(result: DirectResult, key: string, operation: string) {
+  const rows = result[key];
+  if (!Array.isArray(rows) || rows.length !== 1 || !rows[0] || typeof rows[0] !== "object") {
+    throw new DirectWriteError("P0_DIRECT_READBACK_FAILED", `${operation} не подтвердил ровно один созданный объект.`);
+  }
+  return rows[0] as Record<string, unknown>;
 }
 
 async function campaignReadback(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
-  const result = await callDirect(
+  return readbackRow(await callDirect(
     config,
     "Campaigns",
     "get",
     {
       SelectionCriteria: { Ids: [directId(campaignId)] },
-      FieldNames: ["Id", "Name", "Type", "Status", "State"],
+      FieldNames: ["Id", "Name", "Type", "Status", "State", "StartDate", "EndDate"],
       UnifiedCampaignFieldNames: ["BiddingStrategy"],
     },
     fetcher,
-  );
-  const rows = result.Campaigns;
-  if (!Array.isArray(rows) || rows.length !== 1) {
-    throw new DirectWriteError("P0_DIRECT_READBACK_FAILED", "Campaigns.get не подтвердил созданную кампанию.");
-  }
-  return rows[0] as Record<string, unknown>;
+  ), "Campaigns", "Campaigns.get");
+}
+
+async function adGroupReadback(config: DirectConfig, adGroupId: string, fetcher: Fetcher) {
+  return readbackRow(await callDirect(
+    config,
+    "AdGroups",
+    "get",
+    {
+      SelectionCriteria: { Ids: [directId(adGroupId)] },
+      FieldNames: ["Id", "CampaignId", "Name", "Type", "Status", "ServingStatus", "RegionIds", "NegativeKeywords"],
+      UnifiedAdGroupFieldNames: ["OfferRetargeting"],
+    },
+    fetcher,
+  ), "AdGroups", "AdGroups.get");
+}
+
+async function keywordReadback(config: DirectConfig, keywordId: string, fetcher: Fetcher) {
+  return readbackRow(await callDirect(
+    config,
+    "Keywords",
+    "get",
+    {
+      SelectionCriteria: { Ids: [directId(keywordId)] },
+      FieldNames: ["Id", "AdGroupId", "Keyword", "Status", "State"],
+    },
+    fetcher,
+  ), "Keywords", "Keywords.get");
 }
 
 async function adReadback(config: DirectConfig, adId: string, fetcher: Fetcher) {
-  const result = await callDirect(
+  return readbackRow(await callDirect(
     config,
     "Ads",
     "get",
@@ -170,34 +251,163 @@ async function adReadback(config: DirectConfig, adId: string, fetcher: Fetcher) 
       TextAdFieldNames: ["Title", "Text", "Href", "Mobile"],
     },
     fetcher,
-  );
-  const rows = result.Ads;
-  if (!Array.isArray(rows) || rows.length !== 1) {
-    throw new DirectWriteError("P0_DIRECT_READBACK_FAILED", "Ads.get не подтвердил созданное объявление.");
-  }
-  return rows[0] as Record<string, unknown>;
+  ), "Ads", "Ads.get");
 }
 
-async function adReadbackByGroup(config: DirectConfig, adGroupId: string, fetcher: Fetcher) {
-  const result = await callDirect(
-    config,
-    "Ads",
-    "get",
-    {
-      SelectionCriteria: { AdGroupIds: [directId(adGroupId)] },
-      FieldNames: ["Id", "CampaignId", "AdGroupId", "Type", "Status", "State", "StatusClarification"],
-      TextAdFieldNames: ["Title", "Text", "Href", "Mobile"],
+function record(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function normalizedProviderText(value: unknown) {
+  return String(value ?? "").normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
+function normalizedProviderValue(value: unknown): unknown {
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
+  if (Array.isArray(value)) return value.map(normalizedProviderValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, item]) => [key, normalizedProviderValue(item)]));
+}
+
+function normalizedProviderIds(value: unknown) {
+  return (Array.isArray(value) ? value : [])
+    .map((item) => String(item))
+    .sort((left, right) => left.localeCompare(right, "en", { numeric: true }));
+}
+
+function normalizedProviderTexts(value: unknown) {
+  return (Array.isArray(value) ? value : [])
+    .map(normalizedProviderText)
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function semanticGraph(
+  projection: DirectProjection,
+  ids: { campaignId: string; adGroupId: string; keywordId: string; adId: string },
+  readback: {
+    campaign: Record<string, unknown>;
+    adGroup: Record<string, unknown>;
+    keyword: Record<string, unknown>;
+    ad: Record<string, unknown>;
+  },
+) {
+  const expectedCampaign = projection.direct.campaign;
+  const expectedGroup = projection.direct.ad_group;
+  const expectedKeyword = projection.direct.keyword;
+  const expectedAd = projection.direct.ad;
+  const actualCampaignUnified = record(readback.campaign.UnifiedCampaign);
+  const expectedCampaignUnified = record(expectedCampaign.UnifiedCampaign);
+  const actualGroupUnified = record(readback.adGroup.UnifiedAdGroup);
+  const expectedGroupUnified = record(expectedGroup.UnifiedAdGroup);
+  const actualNegativeKeywords = record(readback.adGroup.NegativeKeywords);
+  const expectedNegativeKeywords = record(expectedGroup.NegativeKeywords);
+  const actualTextAd = record(readback.ad.TextAd);
+  const expectedTextAd = record(expectedAd.TextAd);
+  const expected = {
+    campaign: {
+      Id: ids.campaignId,
+      Name: normalizedProviderText(expectedCampaign.Name),
+      Type: "UNIFIED_CAMPAIGN",
+      State: "SUSPENDED",
+      StartDate: String(expectedCampaign.StartDate ?? ""),
+      EndDate: String(expectedCampaign.EndDate ?? ""),
+      BiddingStrategy: normalizedProviderValue(expectedCampaignUnified.BiddingStrategy),
     },
-    fetcher,
-  );
-  const rows = result.Ads;
-  if (!Array.isArray(rows) || rows.length !== 1 || !rows[0]?.Id) {
-    throw new DirectWriteError("P0_DIRECT_READBACK_FAILED", "Ads.get не нашёл единственное объявление созданной группы.");
+    ad_group: {
+      Id: ids.adGroupId,
+      CampaignId: ids.campaignId,
+      Name: normalizedProviderText(expectedGroup.Name),
+      Type: "UNIFIED_AD_GROUP",
+      RegionIds: normalizedProviderIds(expectedGroup.RegionIds),
+      NegativeKeywords: normalizedProviderTexts(expectedNegativeKeywords.Items),
+      OfferRetargeting: String(expectedGroupUnified.OfferRetargeting ?? ""),
+    },
+    keyword: {
+      Id: ids.keywordId,
+      AdGroupId: ids.adGroupId,
+      Keyword: normalizedProviderText(expectedKeyword.Keyword),
+    },
+    ad: {
+      Id: ids.adId,
+      CampaignId: ids.campaignId,
+      AdGroupId: ids.adGroupId,
+      Type: "TEXT_AD",
+      Title: normalizedProviderText(expectedTextAd.Title),
+      Text: normalizedProviderText(expectedTextAd.Text),
+      Href: String(expectedTextAd.Href ?? ""),
+      Mobile: String(expectedTextAd.Mobile ?? ""),
+    },
+  };
+  const actual = {
+    campaign: {
+      Id: String(readback.campaign.Id ?? ""),
+      Name: normalizedProviderText(readback.campaign.Name),
+      Type: String(readback.campaign.Type ?? ""),
+      State: String(readback.campaign.State ?? ""),
+      StartDate: String(readback.campaign.StartDate ?? ""),
+      EndDate: String(readback.campaign.EndDate ?? ""),
+      BiddingStrategy: normalizedProviderValue(actualCampaignUnified.BiddingStrategy),
+    },
+    ad_group: {
+      Id: String(readback.adGroup.Id ?? ""),
+      CampaignId: String(readback.adGroup.CampaignId ?? ""),
+      Name: normalizedProviderText(readback.adGroup.Name),
+      Type: String(readback.adGroup.Type ?? ""),
+      RegionIds: normalizedProviderIds(readback.adGroup.RegionIds),
+      NegativeKeywords: normalizedProviderTexts(actualNegativeKeywords.Items),
+      OfferRetargeting: String(actualGroupUnified.OfferRetargeting ?? ""),
+    },
+    keyword: {
+      Id: String(readback.keyword.Id ?? ""),
+      AdGroupId: String(readback.keyword.AdGroupId ?? ""),
+      Keyword: normalizedProviderText(readback.keyword.Keyword),
+    },
+    ad: {
+      Id: String(readback.ad.Id ?? ""),
+      CampaignId: String(readback.ad.CampaignId ?? ""),
+      AdGroupId: String(readback.ad.AdGroupId ?? ""),
+      Type: String(readback.ad.Type ?? ""),
+      Title: normalizedProviderText(actualTextAd.Title),
+      Text: normalizedProviderText(actualTextAd.Text),
+      Href: String(actualTextAd.Href ?? ""),
+      Mobile: String(actualTextAd.Mobile ?? ""),
+    },
+  };
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new DirectWriteError(
+      "P0_DIRECT_GRAPH_MISMATCH",
+      "Direct silently altered or omitted a selected field in the supported campaign graph.",
+      { expected_graph: expected, actual_graph: actual },
+    );
   }
-  return rows[0] as Record<string, unknown>;
+  return { ...readback, semantic_graph: actual };
 }
 
-async function suspendAndReadback(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
+async function readAndVerifyGraph(
+  config: DirectConfig,
+  projection: DirectProjection,
+  ids: { campaignId: string; adGroupId: string; keywordId: string; adId: string },
+  fetcher: Fetcher,
+) {
+  const campaign = await campaignReadback(config, ids.campaignId, fetcher);
+  const adGroup = await adGroupReadback(config, ids.adGroupId, fetcher);
+  const keyword = await keywordReadback(config, ids.keywordId, fetcher);
+  const ad = await adReadback(config, ids.adId, fetcher);
+  return semanticGraph(projection, ids, { campaign, adGroup, keyword, ad });
+}
+
+async function suspendAndReadback(
+  config: DirectConfig,
+  campaignId: string,
+  fetcher: Fetcher,
+  progress: Record<string, unknown>,
+) {
   const suspended = await callDirect(
     config,
     "Campaigns",
@@ -205,58 +415,38 @@ async function suspendAndReadback(config: DirectConfig, campaignId: string, fetc
     { SelectionCriteria: { Ids: [directId(campaignId)] } },
     fetcher,
   );
-  actionAccepted(suspended, "SuspendResults", "Campaigns.suspend");
+  actionAccepted(suspended, "SuspendResults", "Campaigns.suspend", progress, [campaignId]);
   return campaignReadback(config, campaignId, fetcher);
 }
 
-async function ensureNonServing(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
+async function ensureNonServing(
+  config: DirectConfig,
+  campaignId: string,
+  fetcher: Fetcher,
+  progress: Record<string, unknown>,
+) {
   let campaign = await campaignReadback(config, campaignId, fetcher);
   if (campaign.State === "OFF" || campaign.State === "SUSPENDED") return campaign;
-  campaign = await suspendAndReadback(config, campaignId, fetcher);
+  campaign = await suspendAndReadback(config, campaignId, fetcher, progress);
   if (campaign.State !== "OFF" && campaign.State !== "SUSPENDED") {
     throw new DirectWriteError("P0_NON_SERVING_NOT_CONFIRMED", "Директ не подтвердил выключенные показы кампании.");
   }
   return campaign;
 }
 
-async function ensureExplicitlySuspended(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
+async function ensureExplicitlySuspended(
+  config: DirectConfig,
+  campaignId: string,
+  fetcher: Fetcher,
+  progress: Record<string, unknown>,
+) {
   let campaign = await campaignReadback(config, campaignId, fetcher);
   if (campaign.State === "SUSPENDED") return campaign;
-  campaign = await suspendAndReadback(config, campaignId, fetcher);
+  campaign = await suspendAndReadback(config, campaignId, fetcher, progress);
   if (campaign.State !== "SUSPENDED") {
     throw new DirectWriteError(
       "P0_EXPLICIT_SUSPEND_NOT_CONFIRMED",
       "Direct не подтвердил явную остановку кампании до дочерних записей.",
-    );
-  }
-  return campaign;
-}
-
-async function ensureOwnerSuspendedAfterModeration(
-  config: DirectConfig,
-  campaignId: string,
-  fetcher: Fetcher,
-) {
-  let campaign = await campaignReadback(config, campaignId, fetcher);
-  for (let attempt = 0; campaign.Status === "DRAFT" && attempt < 8; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    campaign = await campaignReadback(config, campaignId, fetcher);
-  }
-  if (campaign.Status === "DRAFT") {
-    throw new DirectWriteError(
-      "P0_FINAL_SUSPEND_PENDING",
-      "Direct ещё не перевёл кампанию из черновика после отправки на модерацию.",
-      { requires_reconciliation: true },
-    );
-  }
-  if (campaign.State !== "SUSPENDED") {
-    campaign = await suspendAndReadback(config, campaignId, fetcher);
-  }
-  if (campaign.State !== "SUSPENDED") {
-    throw new DirectWriteError(
-      "P0_FINAL_SUSPEND_NOT_CONFIRMED",
-      "Директ не подтвердил пользовательскую остановку кампании после модерации.",
-      { requires_reconciliation: true },
     );
   }
   return campaign;
@@ -280,7 +470,7 @@ export async function createSuspendedCampaign(
     throw new DirectWriteError("P0_PROJECTION_UNSAFE", "Campaign Draft нарушает обязательный safety-контракт.");
   }
 
-  const result: Record<string, unknown> = { steps: [] as string[] };
+  const result: Record<string, unknown> = { steps: [] as string[], provider_issues: [] };
   let campaignId = recovery?.campaignId ?? "";
   try {
     if (campaignId) {
@@ -294,6 +484,7 @@ export async function createSuspendedCampaign(
         await callDirect(config, "Campaigns", "add", { Campaigns: [projection.direct.campaign] }, fetcher),
         "AddResults",
         "Campaigns.add",
+        result,
       );
       result.campaign_id = campaignId;
       (result.steps as string[]).push("CAMPAIGN_CREATED");
@@ -301,9 +492,9 @@ export async function createSuspendedCampaign(
     }
 
     if (result.recovered_existing === true) {
-      await ensureExplicitlySuspended(config, campaignId, fetcher);
+      await ensureExplicitlySuspended(config, campaignId, fetcher, result);
     } else {
-      const explicitlySuspended = await suspendAndReadback(config, campaignId, fetcher);
+      const explicitlySuspended = await suspendAndReadback(config, campaignId, fetcher, result);
       if (explicitlySuspended.State !== "SUSPENDED") {
         throw new DirectWriteError(
           "P0_EXPLICIT_SUSPEND_NOT_CONFIRMED",
@@ -314,63 +505,91 @@ export async function createSuspendedCampaign(
     (result.steps as string[]).push("NON_SERVING_CONFIRMED");
     await onProgress("NON_SERVING_CONFIRMED", result);
 
-    let adGroupId: string;
-    let keywordId: string;
-    let adId: string;
-    if (recovery?.adGroupId && recovery.keywordId) {
-      const recoveredAd = await adReadbackByGroup(config, recovery.adGroupId, fetcher);
-      adGroupId = recovery.adGroupId;
-      keywordId = recovery.keywordId;
-      adId = String(recoveredAd.Id);
-      Object.assign(result, { ad_group_id: adGroupId, keyword_id: keywordId, ad_id: adId });
-      (result.steps as string[]).push("OBJECT_GRAPH_RECOVERED");
-      await onProgress("OBJECT_GRAPH_RECOVERED", result);
+    let adGroupId = recovery?.adGroupId ?? "";
+    let keywordId = recovery?.keywordId ?? "";
+    let adId = recovery?.adId ?? "";
+    if (adGroupId) {
+      result.ad_group_id = adGroupId;
+      (result.steps as string[]).push("AD_GROUP_RECOVERED");
+      await onProgress("AD_GROUP_RECOVERED", result);
     } else {
       const adGroup = { ...projection.direct.ad_group, CampaignId: directId(campaignId) };
       adGroupId = addedId(
         await callDirect(config, "AdGroups", "add", { AdGroups: [adGroup] }, fetcher),
         "AddResults",
         "AdGroups.add",
+        result,
       );
+      result.ad_group_id = adGroupId;
+      (result.steps as string[]).push("AD_GROUP_CREATED");
+      await onProgress("AD_GROUP_CREATED", result);
+    }
+    if (keywordId) {
+      result.keyword_id = keywordId;
+      (result.steps as string[]).push("KEYWORD_RECOVERED");
+      await onProgress("KEYWORD_RECOVERED", result);
+    } else {
       const keyword = { ...projection.direct.keyword, AdGroupId: directId(adGroupId) };
       keywordId = addedId(
         await callDirect(config, "Keywords", "add", { Keywords: [keyword] }, fetcher),
         "AddResults",
         "Keywords.add",
+        result,
       );
+      result.keyword_id = keywordId;
+      (result.steps as string[]).push("KEYWORD_CREATED");
+      await onProgress("KEYWORD_CREATED", result);
+    }
+    if (adId) {
+      result.ad_id = adId;
+      (result.steps as string[]).push("AD_RECOVERED");
+      await onProgress("AD_RECOVERED", result);
+    } else {
       const ad = { ...projection.direct.ad, AdGroupId: directId(adGroupId) };
       adId = addedId(
         await callDirect(config, "Ads", "add", { Ads: [ad] }, fetcher),
         "AddResults",
         "Ads.add",
+        result,
       );
-      Object.assign(result, { ad_group_id: adGroupId, keyword_id: keywordId, ad_id: adId });
-      (result.steps as string[]).push("OBJECT_GRAPH_CREATED");
-      await onProgress("OBJECT_GRAPH_CREATED", result);
+      result.ad_id = adId;
+      (result.steps as string[]).push("AD_CREATED");
+      await onProgress("AD_CREATED", result);
     }
 
-    const moderated = await callDirect(
-      config,
-      "Ads",
-      "moderate",
-      { SelectionCriteria: { Ids: [directId(adId)] } },
-      fetcher,
-    );
-    actionAccepted(moderated, "ModerateResults", "Ads.moderate");
-    const adState = await adReadback(config, adId, fetcher);
-    const finalCampaign = await ensureOwnerSuspendedAfterModeration(config, campaignId, fetcher);
-    const moderation = String(adState.Status ?? "UNKNOWN");
+    const ids = { campaignId, adGroupId, keywordId, adId };
+    await readAndVerifyGraph(config, projection, ids, fetcher);
+    (result.steps as string[]).push("OBJECT_GRAPH_VERIFIED");
+    await onProgress("OBJECT_GRAPH_VERIFIED", result);
+
+    if (recovery?.moderationSubmitted) {
+      (result.steps as string[]).push("MODERATION_RECOVERED");
+      await onProgress("MODERATION_RECOVERED", result);
+    } else {
+      const moderated = await callDirect(
+        config,
+        "Ads",
+        "moderate",
+        { SelectionCriteria: { Ids: [directId(adId)] } },
+        fetcher,
+      );
+      actionAccepted(moderated, "ModerateResults", "Ads.moderate", result, [adId]);
+      (result.steps as string[]).push("MODERATION_SUBMITTED");
+      await onProgress("MODERATION_SUBMITTED", result);
+    }
+    const finalGraph = await readAndVerifyGraph(config, projection, ids, fetcher);
+    const moderation = String(finalGraph.ad.Status ?? "UNKNOWN");
     const status = moderation === "ACCEPTED"
       ? "READY_TO_LAUNCH"
       : moderation === "REJECTED"
         ? "REJECTED_NEEDS_EDIT"
         : "MODERATION_PENDING";
-    (result.steps as string[]).push("MODERATION_SUBMITTED");
     const completed = {
       ...result,
       status,
-      campaign_state: String(finalCampaign.State ?? "UNKNOWN"),
+      campaign_state: String(finalGraph.campaign.State ?? "UNKNOWN"),
       moderation_status: moderation,
+      semantic_graph: finalGraph.semantic_graph,
       spend_started: false,
     };
     await onProgress(status, completed);
@@ -381,14 +600,18 @@ export async function createSuspendedCampaign(
         result.containment = "MANUAL_RECONCILIATION_REQUIRED";
       } else {
         try {
-          await ensureNonServing(config, campaignId, fetcher);
+          await ensureNonServing(config, campaignId, fetcher, result);
           result.containment = "NON_SERVING_CONFIRMED";
         } catch {
           result.containment = "MANUAL_RECONCILIATION_REQUIRED";
         }
       }
       await onProgress(String(result.containment), result);
-    } else if (result.add_attempted && !(error instanceof DirectWriteError && error.partial.rejected === true)) {
+    } else if (
+      result.add_attempted
+      && !(error instanceof DirectWriteError && error.partial.rejected === true)
+      && !(error instanceof DirectWriteError && error.partial.dispatch_not_attempted === true)
+    ) {
       result.containment = "RECONCILIATION_REQUIRED";
       await onProgress("RECONCILIATION_REQUIRED", result);
     }

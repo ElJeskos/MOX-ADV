@@ -2,15 +2,19 @@ import { env } from "cloudflare:workers";
 import {
   hasDuplicateCampaignName,
 } from "./campaign-draft.ts";
-import { fingerprintDirectProjection } from "./campaign-fanout.ts";
+import {
+  campaignDraftPublishBlockers,
+  fingerprintDirectProjection,
+} from "./campaign-fanout.ts";
 import { strategyAnswerValue } from "./campaign-strategy.ts";
 import { minimumWeeklyBudgetRub, validateWeeklyBudgetRub } from "./direct-limits.ts";
+import { type DirectProjection } from "./direct-write.ts";
 import {
-  createSuspendedCampaign,
-  DirectWriteError,
-  type DirectProjection,
-} from "./direct-write.ts";
-import { mustHoldAccountLock } from "./execution-safety.ts";
+  executeSafeSingleCampaign,
+  type DirectExecutionIdentity,
+  type DirectExecutionJournal,
+  type DirectExecutionRecord,
+} from "./execution-safety.ts";
 import {
   P0Application,
   type P0ApplicationStore,
@@ -36,7 +40,10 @@ import {
 
 type ExecutionRow = {
   execution_id: string;
-  campaign_id: string;
+  user_key: string;
+  account_key: string;
+  status: string;
+  campaign_id: string | null;
   projection_json: string;
   result_json: string;
 };
@@ -110,72 +117,24 @@ async function beginExecution(
   return executionId;
 }
 
-async function findRecoverableExecution(
+async function findExactExecution(
   userKeyValue: string,
   account: string,
   projection: DirectProjection,
 ) {
-  const row = await runtimeEnv()
+  const rows = await runtimeEnv()
     .DB.prepare(
-      "SELECT execution_id, campaign_id, projection_json, result_json FROM p0_executions WHERE user_key = ? AND account_key = ? AND campaign_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+      "SELECT execution_id, user_key, account_key, status, campaign_id, projection_json, result_json FROM p0_executions WHERE user_key = ? AND account_key = ? ORDER BY created_at DESC LIMIT 20",
     )
     .bind(userKeyValue, account)
-    .first<ExecutionRow>();
-  if (!row) return null;
-  const storedProjection = JSON.parse(row.projection_json) as DirectProjection;
-  const storedResult = JSON.parse(row.result_json) as Record<string, unknown>;
-  const steps = Array.isArray(storedResult.steps) ? storedResult.steps : [];
-  const [storedFingerprint, requestedFingerprint] = await Promise.all([
-    fingerprintDirectProjection(storedProjection as unknown as Record<string, unknown>),
-    fingerprintDirectProjection(projection as unknown as Record<string, unknown>),
-  ]);
-  if (storedFingerprint !== requestedFingerprint) return null;
-  const campaignOnly = steps.length === 1 && steps[0] === "CAMPAIGN_CREATED";
-  const graphCreated = steps.includes("OBJECT_GRAPH_CREATED")
-    && storedResult.ad_group_id
-    && storedResult.keyword_id;
-  if (!campaignOnly && !graphCreated) return null;
-  return {
-    executionId: row.execution_id,
-    recovery: {
-      campaignId: String(row.campaign_id),
-      ...(graphCreated
-        ? {
-            adGroupId: String(storedResult.ad_group_id),
-            keywordId: String(storedResult.keyword_id),
-          }
-        : {}),
-    },
-  };
-}
-
-async function claimRecoveryLock(account: string, userKeyValue: string, executionId: string) {
-  const lock = await runtimeEnv()
-    .DB.prepare("SELECT execution_id FROM p0_account_locks WHERE account_key = ?")
-    .bind(account)
-    .first<{ execution_id: string }>();
-  if (lock?.execution_id === executionId) return;
-  if (lock) throw new Error("Для аккаунта уже выполняется другая production-запись.");
-  await acquireAccountLock(account, userKeyValue, executionId);
-}
-
-async function recordExecution(
-  executionId: string,
-  status: string,
-  result: Record<string, unknown>,
-) {
-  await runtimeEnv()
-    .DB.prepare(
-      "UPDATE p0_executions SET status = ?, campaign_id = COALESCE(?, campaign_id), result_json = ?, updated_at = ? WHERE execution_id = ?",
-    )
-    .bind(
-      status,
-      result.campaign_id ? String(result.campaign_id) : null,
-      JSON.stringify(result),
-      now(),
-      executionId,
-    )
-    .run();
+    .all<ExecutionRow>();
+  const requestedFingerprint = await fingerprintDirectProjection(projection as unknown as Record<string, unknown>);
+  for (const row of rows.results) {
+    const storedProjection = JSON.parse(row.projection_json) as DirectProjection;
+    const storedFingerprint = await fingerprintDirectProjection(storedProjection as unknown as Record<string, unknown>);
+    if (storedFingerprint === requestedFingerprint) return row.execution_id;
+  }
+  return null;
 }
 
 async function acquireAccountLock(account: string, userKeyValue: string, executionId: string) {
@@ -208,6 +167,77 @@ async function holdAccountLock(account: string, executionId: string) {
     )
     .bind(account, executionId)
     .run();
+}
+
+async function claimAccountLock(account: string, userKeyValue: string, executionId: string) {
+  const db = runtimeEnv().DB;
+  await db.prepare("DELETE FROM p0_account_locks WHERE expires_at <= ?").bind(now()).run();
+  const lock = await db
+    .prepare("SELECT execution_id FROM p0_account_locks WHERE account_key = ?")
+    .bind(account)
+    .first<{ execution_id: string }>();
+  if (lock?.execution_id === executionId) return;
+  if (lock) throw new Error("Для аккаунта уже выполняется другая production-запись.");
+  await acquireAccountLock(account, userKeyValue, executionId);
+}
+
+class D1DirectExecutionJournal implements DirectExecutionJournal {
+  constructor(
+    private readonly ownerKey: string,
+    private readonly projection: DirectProjection,
+  ) {}
+
+  async acquire(identity: DirectExecutionIdentity) {
+    const row = await runtimeEnv()
+      .DB.prepare(
+        "SELECT execution_id, user_key, account_key, status, campaign_id, projection_json, result_json FROM p0_executions WHERE execution_id = ? AND user_key = ? AND account_key = ?",
+      )
+      .bind(identity.execution_id, this.ownerKey, identity.account)
+      .first<ExecutionRow>();
+    if (!row) throw new Error("Durable Direct execution record отсутствует.");
+    const storedProjection = JSON.parse(row.projection_json) as DirectProjection;
+    const [storedFingerprint, requestedFingerprint] = await Promise.all([
+      fingerprintDirectProjection(storedProjection as unknown as Record<string, unknown>),
+      fingerprintDirectProjection(this.projection as unknown as Record<string, unknown>),
+    ]);
+    if (storedFingerprint !== identity.publish_fingerprint || requestedFingerprint !== identity.publish_fingerprint) {
+      throw new Error("Durable Direct execution fingerprint не совпадает.");
+    }
+    await claimAccountLock(identity.account, this.ownerKey, identity.execution_id);
+    const value = JSON.parse(row.result_json) as Record<string, unknown>;
+    if (!Object.keys(value).length) return null;
+    if (value.schema_version !== "p0-direct-single-campaign-execution-v1") {
+      await holdAccountLock(identity.account, identity.execution_id);
+      throw new Error("Legacy Direct execution requires manual reconciliation.");
+    }
+    return value as DirectExecutionRecord;
+  }
+
+  async save(record: DirectExecutionRecord) {
+    const result = await runtimeEnv()
+      .DB.prepare(
+        "UPDATE p0_executions SET status = ?, campaign_id = COALESCE(?, campaign_id), result_json = ?, updated_at = ? WHERE execution_id = ? AND user_key = ? AND account_key = ?",
+      )
+      .bind(
+        record.status,
+        record.provider_ids.campaign_id,
+        JSON.stringify(record),
+        record.updated_at,
+        record.execution_id,
+        this.ownerKey,
+        record.account,
+      )
+      .run();
+    if (Number(result.meta.changes) !== 1) throw new Error("Durable Direct execution checkpoint не сохранён.");
+  }
+
+  async release(identity: DirectExecutionIdentity) {
+    await releaseAccountLock(identity.account, identity.execution_id);
+  }
+
+  async hold(identity: DirectExecutionIdentity) {
+    await holdAccountLock(identity.account, identity.execution_id);
+  }
 }
 
 async function readCurrencyLimits() {
@@ -701,51 +731,40 @@ async function createExternalOutcome({
   }
   if (!state.strategy) throw new Error("Campaign Strategy отсутствует.");
   validateWeeklyBudgetRub(strategyAnswerValue(state.strategy, "weekly_budget"), limits.minimum_weekly_budget_rub);
+  if (!state.context_state || !state.recommendation_set || !state.draft) {
+    throw new Error("Exact Context, Recommendation Set и Campaign Draft отсутствуют.");
+  }
   const campaignName = String(projection.direct.campaign.Name ?? "");
-  const recovery = await findRecoverableExecution(key, config.account, projection);
-  let executionId: string;
-  let directRecovery: { campaignId: string; adGroupId?: string; keywordId?: string } | null = null;
-  if (recovery) {
-    executionId = recovery.executionId;
-    directRecovery = recovery.recovery;
-    await claimRecoveryLock(config.account, key, executionId);
-  } else {
+  let executionId = await findExactExecution(key, config.account, projection);
+  if (!executionId) {
     if (hasDuplicateCampaignName(catalog.names, campaignName)) {
       throw new Error("В аккаунте уже существует активная кампания с таким названием.");
     }
     executionId = await beginExecution(key, config.account, projection);
-    try {
-      await acquireAccountLock(config.account, key, executionId);
-    } catch (error) {
-      await recordExecution(executionId, "ACCOUNT_WRITE_LOCKED", {});
-      throw error;
-    }
   }
-  let releaseLock = true;
-  try {
-    const result = await createSuspendedCampaign(
-      config,
-      projection,
-      fetch,
-      (status, progress) => recordExecution(executionId, status, progress),
-      directRecovery,
-    );
-    return { execution_id: executionId, ...result };
-  } catch (error) {
-    const partial = error instanceof DirectWriteError ? error.partial : {};
-    await recordExecution(
-      executionId,
-      error instanceof DirectWriteError ? error.code : "P0_DIRECT_WRITE_FAILED",
-      partial,
-    );
-    if (mustHoldAccountLock(partial)) {
-      releaseLock = false;
-      await holdAccountLock(config.account, executionId);
-    }
-    throw error;
-  } finally {
-    if (releaseLock) await releaseAccountLock(config.account, executionId);
-  }
+  const directFacts = state.context_state.facts.direct;
+  const publishFingerprint = String(state.draft.publish_fingerprint ?? "");
+  const result = await executeSafeSingleCampaign({
+    execution_id: executionId,
+    config,
+    projection,
+    authority: {
+      direct_account_binding: {
+        source_kind: "YANDEX_DIRECT_API_V501",
+        account: directFacts.account,
+        client_id: directFacts.client_id,
+        verified: true,
+      },
+      direct_capability_snapshot: directFacts.capability_snapshot as unknown as Record<string, unknown>,
+      capability_profile: state.recommendation_set.capability_profile as unknown as Record<string, unknown>,
+      publish_fingerprint: publishFingerprint,
+      publication_blockers: campaignDraftPublishBlockers(state.draft),
+    },
+    journal: new D1DirectExecutionJournal(key, projection),
+    fetcher: fetch,
+    now,
+  });
+  return { execution_id: executionId, ...result };
 }
 
 const application = new P0Application({
