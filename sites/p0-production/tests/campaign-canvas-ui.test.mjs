@@ -87,6 +87,11 @@ test("rejected package items expose focused correction, renewed review and separ
   assert.match(clientSource, /Initial package verdict/u);
   assert.match(clientSource, /Correction progress/u);
   assert.match(clientSource, /Corrected terminal outcome/u);
+  assert.match(clientSource, /Prepared corrected Human Decision Gate packet/u);
+  assert.match(clientSource, /decisionPacket\.recommendation/u);
+  assert.match(clientSource, /decisionPacket\.confidence/u);
+  assert.match(clientSource, /Alternatives/u);
+  assert.match(clientSource, /Consequences/u);
   assert.match(clientSource, /PASS_AFTER_CORRECTION/u);
 });
 

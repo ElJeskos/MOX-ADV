@@ -22,6 +22,31 @@ export type PackageCorrectionTerminalOutcome = "PASS_AFTER_CORRECTION" | "FAIL" 
 
 type Draft = CampaignRecommendationSet["drafts"][number];
 
+export type CorrectionDecisionPacket = {
+  recommendation: {
+    action: "RESUBMIT_CORRECTED_REVISION";
+    rationale: string;
+  };
+  confidence: {
+    status: "MEDIUM";
+    rationale: string;
+  };
+  evidence: {
+    status_clarifications: string[];
+    provider_issue_count: number;
+    corrected_draft_revision_id: string;
+    corrected_publish_fingerprint: string;
+    changed_pointers: string[];
+    score: { previous: number | null; current: number | null };
+    rank: { previous: number | null; current: number | null };
+  };
+  alternatives: Array<{
+    action: "KEEP_INITIAL_REJECTION";
+    consequence: string;
+  }>;
+  consequences: string[];
+};
+
 export type PackageCorrection = {
   schema_version: typeof PACKAGE_CORRECTION_SCHEMA;
   contract_version: "1.0.0";
@@ -44,6 +69,7 @@ export type PackageCorrection = {
   };
   corrected_recommendation_set: CampaignRecommendationSet | null;
   corrected_draft: Draft | null;
+  decision_packet: CorrectionDecisionPacket | null;
   shortlist: P0Shortlist | null;
   package_review: PackageReview | null;
   human_decision_gate: HumanDecisionGate | null;
@@ -145,6 +171,7 @@ export async function initializePackageCorrection(input: {
     },
     corrected_recommendation_set: null,
     corrected_draft: null,
+    decision_packet: null,
     shortlist: null,
     package_review: null,
     human_decision_gate: null,
@@ -158,6 +185,50 @@ export async function initializePackageCorrection(input: {
     created_at: input.createdAt,
     updated_at: input.createdAt,
   });
+}
+
+export function buildCorrectionDecisionPacket(
+  source: PackageCorrection["source"],
+  correctedDraft: Draft,
+): CorrectionDecisionPacket {
+  const materialDelta = record(correctedDraft.material_delta);
+  const scoreDelta = record(correctedDraft.score_delta);
+  const score = record(scoreDelta.score);
+  const rank = record(scoreDelta.rank);
+  const metric = (value: unknown) => value === null || value === undefined || value === "" || !Number.isFinite(Number(value))
+    ? null
+    : Number(value);
+  const changedPointers = (Array.isArray(materialDelta.fields) ? materialDelta.fields : [])
+    .map((field) => String(record(field).pointer ?? ""))
+    .filter(Boolean);
+  return {
+    recommendation: {
+      action: "RESUBMIT_CORRECTED_REVISION",
+      rationale: "Provider clarification is addressed by an exact material Draft delta; submit only after the renewed package review and Gate.",
+    },
+    confidence: {
+      status: "MEDIUM",
+      rationale: "The revision and field-level delta are deterministic, but the provider controls the new moderation outcome.",
+    },
+    evidence: {
+      status_clarifications: structuredClone(source.status_clarifications),
+      provider_issue_count: source.provider_issues.length,
+      corrected_draft_revision_id: correctedDraft.draft_revision_id,
+      corrected_publish_fingerprint: correctedDraft.publish_fingerprint,
+      changed_pointers: changedPointers,
+      score: { previous: metric(score.previous), current: metric(score.current) },
+      rank: { previous: metric(rank.previous), current: metric(rank.current) },
+    },
+    alternatives: [{
+      action: "KEEP_INITIAL_REJECTION",
+      consequence: "Do not mutate or resubmit the provider graph; preserve the initial rejection as the terminal outcome.",
+    }],
+    consequences: [
+      "Only object kinds named by the field-level delta will be updated on the known suspended provider graph.",
+      "The corrected ad enters a new asynchronous moderation cycle and may still be accepted, rejected, pending, or require reconciliation.",
+      "The initial package execution, provider responses, and verdict remain immutable regardless of the corrected outcome.",
+    ],
+  };
 }
 
 export async function updatePackageCorrection(
@@ -200,7 +271,7 @@ export async function recordCorrectionExecution(
 }
 
 function statusShapeIsValid(correction: PackageCorrection) {
-  const hasDraft = Boolean(correction.corrected_recommendation_set && correction.corrected_draft && correction.shortlist);
+  const hasDraft = Boolean(correction.corrected_recommendation_set && correction.corrected_draft && correction.decision_packet && correction.shortlist);
   const hasReview = Boolean(correction.package_review);
   const hasGate = Boolean(correction.human_decision_gate);
   const hasExecution = Boolean(correction.execution);
@@ -250,7 +321,9 @@ export async function verifyPackageCorrection(input: {
     || JSON.stringify(candidate.source.status_clarifications) !== JSON.stringify(sourceClarifications(sourceItem))) return false;
   if (candidate.corrected_draft && candidate.corrected_recommendation_set) {
     const corrected = candidate.corrected_recommendation_set.drafts.find((draft) => draft.draft_id === candidate.corrected_draft?.draft_id);
-    if (!corrected || JSON.stringify(corrected) !== JSON.stringify(candidate.corrected_draft)) return false;
+    if (!corrected
+      || JSON.stringify(corrected) !== JSON.stringify(candidate.corrected_draft)
+      || JSON.stringify(candidate.decision_packet) !== JSON.stringify(buildCorrectionDecisionPacket(candidate.source, candidate.corrected_draft))) return false;
     if (candidate.corrected_draft.draft_revision_id === candidate.source.selection.draft_revision_id
       || candidate.corrected_draft.publish_fingerprint === candidate.source.selection.publish_fingerprint) return false;
   }

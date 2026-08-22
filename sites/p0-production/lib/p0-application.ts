@@ -35,8 +35,10 @@ import {
   type DirectCapabilitySnapshot,
 } from "./campaign-fanout.ts";
 import {
+  buildCorrectionDecisionPacket,
   initializePackageCorrection,
   recordCorrectionExecution,
+  sealPackageCorrection,
   updatePackageCorrection,
   verifyPackageCorrection,
   type PackageCorrection,
@@ -113,8 +115,8 @@ import {
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
 export const P0_APPLICATION_CONTRACT_VERSION = "1.11.0";
-export const P0_DOCUMENT_SCHEMA = "p0-application-document-v8";
-const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4", "p0-application-document-v5", "p0-application-document-v6", "p0-application-document-v7"]);
+export const P0_DOCUMENT_SCHEMA = "p0-application-document-v9";
+const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4", "p0-application-document-v5", "p0-application-document-v6", "p0-application-document-v7", "p0-application-document-v8"]);
 const P0_PRE_PACKAGE_AUTHORITY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4"]);
 export const P0_CONTEXT_SCHEMA = "p0-context-v2";
 const P0_LEGACY_CONTEXT_SCHEMA = "p0-context-v1";
@@ -281,7 +283,7 @@ export interface P0ApplicationAdapters {
     draft: CampaignRecommendationSet["drafts"][number];
     gate: HumanDecisionGate;
   }): Promise<PackageItemExternalOutcome>;
-  resubmitCorrectedPackageItemOutcome?(input: {
+  resubmitCorrectedPackageItemOutcome(input: {
     key: string;
     state: P0Document;
     package_execution_id: string;
@@ -1398,6 +1400,28 @@ async function buildMaterialDraftCorrection(
   return { correctedRecommendationSet, correctedDraft };
 }
 
+async function persistPackageCorrectionCheckpoint(input: {
+  store: P0ApplicationStore;
+  key: string;
+  state: P0Document;
+  correctionIndex: number;
+  correction: PackageCorrection;
+  persistedRevision: number;
+  checkpointAt: string;
+  conflictMessage: string;
+}) {
+  input.state.package_corrections[input.correctionIndex] = input.correction;
+  const checkpoint: P0StoredRow = {
+    revision: input.persistedRevision + 1,
+    updated_at: input.checkpointAt,
+    value_json: JSON.stringify(input.state),
+  };
+  if (!await input.store.compareAndSwap(input.key, input.persistedRevision, checkpoint)) {
+    fail("P0_REVISION_CONFLICT", input.conflictMessage);
+  }
+  return checkpoint.revision;
+}
+
 async function inferModel(site: SiteAnalysis, context: P0Context): Promise<BusinessModel> {
   const rows = evidenceRows(site);
   const productEvidence = bestOfferEvidence(rows);
@@ -1564,6 +1588,15 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     changed = true;
   } else if (!Array.isArray(state.package_corrections)) {
     lineageError("package corrections должны быть persisted array.");
+  }
+  if (version === "p0-application-document-v8") {
+    state.package_corrections = await Promise.all(state.package_corrections.map(async (correction) => sealPackageCorrection({
+      ...correction,
+      decision_packet: correction.corrected_draft
+        ? buildCorrectionDecisionPacket(correction.source, correction.corrected_draft)
+        : null,
+    })));
+    changed = true;
   }
   for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "landing_advisory_run", "recommendation_set", "draft", "shortlist", "package_review", "human_decision_gate", "package_execution", "last_decision_invalidation", "external_write_intent", "campaign", "recommendation_recalculation", "last_cascade"] as const) {
     if (!(key in state)) {
@@ -2190,6 +2223,23 @@ export class P0Application {
     }
     const state = structuredClone(current.state);
     let persistedRevision = current.revision;
+    const checkpointCorrection = async (
+      correctionIndex: number,
+      correction: PackageCorrection,
+      checkpointAt: string,
+      conflictMessage: string,
+    ) => {
+      persistedRevision = await persistPackageCorrectionCheckpoint({
+        store: this.store,
+        key,
+        state,
+        correctionIndex,
+        correction,
+        persistedRevision,
+        checkpointAt,
+        conflictMessage,
+      });
+    };
 
     if (action === "analyze_site") {
       const timestamp = this.adapters.now();
@@ -3058,6 +3108,7 @@ export class P0Application {
         status: "PACKAGE_REVIEW_REQUIRED",
         corrected_recommendation_set: correctedRecommendationSet,
         corrected_draft: correctedDraft,
+        decision_packet: buildCorrectionDecisionPacket(correction.source, correctedDraft),
         shortlist: correctedShortlist,
         package_review: null,
         human_decision_gate: null,
@@ -3131,6 +3182,9 @@ export class P0Application {
       this.assertPersistedBindings(state, preflightContext);
       const configuration = this.adapters.externalWriteConfiguration();
       if (!configuration.ready) fail("P0_WRITE_NOT_READY", configuration.blockers[0] ?? "Direct production credentials не настроены.");
+      if (typeof this.adapters.resubmitCorrectedPackageItemOutcome !== "function") {
+        fail("P0_CORRECTION_ADAPTER_UNAVAILABLE", "Corrected resubmission adapter is unavailable; creating a duplicate campaign is forbidden.");
+      }
       if (configuration.account !== correction.human_decision_gate.authority.direct_account_binding.account) {
         fail("P0_CONTEXT_ACCOUNT_MISMATCH", "Direct write account не совпадает с corrected package Gate binding.");
       }
@@ -3144,18 +3198,6 @@ export class P0Application {
       } catch (error) {
         fail("P0_CORRECTION_DISPATCH_BLOCKED", errorMessage(error));
       }
-      const persistCorrectionCheckpoint = async (checkpointAt: string) => {
-        state.package_corrections[correctionIndex] = correction;
-        const checkpoint: P0StoredRow = {
-          revision: persistedRevision + 1,
-          updated_at: checkpointAt,
-          value_json: JSON.stringify(state),
-        };
-        if (!await this.store.compareAndSwap(key, persistedRevision, checkpoint)) {
-          fail("P0_REVISION_CONFLICT", "P0 изменился в другой вкладке. Correction checkpoint не сохранён.");
-        }
-        persistedRevision = checkpoint.revision;
-      };
       if (!correction.execution) {
         const initialized = await initializePackageExecution({
           review: correction.package_review,
@@ -3164,7 +3206,7 @@ export class P0Application {
           startedAt: preflightAt,
         });
         correction = await recordCorrectionExecution(correction, initialized, preflightAt);
-        await persistCorrectionCheckpoint(preflightAt);
+        await checkpointCorrection(correctionIndex, correction, preflightAt, "P0 изменился в другой вкладке. Correction checkpoint не сохранён.");
       }
       for (const plan of plans) {
         const currentItem = correction.execution?.items.find((item) => item.item_execution_id === plan.item_execution_id);
@@ -3173,7 +3215,7 @@ export class P0Application {
         const itemStartedAt = this.adapters.now();
         const dispatching = await beginPackageItemDispatch(correction.execution!, plan.item_execution_id, itemStartedAt);
         correction = await recordCorrectionExecution(correction, dispatching, itemStartedAt);
-        await persistCorrectionCheckpoint(itemStartedAt);
+        await checkpointCorrection(correctionIndex, correction, itemStartedAt, "P0 изменился в другой вкладке. Correction checkpoint не сохранён.");
         let outcome: PackageItemExternalOutcome;
         try {
           const input = {
@@ -3187,9 +3229,7 @@ export class P0Application {
             gate: correction.human_decision_gate!,
             source_item: correction.source.item_snapshot,
           };
-          outcome = this.adapters.resubmitCorrectedPackageItemOutcome
-            ? await this.adapters.resubmitCorrectedPackageItemOutcome(input)
-            : await this.adapters.createPackageItemOutcome(input);
+          outcome = await this.adapters.resubmitCorrectedPackageItemOutcome(input);
         } catch (error) {
           const failure = error as Error & { code?: string; partial?: Record<string, unknown> };
           const partial = record(failure.partial);
@@ -3217,7 +3257,7 @@ export class P0Application {
         const itemUpdatedAt = this.adapters.now();
         const nextExecution = await recordPackageItemOutcome(correction.execution!, plan.item_execution_id, outcome, itemUpdatedAt);
         correction = await recordCorrectionExecution(correction, nextExecution, itemUpdatedAt);
-        await persistCorrectionCheckpoint(itemUpdatedAt);
+        await checkpointCorrection(correctionIndex, correction, itemUpdatedAt, "P0 изменился в другой вкладке. Correction checkpoint не сохранён.");
         if (packageExecutionBlocksFollowingItems(correction.execution!)) break;
       }
     } else if (action === "poll_package_correction_moderation") {
@@ -3243,15 +3283,9 @@ export class P0Application {
       });
       const plan = plans.find((item) => item.item_execution_id === itemExecutionId);
       if (!plan) fail("P0_PACKAGE_ITEM_MISSING", "Correction moderation item потерял exact Draft projection lineage.");
-      const persistCorrectionCheckpoint = async (checkpointAt: string) => {
-        state.package_corrections[correctionIndex] = correction;
-        const checkpoint: P0StoredRow = { revision: persistedRevision + 1, updated_at: checkpointAt, value_json: JSON.stringify(state) };
-        if (!await this.store.compareAndSwap(key, persistedRevision, checkpoint)) fail("P0_REVISION_CONFLICT", "Correction moderation checkpoint не сохранён.");
-        persistedRevision = checkpoint.revision;
-      };
       const polling = await beginPackageItemModerationPoll(correction.execution, itemExecutionId, pollStartedAt);
       correction = await recordCorrectionExecution(correction, polling, pollStartedAt);
-      await persistCorrectionCheckpoint(pollStartedAt);
+      await checkpointCorrection(correctionIndex, correction, pollStartedAt, "Correction moderation checkpoint не сохранён.");
       let outcome: PackageItemExternalOutcome;
       try {
         outcome = await this.adapters.pollPackageItemOutcome({
@@ -3288,7 +3322,7 @@ export class P0Application {
       const pollCompletedAt = this.adapters.now();
       const nextExecution = await recordPackageItemOutcome(correction.execution!, itemExecutionId, outcome, pollCompletedAt, { moderationPoll: true });
       correction = await recordCorrectionExecution(correction, nextExecution, pollCompletedAt);
-      await persistCorrectionCheckpoint(pollCompletedAt);
+      await checkpointCorrection(correctionIndex, correction, pollCompletedAt, "Correction moderation checkpoint не сохранён.");
     } else if (action === "confirm_creation") {
 
       if (payload.confirmation !== "CREATE_NON_SERVING_CAMPAIGN") {

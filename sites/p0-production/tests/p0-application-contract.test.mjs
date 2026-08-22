@@ -2678,6 +2678,12 @@ test("rejected item correction requires a material Draft revision, fresh review 
   assert.notEqual(correction.corrected_draft.publish_fingerprint, draft.publish_fingerprint);
   assert.deepEqual(correction.corrected_draft.material_delta.fields.map((field) => field.pointer), ["/direct/ad/TextAd/Text"]);
   assert.equal(correction.corrected_draft.score_delta.changed_pointers.includes("/direct/ad/TextAd/Text"), true);
+  assert.equal(correction.decision_packet.recommendation.action, "RESUBMIT_CORRECTED_REVISION");
+  assert.equal(correction.decision_packet.confidence.status, "MEDIUM");
+  assert.deepEqual(correction.decision_packet.evidence.changed_pointers, ["/direct/ad/TextAd/Text"]);
+  assert.equal(correction.decision_packet.evidence.status_clarifications.includes("Исправьте формулировку объявления"), true);
+  assert.equal(correction.decision_packet.alternatives[0].action, "KEEP_INITIAL_REJECTION");
+  assert.equal(correction.decision_packet.consequences.length >= 3, true);
   assert.equal(correction.package_review, null);
   assert.equal(correction.human_decision_gate, null);
   assert.equal(correction.execution, null);
@@ -2707,6 +2713,17 @@ test("rejected item correction requires a material Draft revision, fresh review 
   assert.equal(correction.status, "READY_TO_RESUBMIT");
   assert.notEqual(correction.human_decision_gate.gate_id, initialGateId);
   assert.equal(result.workflow.allowed_commands.includes("resubmit_package_correction"), true);
+  await assert.rejects(
+    value.application.command("owner", {
+      action: "resubmit_package_correction",
+      expected_revision: result.revision,
+      correction_id: correctionId,
+      package_id: correction.human_decision_gate.package_id,
+      gate_id: correction.human_decision_gate.gate_id,
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_CORRECTION_ADAPTER_UNAVAILABLE",
+  );
+  assert.equal((await value.application.query("owner")).revision, result.revision);
 
   let resubmittedProjection = null;
   value.adapter.createPackageItemOutcome = async () => { throw new Error("correction must update the rejected provider graph, not create a duplicate campaign"); };
@@ -2744,6 +2761,17 @@ test("rejected item correction requires a material Draft revision, fresh review 
   const restarted = await restartedApplication.query("owner");
   assert.equal(restarted.state.package_corrections[0].terminal_outcome, "PASS_AFTER_CORRECTION");
   assert.equal(JSON.stringify(restarted.state.package_execution), initialExecution);
+
+  const v9Row = await value.store.load("owner");
+  const legacyV8 = JSON.parse(v9Row.value_json);
+  legacyV8.schema_version = "p0-application-document-v8";
+  delete legacyV8.package_corrections[0].decision_packet;
+  delete legacyV8.package_corrections[0].content_hash;
+  legacyV8.package_corrections[0].content_hash = await sha256ForTest(legacyV8.package_corrections[0]);
+  await value.store.seed("owner", { ...v9Row, value_json: JSON.stringify(legacyV8) });
+  const migratedV8 = await restartedApplication.query("owner");
+  assert.equal(migratedV8.state.schema_version, P0_DOCUMENT_SCHEMA);
+  assert.equal(migratedV8.state.package_corrections[0].decision_packet.recommendation.action, "RESUBMIT_CORRECTED_REVISION");
 
   const row = await value.store.load("owner");
   const corrupted = JSON.parse(row.value_json);
