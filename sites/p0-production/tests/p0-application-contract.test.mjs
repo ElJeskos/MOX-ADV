@@ -10,6 +10,7 @@ import {
   P0Application,
   P0ApplicationError,
 } from "../lib/p0-application.ts";
+import { directExecutionFailureOutcome } from "../lib/campaign-package-execution.ts";
 import { sealCuratedPlaybookRelease } from "../lib/campaign-playbook.ts";
 import { collectOfficialWordstatBatch } from "../lib/market-evidence.ts";
 
@@ -1788,6 +1789,55 @@ test("confirmed package dispatches every selected Draft independently and preser
 });
 
 test("package dispatch continues after contained system failure but stops unsafe remaining items behind reconciliation", async (t) => {
+  await t.test("definite pre-dispatch validation failure is NOT_CREATED and does not stop the next safe item", async (t) => {
+    const value = await packageFixture(t);
+    const selected = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE").slice(0, 2);
+    let result = await reviewAndConfirm(value.application, value.result, selected.map((draft) => draft.draft_id));
+    const calls = [];
+    value.adapter.createPackageItemOutcome = async ({ item_execution_id, selection }) => {
+      calls.push(selection.draft_id);
+      if (selection.draft_id === selected[0].draft_id) {
+        return {
+          execution_id: item_execution_id,
+          status: "SYSTEM_FAILED",
+          error_code: "P0_CAPABILITY_OR_ACCOUNT_MISMATCH",
+          error_message: "Exact item validation failed before dispatch.",
+          validation_failed: true,
+          dispatch_not_attempted: true,
+          containment: "NOT_CREATED",
+          account_lock: "RELEASED",
+        };
+      }
+      return {
+        execution_id: item_execution_id,
+        status: "MODERATION_PENDING",
+        campaign_id: "91",
+        ad_group_id: "92",
+        keyword_id: "93",
+        ad_id: "94",
+        campaign_state: "SUSPENDED",
+        moderation_status: "MODERATION",
+        semantic_graph: { campaign: { State: "SUSPENDED" } },
+        steps: ["CAMPAIGN_CREATED", "NON_SERVING_CONFIRMED", "AD_GROUP_CREATED", "KEYWORD_CREATED", "AD_CREATED", "OBJECT_GRAPH_VERIFIED", "MODERATION_SUBMITTED"],
+        account_lock: "RELEASED",
+      };
+    };
+
+    result = await value.application.command("owner", {
+      action: "dispatch_package",
+      expected_revision: result.revision,
+      package_id: result.state.human_decision_gate.package_id,
+      gate_id: result.state.human_decision_gate.gate_id,
+    });
+
+    assert.deepEqual(calls, selected.map((draft) => draft.draft_id));
+    assert.equal(result.state.package_execution.items[0].ownership, "SYSTEM");
+    assert.equal(result.state.package_execution.items[0].progress.validation, "FAILED");
+    assert.equal(result.state.package_execution.items[0].progress.creation, "NOT_ATTEMPTED");
+    assert.equal(result.state.package_execution.items[0].containment, "NOT_CREATED");
+    assert.equal(result.state.package_execution.items[1].status, "MODERATION_PENDING");
+  });
+
   await t.test("contained system failure does not hide or stop the next independent item", async (t) => {
     const value = await packageFixture(t);
     const selected = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE").slice(0, 2);
@@ -2023,6 +2073,67 @@ test("restart resumes a durable DISPATCHING item with the same deterministic exe
   assert.equal(recovered.state.package_execution.items[0].item_execution_id, calls[0]);
   assert.equal(recovered.state.package_execution.items[0].provider_ids.campaign_id, "401");
   assert.equal(recovered.state.package_execution.items[0].status, "MODERATION_PENDING");
+});
+
+test("restart preserves a terminal provider rejection after the package outcome checkpoint was interrupted", async (t) => {
+  const value = await packageFixture(t);
+  const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+  const confirmed = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+  const originalCompareAndSwap = value.store.compareAndSwap.bind(value.store);
+  let rejectOutcomeCheckpoint = false;
+  value.store.compareAndSwap = async (...args) => {
+    if (rejectOutcomeCheckpoint) {
+      rejectOutcomeCheckpoint = false;
+      return false;
+    }
+    return originalCompareAndSwap(...args);
+  };
+  const calls = [];
+  const providerOutcome = {
+    status: "PROVIDER_REJECTED",
+    rejected: true,
+    error_code: "P0_DIRECT_ITEM_FAILED",
+    error_message: "Direct rejected the campaign.",
+    provider_issues: [{ operation: "Campaigns.add", severity: "ERROR", code: 5001, message: "Rejected", details: "Original provider detail" }],
+    containment: "NOT_CREATED",
+    account_lock: "RELEASED",
+  };
+  value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => {
+    calls.push(item_execution_id);
+    if (calls.length === 1) {
+      rejectOutcomeCheckpoint = true;
+      return { execution_id: item_execution_id, ...providerOutcome };
+    }
+    return directExecutionFailureOutcome(item_execution_id, Object.assign(new Error("Execution already terminal."), {
+      code: "P0_EXECUTION_ALREADY_TERMINAL",
+      partial: { previous_status: "PROVIDER_REJECTED", previous_result: providerOutcome },
+    }));
+  };
+
+  await assert.rejects(
+    value.application.command("owner", {
+      action: "dispatch_package",
+      expected_revision: confirmed.revision,
+      package_id: confirmed.state.human_decision_gate.package_id,
+      gate_id: confirmed.state.human_decision_gate.gate_id,
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_REVISION_CONFLICT",
+  );
+  value.store.compareAndSwap = originalCompareAndSwap;
+  const interrupted = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
+  const recovered = await new P0Application({ store: value.store, adapters: value.adapter }).command("owner", {
+    action: "dispatch_package",
+    expected_revision: interrupted.revision,
+    package_id: interrupted.state.human_decision_gate.package_id,
+    gate_id: interrupted.state.human_decision_gate.gate_id,
+  });
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0], calls[1]);
+  assert.equal(recovered.state.package_execution.items[0].status, "PROVIDER_REJECTED");
+  assert.equal(recovered.state.package_execution.items[0].ownership, "PROVIDER");
+  assert.equal(recovered.state.package_execution.items[0].containment, "NOT_CREATED");
+  assert.equal(recovered.state.package_execution.items[0].provider_issues[0].details, "Original provider detail");
 });
 
 test("same-schema package item outcome tampering fails closed before UI reuse", async (t) => {

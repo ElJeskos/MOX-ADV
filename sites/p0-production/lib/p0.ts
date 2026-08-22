@@ -6,6 +6,7 @@ import {
   campaignDraftPublishBlockers,
   fingerprintDirectProjection,
 } from "./campaign-fanout.ts";
+import { directExecutionFailureOutcome } from "./campaign-package-execution.ts";
 import { strategyAnswerValue } from "./campaign-strategy.ts";
 import { minimumWeeklyBudgetRub, validateWeeklyBudgetRub } from "./direct-limits.ts";
 import { DirectWriteError, type DirectProjection } from "./direct-write.ts";
@@ -764,6 +765,8 @@ async function createPackageItemOutcome({
         status: "SYSTEM_FAILED",
         error_code: "P0_DUPLICATE_CAMPAIGN_NAME",
         error_message: "MOX-ADV preflight обнаружил существующую активную кампанию с таким названием.",
+        validation_failed: true,
+        dispatch_not_attempted: true,
         containment: "NOT_CREATED",
         account_lock: "RELEASED",
       };
@@ -790,15 +793,7 @@ async function createPackageItemOutcome({
     return { execution_id: itemExecutionId, ...result };
   } catch (error) {
     if (!(error instanceof DirectWriteError)) throw error;
-    return {
-      execution_id: itemExecutionId,
-      ...error.partial,
-      status: error.partial.requires_reconciliation === true || error.partial.account_lock === "HELD_FOR_RECONCILIATION"
-        ? "RECONCILIATION_REQUIRED"
-        : error.partial.rejected === true ? "PROVIDER_REJECTED" : "SYSTEM_FAILED",
-      error_code: error.code,
-      error_message: error.message,
-    };
+    return directExecutionFailureOutcome(itemExecutionId, error);
   }
 }
 

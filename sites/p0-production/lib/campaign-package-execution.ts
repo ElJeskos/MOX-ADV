@@ -21,9 +21,34 @@ export type PackageItemOwnership =
   | "SYSTEM"
   | "UNKNOWN";
 
+export type PackageItemStatus =
+  | "QUEUED"
+  | "DISPATCHING"
+  | "MODERATION_PENDING"
+  | "READY_TO_LAUNCH"
+  | "REJECTED_NEEDS_EDIT"
+  | "PROVIDER_REJECTED"
+  | "SYSTEM_FAILED"
+  | "RECONCILIATION_REQUIRED";
+
+export type PackageItemContainment =
+  | "PENDING"
+  | "NOT_CREATED"
+  | "CONFIRMED_SUSPENDED"
+  | "NON_SERVING_CONFIRMED"
+  | "RECONCILIATION_REQUIRED"
+  | "MANUAL_RECONCILIATION_REQUIRED"
+  | "UNKNOWN";
+
+export type PackageItemAccountLock =
+  | "NOT_ACQUIRED"
+  | "ACQUIRING"
+  | "RELEASED"
+  | "HELD_FOR_RECONCILIATION";
+
 export type PackageItemProgress = {
   validation: "PENDING" | "PASSED" | "FAILED";
-  creation: "PENDING" | "CREATED" | "REJECTED" | "FAILED" | "UNKNOWN";
+  creation: "PENDING" | "NOT_ATTEMPTED" | "CREATED" | "REJECTED" | "FAILED" | "UNKNOWN";
   suspension: "PENDING" | "CONFIRMED_SUSPENDED" | "NOT_APPLICABLE" | "FAILED" | "UNKNOWN";
   child_graph: "PENDING" | "CREATED" | "NOT_APPLICABLE" | "PARTIAL" | "FAILED" | "UNKNOWN";
   readback: "PENDING" | "VERIFIED" | "NOT_APPLICABLE" | "FAILED" | "UNKNOWN";
@@ -35,7 +60,7 @@ export type PackageItemExecution = {
   item_execution_id: string;
   position: number;
   selection: ShortlistSelection;
-  status: string;
+  status: PackageItemStatus;
   ownership: PackageItemOwnership;
   progress: PackageItemProgress;
   provider_ids: {
@@ -46,9 +71,9 @@ export type PackageItemExecution = {
   };
   provider_issues: Array<Record<string, unknown>>;
   readback: Record<string, unknown> | null;
-  containment: string;
+  containment: PackageItemContainment;
   failure: { code: string; message: string } | null;
-  account_lock: string;
+  account_lock: PackageItemAccountLock;
   started_at: string | null;
   updated_at: string;
 };
@@ -82,10 +107,54 @@ export type PackageItemExternalOutcome = Record<string, unknown> & {
   status?: string;
 };
 
+export type DirectExecutionFailure = Error & {
+  code?: string;
+  partial?: Record<string, unknown>;
+};
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+export function directExecutionFailureOutcome(
+  itemExecutionId: string,
+  error: DirectExecutionFailure,
+): PackageItemExternalOutcome {
+  const partial = record(error.partial);
+  const previousResult = record(partial.previous_result);
+  const recovered = Object.keys(previousResult).length ? previousResult : partial;
+  const previousStatus = String(partial.previous_status ?? "");
+  const preDispatchValidationFailure = new Set([
+    "P0_EXECUTION_ID_INVALID",
+    "P0_WRITE_CREDENTIAL_MISSING",
+    "P0_PUBLICATION_BLOCKED",
+    "P0_PROJECTION_INCOMPLETE",
+    "P0_PROJECTION_UNSAFE",
+    "P0_CAPABILITY_OR_ACCOUNT_MISMATCH",
+    "P0_PROJECTION_FINGERPRINT_MISMATCH",
+  ]).has(String(error.code ?? ""));
+  const status = previousStatus === "PROVIDER_REJECTED" || recovered.rejected === true
+    ? "PROVIDER_REJECTED"
+    : previousStatus === "SYSTEM_FAILED"
+      ? "SYSTEM_FAILED"
+      : recovered.requires_reconciliation === true || recovered.account_lock === "HELD_FOR_RECONCILIATION"
+        ? "RECONCILIATION_REQUIRED"
+        : "SYSTEM_FAILED";
+  return {
+    ...recovered,
+    ...(preDispatchValidationFailure ? {
+      validation_failed: true,
+      dispatch_not_attempted: true,
+      containment: "NOT_CREATED",
+    } : {}),
+    execution_id: itemExecutionId,
+    status,
+    error_code: String(recovered.error_code ?? error.code ?? "P0_PACKAGE_ITEM_SYSTEM_FAILURE"),
+    error_message: String(recovered.error_message ?? error.message ?? "Package item execution failed."),
+    account_lock: String(recovered.account_lock ?? (status === "RECONCILIATION_REQUIRED" ? "HELD_FOR_RECONCILIATION" : "RELEASED")),
+  };
 }
 
 async function sha256(value: unknown) {
@@ -272,7 +341,7 @@ export async function beginPackageItemDispatch(
   return replaceItem(execution, itemExecutionId, (item) => ({
     ...item,
     status: "DISPATCHING",
-    progress: { ...item.progress, validation: "PASSED" },
+    progress: { ...item.progress, validation: "PENDING" },
     account_lock: "ACQUIRING",
     started_at: item.started_at ?? startedAt,
     updated_at: startedAt,
@@ -292,15 +361,63 @@ function providerIds(outcome: PackageItemExternalOutcome) {
   };
 }
 
-function normalizedOutcomeStatus(outcome: PackageItemExternalOutcome) {
-  const value = String(outcome.status ?? "");
-  if (value) return value;
-  if (outcome.requires_reconciliation === true || outcome.account_lock === "HELD_FOR_RECONCILIATION") return "RECONCILIATION_REQUIRED";
+const PACKAGE_ITEM_STATUSES = new Set<PackageItemStatus>([
+  "QUEUED", "DISPATCHING", "MODERATION_PENDING", "READY_TO_LAUNCH", "REJECTED_NEEDS_EDIT",
+  "PROVIDER_REJECTED", "SYSTEM_FAILED", "RECONCILIATION_REQUIRED",
+]);
+const PACKAGE_ITEM_OWNERSHIPS = new Set<PackageItemOwnership>([
+  "UNCLASSIFIED", "PENDING_PROVIDER_OUTCOME", "PROVIDER", "SYSTEM", "UNKNOWN",
+]);
+const PACKAGE_ITEM_CONTAINMENTS = new Set<PackageItemContainment>([
+  "PENDING", "NOT_CREATED", "CONFIRMED_SUSPENDED", "NON_SERVING_CONFIRMED",
+  "RECONCILIATION_REQUIRED", "MANUAL_RECONCILIATION_REQUIRED", "UNKNOWN",
+]);
+const PACKAGE_ITEM_ACCOUNT_LOCKS = new Set<PackageItemAccountLock>([
+  "NOT_ACQUIRED", "ACQUIRING", "RELEASED", "HELD_FOR_RECONCILIATION",
+]);
+const PACKAGE_PROGRESS_VALUES = {
+  validation: new Set(["PENDING", "PASSED", "FAILED"]),
+  creation: new Set(["PENDING", "NOT_ATTEMPTED", "CREATED", "REJECTED", "FAILED", "UNKNOWN"]),
+  suspension: new Set(["PENDING", "CONFIRMED_SUSPENDED", "NOT_APPLICABLE", "FAILED", "UNKNOWN"]),
+  child_graph: new Set(["PENDING", "CREATED", "NOT_APPLICABLE", "PARTIAL", "FAILED", "UNKNOWN"]),
+  readback: new Set(["PENDING", "VERIFIED", "NOT_APPLICABLE", "FAILED", "UNKNOWN"]),
+  moderation: new Set(["PENDING", "ACCEPTED", "REJECTED", "NOT_APPLICABLE", "UNKNOWN"]),
+} as const;
+
+function validItemState(item: PackageItemExecution) {
+  const progress = record(item.progress);
+  const progressKeys = Object.keys(PACKAGE_PROGRESS_VALUES);
+  if (JSON.stringify(Object.keys(progress).sort()) !== JSON.stringify(progressKeys.sort())
+    || progressKeys.some((key) => !PACKAGE_PROGRESS_VALUES[key as keyof typeof PACKAGE_PROGRESS_VALUES].has(String(progress[key])))) {
+    return false;
+  }
+  if (item.status === "QUEUED" && (item.ownership !== "UNCLASSIFIED" || item.account_lock !== "NOT_ACQUIRED" || item.started_at !== null)) return false;
+  if (item.status === "DISPATCHING" && (item.ownership !== "UNCLASSIFIED" || item.account_lock !== "ACQUIRING" || !item.started_at)) return false;
+  if (item.status === "MODERATION_PENDING" && (item.ownership !== "PENDING_PROVIDER_OUTCOME" || item.account_lock !== "RELEASED")) return false;
+  if (["READY_TO_LAUNCH", "PROVIDER_REJECTED", "REJECTED_NEEDS_EDIT", "SYSTEM_FAILED"].includes(item.status) && item.account_lock !== "RELEASED") return false;
+  if (["PROVIDER_REJECTED", "REJECTED_NEEDS_EDIT"].includes(item.status) && item.ownership !== "PROVIDER") return false;
+  if (item.status === "SYSTEM_FAILED" && item.ownership !== "SYSTEM") return false;
+  if (item.status === "RECONCILIATION_REQUIRED" && (item.ownership !== "UNKNOWN" || item.account_lock !== "HELD_FOR_RECONCILIATION")) return false;
+  const providerIds = [item.provider_ids.campaign_id, item.provider_ids.ad_group_id, item.provider_ids.keyword_id, ...item.provider_ids.ad_ids];
+  if (providerIds.some((providerId) => providerId !== null && !/^\d+$/u.test(providerId))) return false;
+  if (item.containment === "NOT_CREATED" && item.provider_ids.campaign_id) return false;
+  if (item.containment === "CONFIRMED_SUSPENDED" && (!item.provider_ids.campaign_id || item.progress.suspension !== "CONFIRMED_SUSPENDED")) return false;
+  return true;
+}
+
+function normalizedOutcomeStatus(outcome: PackageItemExternalOutcome): PackageItemStatus {
+  const value = String(outcome.status ?? "") as PackageItemStatus;
+  const accountLock = String(outcome.account_lock ?? "RELEASED");
+  if (outcome.requires_reconciliation === true
+    || accountLock === "HELD_FOR_RECONCILIATION"
+    || ["RECONCILIATION_REQUIRED", "MANUAL_RECONCILIATION_REQUIRED"].includes(String(outcome.containment ?? ""))
+    || !["RELEASED", "HELD_FOR_RECONCILIATION"].includes(accountLock)) return "RECONCILIATION_REQUIRED";
+  if (PACKAGE_ITEM_STATUSES.has(value) && !["QUEUED", "DISPATCHING"].includes(value)) return value;
   if (outcome.rejected === true) return "PROVIDER_REJECTED";
   return "SYSTEM_FAILED";
 }
 
-function outcomeOwnership(status: string, outcome: PackageItemExternalOutcome): PackageItemOwnership {
+function outcomeOwnership(status: PackageItemStatus, outcome: PackageItemExternalOutcome): PackageItemOwnership {
   if (status === "RECONCILIATION_REQUIRED" || outcome.requires_reconciliation === true || outcome.account_lock === "HELD_FOR_RECONCILIATION") return "UNKNOWN";
   if (outcome.rejected === true || status === "PROVIDER_REJECTED" || status === "REJECTED_NEEDS_EDIT") return "PROVIDER";
   if (status === "SYSTEM_FAILED" || outcome.error_code) return "SYSTEM";
@@ -311,7 +428,7 @@ function outcomeOwnership(status: string, outcome: PackageItemExternalOutcome): 
 }
 
 function outcomeProgress(
-  status: string,
+  status: PackageItemStatus,
   outcome: PackageItemExternalOutcome,
   ids: ReturnType<typeof providerIds>,
 ): PackageItemProgress {
@@ -324,9 +441,11 @@ function outcomeProgress(
   const readback = record(outcome.semantic_graph);
   const moderation = String(outcome.moderation_status ?? "");
   const notCreatedTerminal = !campaignCreated && !unknown;
+  const validationFailed = outcome.validation_failed === true;
+  const dispatchNotAttempted = outcome.dispatch_not_attempted === true;
   return {
-    validation: "PASSED",
-    creation: campaignCreated ? "CREATED" : unknown ? "UNKNOWN" : rejected ? "REJECTED" : "FAILED",
+    validation: validationFailed ? "FAILED" : "PASSED",
+    creation: dispatchNotAttempted ? "NOT_ATTEMPTED" : campaignCreated ? "CREATED" : unknown ? "UNKNOWN" : rejected ? "REJECTED" : "FAILED",
     suspension: suspended ? "CONFIRMED_SUSPENDED" : notCreatedTerminal ? "NOT_APPLICABLE" : unknown ? "UNKNOWN" : "FAILED",
     child_graph: childCount === 3 ? "CREATED" : notCreatedTerminal ? "NOT_APPLICABLE" : childCount > 0 ? "PARTIAL" : unknown ? "UNKNOWN" : "FAILED",
     readback: Object.keys(readback).length ? "VERIFIED" : notCreatedTerminal ? "NOT_APPLICABLE" : unknown ? "UNKNOWN" : "FAILED",
@@ -334,10 +453,19 @@ function outcomeProgress(
   };
 }
 
-function outcomeContainment(outcome: PackageItemExternalOutcome, progress: PackageItemProgress) {
+function outcomeContainment(outcome: PackageItemExternalOutcome, progress: PackageItemProgress): PackageItemContainment {
   if (progress.suspension === "CONFIRMED_SUSPENDED") return "CONFIRMED_SUSPENDED";
   if (!outcome.campaign_id && (outcome.rejected === true || outcome.dispatch_not_attempted === true)) return "NOT_CREATED";
-  return String(outcome.containment ?? "UNKNOWN");
+  const value = String(outcome.containment ?? "UNKNOWN") as PackageItemContainment;
+  return PACKAGE_ITEM_CONTAINMENTS.has(value) ? value : "UNKNOWN";
+}
+
+function outcomeAccountLock(outcome: PackageItemExternalOutcome): PackageItemAccountLock {
+  if (["RECONCILIATION_REQUIRED", "MANUAL_RECONCILIATION_REQUIRED"].includes(String(outcome.containment ?? ""))) {
+    return "HELD_FOR_RECONCILIATION";
+  }
+  const value = String(outcome.account_lock ?? "RELEASED") as PackageItemAccountLock;
+  return PACKAGE_ITEM_ACCOUNT_LOCKS.has(value) ? value : "HELD_FOR_RECONCILIATION";
 }
 
 export async function recordPackageItemOutcome(
@@ -365,7 +493,7 @@ export async function recordPackageItemOutcome(
     readback: Object.keys(semanticGraph).length ? structuredClone(semanticGraph) : null,
     containment: outcomeContainment(outcome, progress),
     failure: errorCode || errorMessage ? { code: errorCode || "P0_PACKAGE_ITEM_FAILED", message: errorMessage || "Package item execution failed." } : null,
-    account_lock: String(outcome.account_lock ?? "RELEASED"),
+    account_lock: outcomeAccountLock(outcome),
     updated_at: updatedAt,
   }), updatedAt);
 }
@@ -403,10 +531,15 @@ export async function verifyPackageExecution(input: {
       || !draft
       || !selectionMatchesDraft(selection, draft, input.recommendationSet)
       || item.item_execution_id !== await itemExecutionId(input.gate.package_id, input.gate.gate_id, position, selection)
+      || !PACKAGE_ITEM_STATUSES.has(item.status)
+      || !PACKAGE_ITEM_OWNERSHIPS.has(item.ownership)
+      || !PACKAGE_ITEM_CONTAINMENTS.has(item.containment)
+      || !PACKAGE_ITEM_ACCOUNT_LOCKS.has(item.account_lock)
       || !item.progress
       || !item.provider_ids
       || !Array.isArray(item.provider_ids.ad_ids)
-      || !Array.isArray(item.provider_issues)) return false;
+      || !Array.isArray(item.provider_issues)
+      || !validItemState(item)) return false;
   }
   return true;
 }

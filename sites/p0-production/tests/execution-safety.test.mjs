@@ -5,6 +5,9 @@ import JSONbigFactory from "json-bigint";
 import { buildPublishProjection } from "../lib/campaign-draft.ts";
 import { fingerprintDirectProjection } from "../lib/campaign-fanout.ts";
 import {
+  directExecutionFailureOutcome,
+} from "../lib/campaign-package-execution.ts";
+import {
   executeSafeSingleCampaign,
   mustHoldAccountLock,
 } from "../lib/execution-safety.ts";
@@ -530,6 +533,20 @@ test("fails account, capability, fingerprint, completeness and publication block
   }
 });
 
+test("maps an item preflight failure to definite NOT_CREATED validation failure", () => {
+  const error = Object.assign(new Error("Exact capability mismatch."), {
+    code: "P0_CAPABILITY_OR_ACCOUNT_MISMATCH",
+    partial: {},
+  });
+  const outcome = directExecutionFailureOutcome("execution-preflight", error);
+  assert.equal(outcome.execution_id, "execution-preflight");
+  assert.equal(outcome.status, "SYSTEM_FAILED");
+  assert.equal(outcome.validation_failed, true);
+  assert.equal(outcome.dispatch_not_attempted, true);
+  assert.equal(outcome.containment, "NOT_CREATED");
+  assert.equal(outcome.account_lock, "RELEASED");
+});
+
 test("classifies silent provider alteration as a system-owned failure and releases only after containment", async () => {
   const expected = projection();
   const publishFingerprint = await fingerprintDirectProjection(expected);
@@ -595,6 +612,7 @@ test("releases the account writer after a definite per-item provider rejection",
   assert.equal(journal.records.get("execution-1").pending_dispatch, null);
 
   let retryCalls = 0;
+  let terminalError;
   await assert.rejects(
     () => executeSafeSingleCampaign({
       execution_id: "execution-1",
@@ -607,9 +625,23 @@ test("releases the account writer after a definite per-item provider rejection",
         throw new Error("definite rejection must not be retried blindly");
       },
     }),
-    (error) => error.code === "P0_EXECUTION_ALREADY_TERMINAL",
+    (error) => {
+      terminalError = error;
+      return error.code === "P0_EXECUTION_ALREADY_TERMINAL";
+    },
   );
   assert.equal(retryCalls, 0);
+  const recoveredOutcome = directExecutionFailureOutcome("execution-1", terminalError);
+  assert.equal(recoveredOutcome.status, "PROVIDER_REJECTED");
+  assert.equal(recoveredOutcome.rejected, true);
+  assert.deepEqual(recoveredOutcome.provider_issues, [{
+    operation: "Campaigns.add",
+    severity: "ERROR",
+    code: 5001,
+    message: "Недельный бюджет ниже минимального",
+    details: "",
+  }]);
+  assert.equal(recoveredOutcome.account_lock, "RELEASED");
 });
 
 test("restart continues only from exact known provider IDs without duplicating parent or completed children", async () => {
