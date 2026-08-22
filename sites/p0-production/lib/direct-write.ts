@@ -41,6 +41,13 @@ export type DirectRecovery = {
 type DirectResult = Record<string, unknown>;
 type Fetcher = typeof fetch;
 type DirectApiIssue = { code: number | string; message: string; details: string };
+type ProviderGraphIds = { campaignId: string; adGroupId: string; keywordId: string; adId: string };
+type ProviderGraphReadback = {
+  campaign: Record<string, unknown>;
+  adGroup: Record<string, unknown>;
+  keyword: Record<string, unknown>;
+  ad: Record<string, unknown>;
+};
 
 function directApiIssues(value: unknown): DirectApiIssue[] {
   if (!Array.isArray(value)) return [];
@@ -94,9 +101,23 @@ async function callDirect(
     body: JSONbig.stringify({ method, params }),
   });
   if (!response.ok) {
-    throw new DirectWriteError("P0_DIRECT_HTTP_FAILED", `Яндекс Директ вернул HTTP ${response.status}.`);
+    throw new DirectWriteError(
+      "P0_DIRECT_HTTP_FAILED",
+      `Яндекс Директ вернул HTTP ${response.status}.`,
+      { requires_reconciliation: true, ambiguous_operation: `${service}.${method}` },
+    );
   }
-  const payload = JSONbig.parse(await response.text()) as { error?: Record<string, unknown>; result?: unknown };
+  let payload: { error?: Record<string, unknown>; result?: unknown };
+  try {
+    payload = JSONbig.parse(await response.text()) as typeof payload;
+  } catch (error) {
+    throw new DirectWriteError(
+      "P0_DIRECT_RESPONSE_INVALID",
+      "Ответ Яндекс Директа не является допустимым JSON.",
+      { requires_reconciliation: true, ambiguous_operation: `${service}.${method}` },
+      { cause: error },
+    );
+  }
   if (payload.error) {
     const apiError: DirectApiIssue = {
       code: Number.isFinite(Number(payload.error.error_code)) ? Number(payload.error.error_code) : String(payload.error.error_code ?? ""),
@@ -106,11 +127,17 @@ async function callDirect(
     throw new DirectWriteError(
       "P0_DIRECT_API_REJECTED",
       `${service}.${method}: ${issueMessage(apiError)}`,
-      { rejected: true, api_error: apiError },
+      method === "get"
+        ? { requires_reconciliation: true, api_error: apiError }
+        : { rejected: true, api_error: apiError },
     );
   }
   if (!payload.result || typeof payload.result !== "object") {
-    throw new DirectWriteError("P0_DIRECT_RESPONSE_INVALID", "Ответ Яндекс Директа не соответствует P0-контракту.");
+    throw new DirectWriteError(
+      "P0_DIRECT_RESPONSE_INVALID",
+      "Ответ Яндекс Директа не соответствует P0-контракту.",
+      { requires_reconciliation: true, ambiguous_operation: `${service}.${method}` },
+    );
   }
   return payload.result as DirectResult;
 }
@@ -199,7 +226,7 @@ function readbackRow(result: DirectResult, key: string, operation: string) {
   return rows[0] as Record<string, unknown>;
 }
 
-async function campaignReadback(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
+export async function campaignReadback(config: DirectConfig, campaignId: string, fetcher: Fetcher) {
   return readbackRow(await callDirect(
     config,
     "Campaigns",
@@ -240,7 +267,7 @@ async function keywordReadback(config: DirectConfig, keywordId: string, fetcher:
   ), "Keywords", "Keywords.get");
 }
 
-async function adReadback(config: DirectConfig, adId: string, fetcher: Fetcher) {
+export async function adReadback(config: DirectConfig, adId: string, fetcher: Fetcher) {
   return readbackRow(await callDirect(
     config,
     "Ads",
@@ -289,13 +316,8 @@ function normalizedProviderTexts(value: unknown) {
 
 function semanticGraph(
   projection: DirectProjection,
-  ids: { campaignId: string; adGroupId: string; keywordId: string; adId: string },
-  readback: {
-    campaign: Record<string, unknown>;
-    adGroup: Record<string, unknown>;
-    keyword: Record<string, unknown>;
-    ad: Record<string, unknown>;
-  },
+  ids: ProviderGraphIds,
+  readback: ProviderGraphReadback,
 ) {
   const expectedCampaign = projection.direct.campaign;
   const expectedGroup = projection.direct.ad_group;
@@ -392,7 +414,7 @@ function semanticGraph(
 async function readAndVerifyGraph(
   config: DirectConfig,
   projection: DirectProjection,
-  ids: { campaignId: string; adGroupId: string; keywordId: string; adId: string },
+  ids: ProviderGraphIds,
   fetcher: Fetcher,
 ) {
   const campaign = await campaignReadback(config, ids.campaignId, fetcher);
@@ -597,7 +619,9 @@ export async function createSuspendedCampaign(
   } catch (error) {
     if (campaignId) {
       if (error instanceof DirectWriteError && error.partial.requires_reconciliation === true) {
-        result.containment = "MANUAL_RECONCILIATION_REQUIRED";
+        result.containment = (result.steps as string[]).includes("NON_SERVING_CONFIRMED")
+          ? "NON_SERVING_CONFIRMED"
+          : "MANUAL_RECONCILIATION_REQUIRED";
       } else {
         try {
           await ensureNonServing(config, campaignId, fetcher, result);

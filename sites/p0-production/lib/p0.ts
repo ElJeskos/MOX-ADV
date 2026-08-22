@@ -137,11 +137,15 @@ async function findExactExecution(
   return null;
 }
 
+function accountLockExpiry() {
+  return new Date(Date.now() + 15 * 60_000).toISOString();
+}
+
 async function acquireAccountLock(account: string, userKeyValue: string, executionId: string) {
   const db = runtimeEnv().DB;
   const timestamp = now();
   await db.prepare("DELETE FROM p0_account_locks WHERE expires_at <= ?").bind(timestamp).run();
-  const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+  const expiresAt = accountLockExpiry();
   const result = await db
     .prepare(
       "INSERT OR IGNORE INTO p0_account_locks(account_key, execution_id, owner_key, expires_at) VALUES (?, ?, ?, ?)",
@@ -151,6 +155,14 @@ async function acquireAccountLock(account: string, userKeyValue: string, executi
   if (Number(result.meta.changes) !== 1) {
     throw new Error("Для аккаунта уже выполняется другая production-запись.");
   }
+}
+
+async function renewAccountLock(account: string, executionId: string) {
+  const result = await runtimeEnv()
+    .DB.prepare("UPDATE p0_account_locks SET expires_at = ? WHERE account_key = ? AND execution_id = ?")
+    .bind(accountLockExpiry(), account, executionId)
+    .run();
+  if (Number(result.meta.changes) !== 1) throw new Error("Direct account single-writer lease потеряна.");
 }
 
 async function releaseAccountLock(account: string, executionId: string) {
@@ -214,6 +226,7 @@ class D1DirectExecutionJournal implements DirectExecutionJournal {
   }
 
   async save(record: DirectExecutionRecord) {
+    await renewAccountLock(record.account, record.execution_id);
     const result = await runtimeEnv()
       .DB.prepare(
         "UPDATE p0_executions SET status = ?, campaign_id = COALESCE(?, campaign_id), result_json = ?, updated_at = ? WHERE execution_id = ? AND user_key = ? AND account_key = ?",

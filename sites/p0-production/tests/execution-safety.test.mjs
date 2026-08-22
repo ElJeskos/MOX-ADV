@@ -280,6 +280,85 @@ test("holds the account writer after an ambiguous add and forbids blind restart 
   assert.equal(restartCalls, 0);
 });
 
+test("bounded restart reconciliation confirms an ambiguous suspend by exact known campaign ID", async () => {
+  const expected = projection();
+  const publishFingerprint = await fingerprintDirectProjection(expected);
+  const journal = new MemoryExecutionJournal();
+  let firstCalls = 0;
+  const input = {
+    execution_id: "execution-1",
+    config: { token: "secret", account: "moxstudio" },
+    projection: expected,
+    authority: authority(publishFingerprint),
+    journal,
+    now: () => "2026-08-22T00:41:00.000Z",
+  };
+
+  await assert.rejects(
+    () => executeSafeSingleCampaign({
+      ...input,
+      fetcher: async (url, init) => {
+        firstCalls += 1;
+        const body = JSONbig.parse(String(init.body));
+        if (body.method === "add") return jsonResponse({ AddResults: [{ Id: 90071992547409931n }] });
+        throw new Error(`lost ${new URL(url).pathname}.${body.method}`);
+      },
+    }),
+    (error) => error.code === "P0_DIRECT_OUTCOME_AMBIGUOUS",
+  );
+  assert.equal(firstCalls, 2);
+  assert.equal(journal.records.get("execution-1").pending_dispatch.operation, "campaigns.suspend");
+  assert.equal(journal.records.get("execution-1").provider_ids.campaign_id, "90071992547409931");
+
+  const restartCalls = [];
+  const result = await executeSafeSingleCampaign({
+    ...input,
+    fetcher: successfulFetcher(expected, journal, restartCalls),
+    now: () => "2026-08-22T00:42:00.000Z",
+  });
+  assert.equal(result.status, "MODERATION_PENDING");
+  assert.equal(restartCalls.includes("campaigns.add"), false);
+  assert.equal(restartCalls.includes("campaigns.suspend"), false);
+  assert.equal(restartCalls.filter((operation) => operation === "campaigns.get").length, 4);
+});
+
+test("holds the writer when bounded official get retries cannot establish the graph", async () => {
+  const expected = projection();
+  const publishFingerprint = await fingerprintDirectProjection(expected);
+  const journal = new MemoryExecutionJournal();
+  const calls = [];
+  const baseFetcher = successfulFetcher(expected, journal, calls);
+  let failedReads = 0;
+
+  await assert.rejects(
+    () => executeSafeSingleCampaign({
+      execution_id: "execution-1",
+      config: { token: "secret", account: "moxstudio" },
+      projection: expected,
+      authority: authority(publishFingerprint),
+      journal,
+      fetcher: async (url, init) => {
+        const body = JSONbig.parse(String(init.body));
+        const service = new URL(url).pathname.split("/").at(-1);
+        if (`${service}.${body.method}` === "keywords.get") {
+          failedReads += 1;
+          throw new Error("readback unavailable");
+        }
+        return baseFetcher(url, init);
+      },
+      now: () => "2026-08-22T00:41:00.000Z",
+    }),
+    (error) => {
+      assert.equal(error.code, "P0_DIRECT_READBACK_AMBIGUOUS");
+      assert.equal(error.partial.account_lock, "HELD_FOR_RECONCILIATION");
+      return true;
+    },
+  );
+  assert.equal(failedReads, 2);
+  assert.equal(journal.records.get("execution-1").status, "RECONCILIATION_REQUIRED");
+  assert.equal(journal.locks.get("moxstudio"), "execution-1");
+});
+
 test("keeps an ambiguous child add intent even after confirming parent containment", async () => {
   const expected = projection();
   const publishFingerprint = await fingerprintDirectProjection(expected);
@@ -357,6 +436,20 @@ test("classifies a failed pre-dispatch journal write as system-owned without tou
   assert.equal(networkCalls, 0);
   assert.equal(journal.records.get("execution-1").status, "SYSTEM_FAILED");
   assert.equal(journal.locks.has("moxstudio"), false);
+
+  journal.save = originalSave;
+  const retryCalls = [];
+  const retried = await executeSafeSingleCampaign({
+    execution_id: "execution-1",
+    config: { token: "secret", account: "moxstudio" },
+    projection: expected,
+    authority: authority(publishFingerprint),
+    journal,
+    fetcher: successfulFetcher(expected, journal, retryCalls),
+    now: () => "2026-08-22T00:42:00.000Z",
+  });
+  assert.equal(retried.status, "MODERATION_PENDING");
+  assert.equal(retryCalls.filter((operation) => operation === "campaigns.add").length, 1);
 });
 
 test("retains the durable dispatch intent when checkpointing a known provider ID fails", async () => {

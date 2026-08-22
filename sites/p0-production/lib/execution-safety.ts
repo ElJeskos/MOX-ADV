@@ -2,6 +2,8 @@ import JSONbigFactory from "json-bigint";
 
 import { fingerprintDirectProjection } from "./campaign-fanout.ts";
 import {
+  adReadback,
+  campaignReadback,
   createSuspendedCampaign,
   DirectWriteError,
   type DirectConfig,
@@ -11,6 +13,8 @@ import {
 
 const JSONbig = JSONbigFactory({ useNativeBigInt: true });
 
+const DIRECT_REQUEST_TIMEOUT_MS = 60_000;
+const DIRECT_READ_ATTEMPTS = 2;
 const EXECUTION_SCHEMA = "p0-direct-single-campaign-execution-v1";
 const MUTATION_OPERATIONS = new Set([
   "campaigns.add",
@@ -283,6 +287,93 @@ function resultProviderIds(result: Record<string, unknown>, current: DirectExecu
   };
 }
 
+function requestWithTimeout(init?: RequestInit) {
+  return { ...init, signal: AbortSignal.timeout(DIRECT_REQUEST_TIMEOUT_MS) };
+}
+
+async function boundedDirectRead(
+  fetcher: typeof fetch,
+  url: Parameters<typeof fetch>[0],
+  init?: RequestInit,
+) {
+  let lastFailure: unknown = null;
+  for (let attempt = 0; attempt < DIRECT_READ_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetcher(url, requestWithTimeout(init));
+      if (response.ok) return response;
+      lastFailure = new Error(`Direct read returned HTTP ${response.status}.`);
+    } catch (error) {
+      lastFailure = error;
+    }
+  }
+  throw new DirectWriteError(
+    "P0_DIRECT_READBACK_AMBIGUOUS",
+    "Bounded official Direct get retries could not establish the supported graph.",
+    { requires_reconciliation: true, read_attempts: DIRECT_READ_ATTEMPTS },
+    { cause: lastFailure },
+  );
+}
+
+function addCompletedStep(record: DirectExecutionRecord, step: string) {
+  if (!record.completed_steps.includes(step)) record.completed_steps.push(step);
+}
+
+async function reconcilePendingDispatch(
+  input: SafeSingleCampaignExecutionInput,
+  record: DirectExecutionRecord,
+  now: () => string,
+) {
+  const pending = record.pending_dispatch;
+  if (!pending) return;
+  const readFetcher: typeof fetch = (url, init) => boundedDirectRead(input.fetcher ?? fetch, url, init);
+  if (pending.operation === "campaigns.suspend" && record.provider_ids.campaign_id) {
+    const campaign = await campaignReadback(input.config, record.provider_ids.campaign_id, readFetcher);
+    if (campaign.State !== "SUSPENDED") {
+      throw new DirectWriteError(
+        "P0_RECONCILIATION_REQUIRED",
+        "Campaigns.get did not confirm the ambiguous suspend as SUSPENDED.",
+        { requires_reconciliation: true, pending_dispatch: pending },
+      );
+    }
+    record.pending_dispatch = null;
+    record.status = "NON_SERVING_CONFIRMED";
+    record.result = { ...record.result, campaign_id: record.provider_ids.campaign_id, containment: "NON_SERVING_CONFIRMED" };
+    addCompletedStep(record, "NON_SERVING_CONFIRMED");
+  } else if (pending.operation === "ads.moderate" && record.provider_ids.ad_ids.length === 1) {
+    const ad = await adReadback(input.config, record.provider_ids.ad_ids[0], readFetcher);
+    const status = String(ad.Status ?? "UNKNOWN");
+    if (!["MODERATION", "PREACCEPTED", "ACCEPTED", "REJECTED"].includes(status)) {
+      throw new DirectWriteError(
+        "P0_RECONCILIATION_REQUIRED",
+        "Ads.get did not confirm the ambiguous moderation dispatch.",
+        { requires_reconciliation: true, pending_dispatch: pending, moderation_status: status },
+      );
+    }
+    record.pending_dispatch = null;
+    record.status = "MODERATION_SUBMITTED";
+    record.result = { ...record.result, ad_id: record.provider_ids.ad_ids[0], moderation_status: status };
+    addCompletedStep(record, "MODERATION_SUBMITTED");
+  } else {
+    throw new DirectWriteError(
+      "P0_RECONCILIATION_REQUIRED",
+      `Pending ${pending.operation} requires an exact known provider ID before bounded read reconciliation.`,
+      { requires_reconciliation: true, pending_dispatch: pending },
+    );
+  }
+  record.updated_at = now();
+  await input.journal.save(record);
+}
+
+function retryableBeforeDispatch(record: DirectExecutionRecord) {
+  return record.status === "SYSTEM_FAILED"
+    && record.result.dispatch_not_attempted === true
+    && record.pending_dispatch === null
+    && record.provider_ids.campaign_id === null
+    && record.provider_ids.ad_group_id === null
+    && record.provider_ids.keyword_id === null
+    && record.provider_ids.ad_ids.length === 0;
+}
+
 export async function executeSafeSingleCampaign(input: SafeSingleCampaignExecutionInput) {
   await validatePreflight(input);
   const now = input.now ?? (() => new Date().toISOString());
@@ -305,12 +396,19 @@ export async function executeSafeSingleCampaign(input: SafeSingleCampaignExecuti
     );
   }
   if (record?.pending_dispatch) {
-    await input.journal.hold(identity);
-    throw new DirectWriteError(
-      "P0_RECONCILIATION_REQUIRED",
-      `Pending ${record.pending_dispatch.operation} must be reconciled by exact known provider IDs before any retry.`,
-      { requires_reconciliation: true, pending_dispatch: record.pending_dispatch },
-    );
+    try {
+      await reconcilePendingDispatch(input, record, now);
+    } catch (error) {
+      await input.journal.hold(identity);
+      throw error;
+    }
+  }
+  if (record && retryableBeforeDispatch(record)) {
+    record.status = "PREPARED";
+    record.result = {};
+    record.completed_steps = [];
+    record.updated_at = now();
+    await input.journal.save(record);
   }
   if (record && TERMINAL_SUCCESS.has(record.status) && Object.keys(record.result).length) {
     await input.journal.release(identity);
@@ -354,7 +452,7 @@ export async function executeSafeSingleCampaign(input: SafeSingleCampaignExecuti
     if (method === "resume" || (method !== "get" && !MUTATION_OPERATIONS.has(operation))) {
       throw new DirectWriteError("P0_DIRECT_METHOD_NOT_ALLOWED", `${operation} отсутствует в P0 execution interface и allowlist.`);
     }
-    if (method === "get") return (input.fetcher ?? fetch)(url, init);
+    if (method === "get") return boundedDirectRead(input.fetcher ?? fetch, url, init);
     if (record.pending_dispatch) {
       throw new DirectWriteError(
         "P0_RECONCILIATION_REQUIRED",
@@ -382,7 +480,7 @@ export async function executeSafeSingleCampaign(input: SafeSingleCampaignExecuti
       );
     }
     try {
-      return await (input.fetcher ?? fetch)(url, init);
+      return await (input.fetcher ?? fetch)(url, requestWithTimeout(init));
     } catch (error) {
       record.status = "RECONCILIATION_REQUIRED";
       record.updated_at = now();
