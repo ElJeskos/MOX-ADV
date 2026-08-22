@@ -5,7 +5,11 @@ import JSONbigFactory from "json-bigint";
 import { buildPublishProjection } from "../lib/campaign-draft.ts";
 
 const JSONbig = JSONbigFactory({ useNativeBigInt: true });
-import { createSuspendedCampaign, DirectWriteError } from "../lib/direct-write.ts";
+import {
+  createSuspendedCampaign,
+  DirectWriteError,
+  pollSuspendedCampaignModeration,
+} from "../lib/direct-write.ts";
 
 function jsonResponse(result, status = 200) {
   return new Response(JSON.stringify({ result }), {
@@ -145,6 +149,69 @@ test("creates a real-shape Direct graph and ends owner-suspended after moderatio
     calls[0].params.Campaigns[0].UnifiedCampaign.BiddingStrategy.Network.BiddingStrategyType,
     "SERVING_OFF",
   );
+});
+
+test("polls one exact supported graph without mutation and preserves terminal ad clarification", async () => {
+  const expected = projection();
+  const calls = [];
+  const fetcher = async (url, init) => {
+    const body = JSON.parse(String(init.body));
+    const service = new URL(url).pathname.split("/").at(-1);
+    const operation = `${service}.${body.method}`;
+    calls.push(operation);
+    if (operation === "campaigns.get") return jsonResponse({ Campaigns: [{
+      Id: 101,
+      Name: expected.direct.campaign.Name,
+      Type: "UNIFIED_CAMPAIGN",
+      State: "SUSPENDED",
+      Status: "ACCEPTED",
+      StartDate: expected.direct.campaign.StartDate,
+      EndDate: expected.direct.campaign.EndDate,
+      UnifiedCampaign: expected.direct.campaign.UnifiedCampaign,
+    }] });
+    if (operation === "adgroups.get") return jsonResponse({ AdGroups: [{
+      Id: 201,
+      CampaignId: 101,
+      Type: "UNIFIED_AD_GROUP",
+      ...expected.direct.ad_group,
+    }] });
+    if (operation === "keywords.get") return jsonResponse({ Keywords: [{
+      Id: 301,
+      AdGroupId: 201,
+      Keyword: expected.direct.keyword.Keyword,
+    }] });
+    if (operation === "ads.get") return jsonResponse({ Ads: [{
+      Id: 401,
+      CampaignId: 101,
+      AdGroupId: 201,
+      Type: "TEXT_AD",
+      Status: "REJECTED",
+      State: "OFF",
+      StatusClarification: "Текст отклонён правилами площадки",
+      TextAd: expected.direct.ad.TextAd,
+    }] });
+    throw new Error(`Unexpected Direct call ${operation}`);
+  };
+
+  const result = await pollSuspendedCampaignModeration(
+    { token: "secret", account: "moxstudio" },
+    expected,
+    { campaignId: "101", adGroupId: "201", keywordId: "301", adIds: ["401"] },
+    fetcher,
+  );
+
+  assert.deepEqual(calls, ["campaigns.get", "adgroups.get", "keywords.get", "ads.get"]);
+  assert.equal(calls.some((operation) => !operation.endsWith(".get")), false);
+  assert.equal(result.campaign_state, "SUSPENDED");
+  assert.equal(result.supported_graph_verified, true);
+  assert.deepEqual(result.ad_outcomes, [{
+    ad_id: "401",
+    ad_group_id: "201",
+    status: "REJECTED",
+    status_clarification: "Текст отклонён правилами площадки",
+    provider_issues: [],
+  }]);
+  assert.equal(result.semantic_graph.campaign.State, "SUSPENDED");
 });
 
 test("preserves a Direct ad ID larger than JavaScript safe integer", async () => {

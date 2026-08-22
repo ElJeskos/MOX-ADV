@@ -17,3 +17,9 @@ The executor compares exactly one `UNIFIED_CAMPAIGN`, one `UNIFIED_AD_GROUP`, on
 - Object relationships (`CampaignId`, `AdGroupId`) and the final campaign `State=SUSPENDED` are exact.
 
 Unknown, missing, or changed selected values produce `P0_DIRECT_GRAPH_MISMATCH`, are classified as system-owned, and cannot be converted into a provider rejection. The full supported graph is read once before moderation and again after submitting the exact ad ID.
+
+## Terminal moderation readback
+
+Ticket #113 repeats the same semantic graph read in a separate bounded moderation-poll command. Each attempt and its `next_poll_at` are persisted before the official `get` calls; one HTTP request performs one due item read and never waits for moderation to finish. `MODERATION` and `PREACCEPTED` remain pending. `StatusClarification`, provider issues, and the observation history remain durable.
+
+A campaign is Direct-accepted only when the final readback still proves the complete supported graph and `State=SUSPENDED`, every published ad group has at least one final `ACCEPTED` ad, and every published ad has one visible terminal `ACCEPTED` or `REJECTED` outcome. An unknown status remains pending; a lost final suspension or semantic graph mismatch is system-owned and fails the package verdict.

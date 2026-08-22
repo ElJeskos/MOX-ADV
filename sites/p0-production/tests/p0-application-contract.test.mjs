@@ -1603,6 +1603,58 @@ async function reviewAndConfirm(application, result, draftIds) {
   });
 }
 
+function completePackageGraph({ campaignId, adGroupIds, keywordIds, adIds, campaignState = "SUSPENDED" }) {
+  const groups = adGroupIds.map((adGroupId) => ({ Id: adGroupId, CampaignId: campaignId }));
+  const keywords = keywordIds.map((keywordId, index) => ({ Id: keywordId, AdGroupId: adGroupIds[index] }));
+  const ads = adIds.map(({ adId, adGroupId }) => ({ Id: adId, CampaignId: campaignId, AdGroupId: adGroupId }));
+  return {
+    campaign: { Id: campaignId, State: campaignState },
+    ad_groups: groups,
+    keywords,
+    ads,
+  };
+}
+
+function moderationOutcome(itemExecutionId, {
+  campaignId = "701",
+  adGroupIds = ["702"],
+  ads = [{ adId: "704", adGroupId: "702", status: "MODERATION", statusClarification: null }],
+  providerIssues = [],
+  campaignState = "SUSPENDED",
+} = {}) {
+  const keywordIds = adGroupIds.map((_, index) => String(703 + index));
+  return {
+    execution_id: itemExecutionId,
+    status: "MODERATION_PENDING",
+    campaign_id: campaignId,
+    ad_group_id: adGroupIds[0],
+    keyword_id: keywordIds[0],
+    provider_ids: {
+      campaign_id: campaignId,
+      ad_group_id: adGroupIds[0],
+      keyword_id: keywordIds[0],
+      ad_group_ids: adGroupIds,
+      keyword_ids: keywordIds,
+      ad_ids: ads.map((ad) => ad.adId),
+    },
+    campaign_state: campaignState,
+    moderation_status: ads.length === 1 ? ads[0].status : "MIXED",
+    ad_outcomes: ads.map((ad) => ({
+      ad_id: ad.adId,
+      ad_group_id: ad.adGroupId,
+      status: ad.status,
+      status_clarification: ad.statusClarification,
+      provider_issues: ad.providerIssues ?? [],
+    })),
+    semantic_graph: completePackageGraph({ campaignId, adGroupIds, keywordIds, adIds: ads, campaignState }),
+    supported_graph_verified: true,
+    steps: ["CAMPAIGN_CREATED", "NON_SERVING_CONFIRMED", "AD_GROUP_CREATED", "KEYWORD_CREATED", "AD_CREATED", "OBJECT_GRAPH_VERIFIED", "MODERATION_SUBMITTED"],
+    provider_issues: providerIssues,
+    account_lock: "RELEASED",
+    spend_started: false,
+  };
+}
+
 test("ordered multi-Draft shortlist supports add/remove/positional restore, exact review and a durable no-write Gate", async (t) => {
   const value = await packageFixture(t);
   let result = value.result;
@@ -1711,6 +1763,345 @@ test("ordered multi-Draft shortlist supports add/remove/positional restore, exac
   assert.equal(value.externalWrites(), 0);
   const afterRestart = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
   assert.equal(afterRestart.state.human_decision_gate.gate_id, result.state.human_decision_gate.gate_id);
+});
+
+test("moderation polling is durable, due-time bounded, and treats PREACCEPTED as pending", async (t) => {
+  const value = await packageFixture(t);
+  const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+  let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+  let currentTime = "2026-08-21T10:01:00.000Z";
+  value.adapter.now = () => currentTime;
+  value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => moderationOutcome(item_execution_id, {
+    ads: [{ adId: "704", adGroupId: "702", status: "PREACCEPTED", statusClarification: "Автоматическая предварительная проверка" }],
+  });
+  let polls = 0;
+  value.adapter.pollPackageItemOutcome = async ({ item_execution_id }) => {
+    polls += 1;
+    return moderationOutcome(item_execution_id, {
+      ads: [{ adId: "704", adGroupId: "702", status: "MODERATION", statusClarification: "Ручная проверка продолжается" }],
+    });
+  };
+
+  result = await value.application.command("owner", {
+    action: "dispatch_package",
+    expected_revision: result.revision,
+    package_id: result.state.human_decision_gate.package_id,
+    gate_id: result.state.human_decision_gate.gate_id,
+  });
+  const item = result.state.package_execution.items[0];
+  assert.equal(result.state.package_execution.status, "PENDING");
+  assert.equal(item.status, "MODERATION_PENDING");
+  assert.equal(item.progress.moderation, "PENDING");
+  assert.equal(item.moderation.provider_status, "PREACCEPTED");
+  assert.equal(item.moderation.ad_outcomes[0].status_clarification, "Автоматическая предварительная проверка");
+  assert.equal(item.moderation.next_poll_at, "2026-08-21T10:02:00.000Z");
+  assert.equal(polls, 0, "dispatch request must not wait for terminal moderation");
+
+  const restarted = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
+  assert.equal(restarted.state.package_execution.items[0].moderation.next_poll_at, "2026-08-21T10:02:00.000Z");
+  assert.equal(restarted.workflow.allowed_commands.includes("poll_package_moderation"), true);
+  await assert.rejects(
+    new P0Application({ store: value.store, adapters: value.adapter }).command("owner", {
+      action: "poll_package_moderation",
+      expected_revision: restarted.revision,
+      package_id: restarted.state.package_execution.package_id,
+      item_execution_id: restarted.state.package_execution.items[0].item_execution_id,
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_MODERATION_POLL_NOT_DUE",
+  );
+  assert.equal(polls, 0);
+
+  currentTime = "2026-08-21T10:02:00.000Z";
+  result = await new P0Application({ store: value.store, adapters: value.adapter }).command("owner", {
+    action: "poll_package_moderation",
+    expected_revision: restarted.revision,
+    package_id: restarted.state.package_execution.package_id,
+    item_execution_id: restarted.state.package_execution.items[0].item_execution_id,
+  });
+  assert.equal(polls, 1);
+  assert.equal(result.state.package_execution.status, "PENDING");
+  assert.equal(result.state.package_execution.items[0].moderation.provider_status, "MODERATION");
+  assert.equal(result.state.package_execution.items[0].moderation.poll_attempts, 1);
+  assert.equal(result.state.package_execution.items[0].moderation.last_polled_at, currentTime);
+  assert.equal(result.state.package_execution.items[0].moderation.next_poll_at, "2026-08-21T10:03:00.000Z");
+});
+
+test("an interrupted moderation poll persists its attempt and next due time before provider readback", async (t) => {
+  const value = await packageFixture(t);
+  const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+  let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+  let currentTime = "2026-08-21T10:01:00.000Z";
+  value.adapter.now = () => currentTime;
+  value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => moderationOutcome(item_execution_id);
+  result = await value.application.command("owner", {
+    action: "dispatch_package",
+    expected_revision: result.revision,
+    package_id: result.state.human_decision_gate.package_id,
+    gate_id: result.state.human_decision_gate.gate_id,
+  });
+  const originalCompareAndSwap = value.store.compareAndSwap.bind(value.store);
+  let rejectOutcomeCheckpoint = false;
+  value.store.compareAndSwap = async (...args) => {
+    if (rejectOutcomeCheckpoint) {
+      rejectOutcomeCheckpoint = false;
+      return false;
+    }
+    return originalCompareAndSwap(...args);
+  };
+  value.adapter.pollPackageItemOutcome = async ({ item_execution_id }) => {
+    rejectOutcomeCheckpoint = true;
+    return moderationOutcome(item_execution_id, {
+      ads: [{ adId: "704", adGroupId: "702", status: "ACCEPTED", statusClarification: null }],
+    });
+  };
+  currentTime = "2026-08-21T10:02:00.000Z";
+  await assert.rejects(
+    value.application.command("owner", {
+      action: "poll_package_moderation",
+      expected_revision: result.revision,
+      package_id: result.state.package_execution.package_id,
+      item_execution_id: result.state.package_execution.items[0].item_execution_id,
+    }),
+    (error) => error instanceof P0ApplicationError && error.code === "P0_REVISION_CONFLICT",
+  );
+  value.store.compareAndSwap = originalCompareAndSwap;
+  const interrupted = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
+  assert.equal(interrupted.state.package_execution.items[0].moderation.poll_attempts, 1);
+  assert.equal(interrupted.state.package_execution.items[0].moderation.last_polled_at, null);
+  assert.equal(interrupted.state.package_execution.items[0].moderation.next_poll_at, "2026-08-21T10:03:00.000Z");
+  assert.equal(interrupted.state.package_execution.items[0].status, "MODERATION_PENDING");
+
+  currentTime = "2026-08-21T10:03:00.000Z";
+  result = await new P0Application({ store: value.store, adapters: value.adapter }).command("owner", {
+    action: "poll_package_moderation",
+    expected_revision: interrupted.revision,
+    package_id: interrupted.state.package_execution.package_id,
+    item_execution_id: interrupted.state.package_execution.items[0].item_execution_id,
+  });
+  assert.equal(result.state.package_execution.verdict, "PASS");
+  assert.equal(result.state.package_execution.items[0].moderation.poll_attempts, 2);
+});
+
+test("a campaign passes only with a complete suspended graph, one ACCEPTED ad per group, and every additional ad visible", async (t) => {
+  const value = await packageFixture(t);
+  const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+  let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+  let currentTime = "2026-08-21T10:01:00.000Z";
+  value.adapter.now = () => currentTime;
+  value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => moderationOutcome(item_execution_id, {
+    adGroupIds: ["702", "712"],
+    ads: [
+      { adId: "704", adGroupId: "702", status: "MODERATION", statusClarification: null },
+      { adId: "705", adGroupId: "702", status: "MODERATION", statusClarification: null },
+      { adId: "714", adGroupId: "712", status: "MODERATION", statusClarification: null },
+    ],
+    providerIssues: [{ operation: "Ads.moderate", severity: "WARNING", code: 101, message: "Queued", details: "Initial provider warning" }],
+  });
+  value.adapter.pollPackageItemOutcome = async ({ item_execution_id }) => moderationOutcome(item_execution_id, {
+    adGroupIds: ["702", "712"],
+    ads: [
+      { adId: "704", adGroupId: "702", status: "ACCEPTED", statusClarification: null },
+      {
+        adId: "705",
+        adGroupId: "702",
+        status: "REJECTED",
+        statusClarification: "Текст не соответствует требованиям",
+        providerIssues: [{ operation: "Ads.get", severity: "ERROR", code: "STATUS_REJECTED", message: "Ad rejected", details: "Policy detail" }],
+      },
+      { adId: "714", adGroupId: "712", status: "ACCEPTED", statusClarification: null },
+    ],
+  });
+
+  result = await value.application.command("owner", {
+    action: "dispatch_package",
+    expected_revision: result.revision,
+    package_id: result.state.human_decision_gate.package_id,
+    gate_id: result.state.human_decision_gate.gate_id,
+  });
+  currentTime = "2026-08-21T10:02:00.000Z";
+  result = await value.application.command("owner", {
+    action: "poll_package_moderation",
+    expected_revision: result.revision,
+    package_id: result.state.package_execution.package_id,
+    item_execution_id: result.state.package_execution.items[0].item_execution_id,
+  });
+
+  const item = result.state.package_execution.items[0];
+  assert.equal(result.state.package_execution.status, "PASS");
+  assert.equal(result.state.package_execution.verdict, "PASS");
+  assert.equal(item.status, "DIRECT_ACCEPTED");
+  assert.equal(item.progress.moderation, "ACCEPTED");
+  assert.equal(item.accountability.supported_graph_verified, true);
+  assert.equal(item.accountability.campaign_suspended, true);
+  assert.deepEqual(item.accountability.accepted_ad_group_ids, ["702", "712"]);
+  assert.equal(item.accountability.all_ads_terminal, true);
+  assert.equal(item.accountability.all_additional_ads_visible, true);
+  assert.equal(item.accountability.direct_accepted, true);
+  assert.equal(item.moderation.ad_outcomes.find((ad) => ad.ad_id === "705").status, "REJECTED");
+  assert.equal(item.moderation.ad_outcomes.find((ad) => ad.ad_id === "705").status_clarification, "Текст не соответствует требованиям");
+  assert.equal(item.provider_issues.some((issue) => issue.details === "Initial provider warning"), true);
+  assert.equal(item.provider_issues.some((issue) => issue.details === "Policy detail"), true);
+  assert.equal(item.moderation.observations.length, 2);
+  assert.equal(item.moderation.next_poll_at, null);
+});
+
+test("campaign acceptance waits for every ad and rejects a group without final ACCEPTED coverage", async (t) => {
+  await t.test("an additional PREACCEPTED ad keeps an otherwise accepted group pending", async (t) => {
+    const value = await packageFixture(t);
+    const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+    let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+    value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => moderationOutcome(item_execution_id, {
+      ads: [
+        { adId: "704", adGroupId: "702", status: "ACCEPTED", statusClarification: null },
+        { adId: "705", adGroupId: "702", status: "PREACCEPTED", statusClarification: "Предварительная проверка" },
+      ],
+    });
+    result = await value.application.command("owner", {
+      action: "dispatch_package",
+      expected_revision: result.revision,
+      package_id: result.state.human_decision_gate.package_id,
+      gate_id: result.state.human_decision_gate.gate_id,
+    });
+    assert.equal(result.state.package_execution.verdict, "PENDING");
+    assert.equal(result.state.package_execution.items[0].accountability.direct_accepted, false);
+    assert.equal(result.state.package_execution.items[0].accountability.all_ads_terminal, false);
+  });
+
+  await t.test("a published group with only REJECTED ads is not Direct-accepted", async (t) => {
+    const value = await packageFixture(t);
+    const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+    let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+    value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => moderationOutcome(item_execution_id, {
+      adGroupIds: ["702", "712"],
+      ads: [
+        { adId: "704", adGroupId: "702", status: "ACCEPTED", statusClarification: null },
+        { adId: "714", adGroupId: "712", status: "REJECTED", statusClarification: "Группа не имеет принятого объявления" },
+      ],
+    });
+    result = await value.application.command("owner", {
+      action: "dispatch_package",
+      expected_revision: result.revision,
+      package_id: result.state.human_decision_gate.package_id,
+      gate_id: result.state.human_decision_gate.gate_id,
+    });
+    const item = result.state.package_execution.items[0];
+    assert.equal(result.state.package_execution.verdict, "FAIL");
+    assert.equal(item.status, "REJECTED_NEEDS_EDIT");
+    assert.deepEqual(item.accountability.accepted_ad_group_ids, ["702"]);
+    assert.equal(item.accountability.all_ads_terminal, true);
+    assert.equal(item.accountability.direct_accepted, false);
+    assert.equal(item.failure.message, "Группа не имеет принятого объявления");
+  });
+});
+
+test("deterministic package verdict matrix accounts for every selected outcome", async (t) => {
+  const accepted = (itemExecutionId, suffix) => moderationOutcome(itemExecutionId, {
+    campaignId: `8${suffix}1`,
+    adGroupIds: [`8${suffix}2`],
+    ads: [{ adId: `8${suffix}4`, adGroupId: `8${suffix}2`, status: "ACCEPTED", statusClarification: null }],
+  });
+  const providerRejected = (itemExecutionId) => ({
+    execution_id: itemExecutionId,
+    status: "PROVIDER_REJECTED",
+    rejected: true,
+    error_code: "P0_DIRECT_ITEM_FAILED",
+    error_message: "Direct rejected this exact item.",
+    provider_issues: [{ operation: "Campaigns.add", severity: "ERROR", code: 5001, message: "Rejected", details: "Explicit provider detail" }],
+    containment: "NOT_CREATED",
+    account_lock: "RELEASED",
+  });
+  const containedPartial = (itemExecutionId) => ({
+    execution_id: itemExecutionId,
+    status: "PROVIDER_REJECTED",
+    rejected: true,
+    campaign_id: "881",
+    campaign_state: "SUSPENDED",
+    error_code: "P0_DIRECT_ITEM_FAILED",
+    error_message: "Direct rejected a child object.",
+    provider_issues: [{ operation: "AdGroups.add", severity: "ERROR", code: 5002, message: "Rejected", details: "Contained partial creation" }],
+    containment: "NON_SERVING_CONFIRMED",
+    account_lock: "RELEASED",
+  });
+  const systemFailed = (itemExecutionId) => ({
+    execution_id: itemExecutionId,
+    status: "SYSTEM_FAILED",
+    error_code: "P0_DIRECT_GRAPH_MISMATCH",
+    error_message: "System readback mismatch.",
+    validation_failed: true,
+    dispatch_not_attempted: true,
+    containment: "NOT_CREATED",
+    account_lock: "RELEASED",
+  });
+  const pending = (itemExecutionId, status) => moderationOutcome(itemExecutionId, {
+    campaignId: "891",
+    adGroupIds: ["892"],
+    ads: [{ adId: "894", adGroupId: "892", status, statusClarification: null }],
+  });
+  const unknown = (itemExecutionId) => ({
+    execution_id: itemExecutionId,
+    status: "OUTCOME_UNKNOWN",
+    campaign_id: "895",
+    campaign_state: "SUSPENDED",
+    containment: "NON_SERVING_CONFIRMED",
+    account_lock: "RELEASED",
+    error_code: "P0_DIRECT_STATUS_UNKNOWN",
+    error_message: "Provider returned an unknown moderation state.",
+  });
+  const reconciliation = (itemExecutionId) => ({
+    execution_id: itemExecutionId,
+    status: "RECONCILIATION_REQUIRED",
+    requires_reconciliation: true,
+    containment: "RECONCILIATION_REQUIRED",
+    account_lock: "HELD_FOR_RECONCILIATION",
+    error_code: "P0_DIRECT_OUTCOME_AMBIGUOUS",
+    error_message: "Provider write outcome is ambiguous.",
+  });
+  const suspensionLost = (itemExecutionId) => moderationOutcome(itemExecutionId, {
+    campaignId: "8991",
+    adGroupIds: ["8992"],
+    ads: [{ adId: "8994", adGroupId: "8992", status: "ACCEPTED", statusClarification: null }],
+    campaignState: "ENABLED",
+  });
+  const cases = [
+    ["all success", [accepted, accepted], "PASS"],
+    ["accepted plus explicit provider rejection", [accepted, providerRejected], "PASS_WITH_PLATFORM_REJECTIONS"],
+    ["accepted plus contained provider partial failure", [accepted, containedPartial], "PASS_WITH_PLATFORM_REJECTIONS"],
+    ["all rejected", [providerRejected, providerRejected], "FAIL"],
+    ["system failure beside accepted", [accepted, systemFailed], "FAIL"],
+    ["pending moderation", [accepted, (id) => pending(id, "MODERATION")], "PENDING"],
+    ["preaccepted", [accepted, (id) => pending(id, "PREACCEPTED")], "PENDING"],
+    ["unknown", [accepted, unknown], "PENDING"],
+    ["reconciliation", [accepted, reconciliation], "PENDING"],
+    ["final suspension loss", [accepted, suspensionLost], "FAIL"],
+  ];
+
+  for (const [name, outcomes, expectedVerdict] of cases) {
+    await t.test(name, async (t) => {
+      const value = await packageFixture(t);
+      const selected = value.result.state.recommendation_set.drafts.filter((draft) => draft.shortlist_eligible && draft.visibility === "VISIBLE").slice(0, 2);
+      let result = await reviewAndConfirm(value.application, value.result, selected.map((draft) => draft.draft_id));
+      value.adapter.createPackageItemOutcome = async ({ item_execution_id, selection }) => {
+        const index = selected.findIndex((draft) => draft.draft_id === selection.draft_id);
+        return outcomes[index](item_execution_id, String(index + 1));
+      };
+      result = await value.application.command("owner", {
+        action: "dispatch_package",
+        expected_revision: result.revision,
+        package_id: result.state.human_decision_gate.package_id,
+        gate_id: result.state.human_decision_gate.gate_id,
+      });
+      assert.equal(result.state.package_execution.verdict, expectedVerdict, name);
+      assert.equal(result.state.package_execution.status, expectedVerdict, name);
+      if (name === "system failure beside accepted") {
+        assert.equal(result.state.package_execution.items.some((item) => item.accountability.direct_accepted), true);
+        assert.equal(result.state.package_execution.items.some((item) => item.ownership === "SYSTEM"), true);
+      }
+      if (name === "final suspension loss") {
+        const failed = result.state.package_execution.items.find((item) => item.ownership === "SYSTEM");
+        assert.equal(failed.failure.code, "P0_FINAL_SUSPENSION_LOST");
+      }
+    });
+  }
 });
 
 test("confirmed package dispatches every selected Draft independently and preserves mixed item outcomes", async (t) => {
@@ -1915,7 +2306,9 @@ test("package dispatch continues after contained system failure but stops unsafe
 
     assert.equal(result.state.package_execution.items[0].provider_ids.campaign_id, "301");
     assert.equal(result.state.package_execution.items[0].progress.suspension, "FAILED");
-    assert.equal(result.state.package_execution.status, "FAIL_CLOSED");
+    assert.equal(result.state.package_execution.status, "FAIL");
+    assert.equal(result.state.package_execution.verdict, "FAIL");
+    assert.equal(result.state.package_execution.items[0].ownership, "SYSTEM");
     assert.deepEqual(calls, [selected[0].draft_id]);
     assert.equal(result.state.package_execution.items[1].status, "QUEUED");
   });
@@ -1945,7 +2338,8 @@ test("package dispatch continues after contained system failure but stops unsafe
     });
 
     assert.deepEqual(calls, [selected[0].draft_id]);
-    assert.equal(result.state.package_execution.status, "RECONCILIATION_REQUIRED");
+    assert.equal(result.state.package_execution.status, "PENDING");
+    assert.equal(result.state.package_execution.verdict, "PENDING");
     assert.equal(result.state.package_execution.items[0].ownership, "UNKNOWN");
     assert.equal(result.state.package_execution.items[0].failure.code, "P0_PACKAGE_ITEM_IDENTITY_MISMATCH");
     assert.equal(result.state.package_execution.items[1].status, "QUEUED");
@@ -1977,7 +2371,8 @@ test("package dispatch continues after contained system failure but stops unsafe
     });
 
     assert.deepEqual(calls, [selected[0].draft_id]);
-    assert.equal(result.state.package_execution.status, "RECONCILIATION_REQUIRED");
+    assert.equal(result.state.package_execution.status, "PENDING");
+    assert.equal(result.state.package_execution.verdict, "PENDING");
     assert.equal(result.state.package_execution.items[0].ownership, "UNKNOWN");
     assert.equal(result.state.package_execution.items[0].account_lock, "HELD_FOR_RECONCILIATION");
     assert.equal(result.state.package_execution.items[1].status, "QUEUED");
@@ -2136,6 +2531,48 @@ test("restart preserves a terminal provider rejection after the package outcome 
   assert.equal(recovered.state.package_execution.items[0].provider_issues[0].details, "Original provider detail");
 });
 
+test("v6 package execution migrates to durable moderation accountability without changing the item identity", async (t) => {
+  const value = await packageFixture(t);
+  const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+  const confirmed = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+  value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => moderationOutcome(item_execution_id);
+  await value.application.command("owner", {
+    action: "dispatch_package",
+    expected_revision: confirmed.revision,
+    package_id: confirmed.state.human_decision_gate.package_id,
+    gate_id: confirmed.state.human_decision_gate.gate_id,
+  });
+  const row = await value.store.load("owner");
+  const legacy = JSON.parse(row.value_json);
+  legacy.schema_version = "p0-application-document-v6";
+  const originalItemId = legacy.package_execution.items[0].item_execution_id;
+  legacy.package_execution.schema_version = "p0-package-execution-v1";
+  legacy.package_execution.contract_version = "1.0.0";
+  delete legacy.package_execution.verdict;
+  for (const item of legacy.package_execution.items) {
+    item.schema_version = "p0-package-item-execution-v1";
+    delete item.provider_ids.ad_group_ids;
+    delete item.provider_ids.keyword_ids;
+    delete item.campaign_state;
+    delete item.moderation;
+    delete item.accountability;
+  }
+  const unsignedLegacyExecution = structuredClone(legacy.package_execution);
+  delete unsignedLegacyExecution.content_hash;
+  legacy.package_execution.content_hash = await sha256ForTest(unsignedLegacyExecution);
+  await value.store.seed("owner", { ...row, value_json: JSON.stringify(legacy) });
+
+  const migrated = await new P0Application({ store: value.store, adapters: value.adapter }).query("owner");
+  assert.equal(migrated.state.schema_version, P0_DOCUMENT_SCHEMA);
+  assert.equal(migrated.state.package_execution.schema_version, "p0-package-execution-v2");
+  assert.equal(migrated.state.package_execution.contract_version, "2.0.0");
+  assert.equal(migrated.state.package_execution.items[0].item_execution_id, originalItemId);
+  assert.equal(migrated.state.package_execution.items[0].status, "MODERATION_PENDING");
+  assert.equal(migrated.state.package_execution.items[0].moderation.next_poll_at !== null, true);
+  assert.equal(migrated.state.package_execution.verdict, "PENDING");
+  assert.equal(migrated.revision, row.revision + 1);
+});
+
 test("same-schema package item outcome tampering fails closed before UI reuse", async (t) => {
   const value = await packageFixture(t);
   const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
@@ -2190,7 +2627,7 @@ test("authoritative shortlist command rejects blocked and evidence-gap Drafts wi
   assert.equal(typeof after.shortlist_controls.find((item) => item.draft_id === blocked.draft_id).disabled_reason, "string");
 });
 
-test("v5 package authority migrates to v6 without discarding the exact confirmed Gate", async (t) => {
+test("v5 package authority migrates to v7 without discarding the exact confirmed Gate", async (t) => {
   const value = await packageFixture(t);
   const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
   const confirmed = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);

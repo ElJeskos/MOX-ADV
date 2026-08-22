@@ -9,7 +9,11 @@ import {
 import { directExecutionFailureOutcome } from "./campaign-package-execution.ts";
 import { strategyAnswerValue } from "./campaign-strategy.ts";
 import { minimumWeeklyBudgetRub, validateWeeklyBudgetRub } from "./direct-limits.ts";
-import { DirectWriteError, type DirectProjection } from "./direct-write.ts";
+import {
+  DirectWriteError,
+  pollSuspendedCampaignModeration,
+  type DirectProjection,
+} from "./direct-write.ts";
 import {
   executeSafeSingleCampaign,
   type DirectExecutionIdentity,
@@ -797,6 +801,84 @@ async function createPackageItemOutcome({
   }
 }
 
+async function pollPackageItemOutcome({
+  key,
+  state,
+  item_execution_id: itemExecutionId,
+  projection,
+  item,
+}: {
+  key: string;
+  state: P0Document;
+  package_execution_id: string;
+  item_execution_id: string;
+  selection: NonNullable<P0Document["shortlist"]>["selections"][number];
+  projection: DirectProjection;
+  draft: NonNullable<P0Document["recommendation_set"]>["drafts"][number];
+  item: NonNullable<P0Document["package_execution"]>["items"][number];
+}) {
+  const config = directWriteConfig();
+  if (!config.token || !config.account) throw new Error("Direct production credentials не настроены.");
+  if (!state.human_decision_gate || state.human_decision_gate.authority.direct_account_binding.account !== config.account) {
+    throw new Error("Exact package Gate не совпадает с Direct moderation account.");
+  }
+  const row = await runtimeEnv()
+    .DB.prepare("SELECT execution_id, user_key, account_key, status, campaign_id, projection_json, result_json FROM p0_executions WHERE execution_id = ? AND user_key = ? AND account_key = ?")
+    .bind(itemExecutionId, key, config.account)
+    .first<ExecutionRow>();
+  if (!row) throw new Error("Durable Direct execution record отсутствует для moderation poll.");
+  const storedProjection = JSON.parse(row.projection_json) as DirectProjection;
+  const [storedFingerprint, requestedFingerprint] = await Promise.all([
+    fingerprintDirectProjection(storedProjection as unknown as Record<string, unknown>),
+    fingerprintDirectProjection(projection as unknown as Record<string, unknown>),
+  ]);
+  if (storedFingerprint !== requestedFingerprint || requestedFingerprint !== item.selection.publish_fingerprint) {
+    throw new Error("Moderation poll projection fingerprint не совпадает с durable item execution.");
+  }
+  const campaignId = item.provider_ids.campaign_id;
+  const adGroupId = item.provider_ids.ad_group_id;
+  const keywordId = item.provider_ids.keyword_id;
+  if (!campaignId || !adGroupId || !keywordId || item.provider_ids.ad_ids.length !== 1) {
+    throw new Error("Moderation poll требует полный набор exact core provider IDs.");
+  }
+  try {
+    return {
+      execution_id: itemExecutionId,
+      ...await pollSuspendedCampaignModeration(
+        config,
+        projection,
+        { campaignId, adGroupId, keywordId, adIds: item.provider_ids.ad_ids },
+        fetch,
+      ),
+    };
+  } catch (error) {
+    if (!(error instanceof DirectWriteError)) throw error;
+    if (error.partial.requires_reconciliation === true) {
+      return {
+        execution_id: itemExecutionId,
+        status: "OUTCOME_UNKNOWN",
+        campaign_id: campaignId,
+        provider_ids: structuredClone(item.provider_ids),
+        campaign_state: item.campaign_state,
+        containment: item.containment,
+        account_lock: "RELEASED",
+        error_code: error.code,
+        error_message: error.message,
+      };
+    }
+    return directExecutionFailureOutcome(itemExecutionId, Object.assign(error, {
+      partial: {
+        ...error.partial,
+        campaign_id: campaignId,
+        provider_ids: structuredClone(item.provider_ids),
+        campaign_state: item.campaign_state,
+        containment: item.containment,
+        account_lock: "RELEASED",
+      },
+    }));
+  }
+}
+
 async function createExternalOutcome({
   key,
   state,
@@ -872,6 +954,7 @@ const application = new P0Application({
     },
     createExternalOutcome,
     createPackageItemOutcome,
+    pollPackageItemOutcome,
   },
 });
 

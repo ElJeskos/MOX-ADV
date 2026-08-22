@@ -58,12 +58,16 @@ import {
 } from "./campaign-decision-gate.ts";
 import {
   beginPackageItemDispatch,
+  beginPackageItemModerationPoll,
   exactPackageDispatchPlans,
   initializePackageExecution,
+  migrateLegacyPackageExecution,
   packageExecutionBlocksFollowingItems,
+  packageItemModerationPollIsDue,
   recordPackageItemOutcome,
   verifyPackageExecution,
   type PackageExecution,
+  type PackageItemExecution,
   type PackageItemExternalOutcome,
 } from "./campaign-package-execution.ts";
 import {
@@ -100,9 +104,9 @@ import {
 } from "./landing-advisory.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.9.0";
-export const P0_DOCUMENT_SCHEMA = "p0-application-document-v6";
-const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4", "p0-application-document-v5"]);
+export const P0_APPLICATION_CONTRACT_VERSION = "1.10.0";
+export const P0_DOCUMENT_SCHEMA = "p0-application-document-v7";
+const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4", "p0-application-document-v5", "p0-application-document-v6"]);
 const P0_PRE_PACKAGE_AUTHORITY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4"]);
 export const P0_CONTEXT_SCHEMA = "p0-context-v2";
 const P0_LEGACY_CONTEXT_SCHEMA = "p0-context-v1";
@@ -267,6 +271,16 @@ export interface P0ApplicationAdapters {
     projection: DirectProjection;
     draft: CampaignRecommendationSet["drafts"][number];
   }): Promise<PackageItemExternalOutcome>;
+  pollPackageItemOutcome(input: {
+    key: string;
+    state: P0Document;
+    package_execution_id: string;
+    item_execution_id: string;
+    selection: P0Shortlist["selections"][number];
+    projection: DirectProjection;
+    draft: CampaignRecommendationSet["drafts"][number];
+    item: PackageItemExecution;
+  }): Promise<PackageItemExternalOutcome>;
 }
 
 export type P0Command = Record<string, unknown> & {
@@ -383,7 +397,14 @@ export const P0_COMMAND_TRUTH_TABLE = {
   dispatch_package: (state: P0Document) => Boolean(
     state.package_review
       && state.human_decision_gate
-      && (!state.package_execution || state.package_execution.status === "DISPATCHING")
+      && (!state.package_execution || state.package_execution.items.some((item) => item.status === "QUEUED" || item.status === "DISPATCHING"))
+      && !state.campaign
+      && !state.external_write_intent,
+  ),
+  poll_package_moderation: (state: P0Document) => Boolean(
+    state.package_review
+      && state.human_decision_gate
+      && state.package_execution?.items.some((item) => item.status === "MODERATION_PENDING" || item.status === "OUTCOME_UNKNOWN")
       && !state.campaign
       && !state.external_write_intent,
   ),
@@ -1632,6 +1653,14 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
         lineageError("Human Decision Gate confirmation или package authority не прошли проверку.");
       }
     }
+    if (state.package_execution && legacyDocument && record(state.package_execution).schema_version === "p0-package-execution-v1") {
+      try {
+        state.package_execution = await migrateLegacyPackageExecution(state.package_execution, updatedAt);
+        changed = true;
+      } catch (error) {
+        lineageError(`legacy package execution migration failed: ${errorMessage(error)}`);
+      }
+    }
     if (state.package_execution) {
       if (!state.human_decision_gate || !await verifyPackageExecution({
         execution: state.package_execution,
@@ -2639,6 +2668,96 @@ export class P0Application {
         await persistPackageCheckpoint(itemUpdatedAt);
         if (packageExecutionBlocksFollowingItems(state.package_execution)) break;
       }
+    } else if (action === "poll_package_moderation") {
+      if (!state.package_review || !state.human_decision_gate || !state.recommendation_set || !state.package_execution) {
+        fail("P0_PACKAGE_EXECUTION_MISSING", "Moderation poll требует current package execution и exact Human Decision Gate.");
+      }
+      if (payload.package_id !== state.package_execution.package_id) {
+        fail("P0_PACKAGE_IDENTITY_STALE", "Moderation poll package identity не совпадает с current execution.");
+      }
+      const itemExecutionId = String(payload.item_execution_id ?? "");
+      const currentItem = state.package_execution.items.find((item) => item.item_execution_id === itemExecutionId);
+      if (!currentItem) fail("P0_PACKAGE_ITEM_MISSING", "Moderation poll item execution отсутствует в selected package.");
+      const pollStartedAt = this.adapters.now();
+      if (!packageItemModerationPollIsDue(currentItem, pollStartedAt)) {
+        fail("P0_MODERATION_POLL_NOT_DUE", `Moderation poll доступен после ${currentItem.moderation.next_poll_at ?? "terminal outcome"}.`);
+      }
+      const configuration = this.adapters.externalWriteConfiguration();
+      if (!configuration.ready) fail("P0_WRITE_NOT_READY", configuration.blockers[0] ?? "Direct production credentials не настроены.");
+      if (configuration.account !== state.human_decision_gate.authority.direct_account_binding.account) {
+        fail("P0_CONTEXT_ACCOUNT_MISMATCH", "Direct poll account не совпадает с exact package Gate binding.");
+      }
+      let plans;
+      try {
+        plans = await exactPackageDispatchPlans({
+          review: state.package_review,
+          gate: state.human_decision_gate,
+          recommendationSet: state.recommendation_set,
+        });
+      } catch (error) {
+        fail("P0_PACKAGE_DISPATCH_BLOCKED", errorMessage(error));
+      }
+      const plan = plans.find((item) => item.item_execution_id === itemExecutionId);
+      if (!plan) fail("P0_PACKAGE_ITEM_MISSING", "Moderation poll item потерял exact Draft projection lineage.");
+      const persistPollCheckpoint = async (checkpointAt: string) => {
+        const checkpoint: P0StoredRow = {
+          revision: persistedRevision + 1,
+          updated_at: checkpointAt,
+          value_json: JSON.stringify(state),
+        };
+        if (!await this.store.compareAndSwap(key, persistedRevision, checkpoint)) {
+          fail("P0_REVISION_CONFLICT", "P0 изменился в другой вкладке. Moderation checkpoint не сохранён.");
+        }
+        persistedRevision = checkpoint.revision;
+      };
+      state.package_execution = await beginPackageItemModerationPoll(
+        state.package_execution,
+        itemExecutionId,
+        pollStartedAt,
+      );
+      await persistPollCheckpoint(pollStartedAt);
+      let outcome: PackageItemExternalOutcome;
+      try {
+        outcome = await this.adapters.pollPackageItemOutcome({
+          key,
+          state,
+          package_execution_id: state.package_execution.package_execution_id,
+          item_execution_id: itemExecutionId,
+          selection: plan.selection,
+          projection: plan.projection,
+          draft: plan.draft,
+          item: state.package_execution.items.find((item) => item.item_execution_id === itemExecutionId)!,
+        });
+      } catch (error) {
+        const failure = error as Error & { code?: string; partial?: Record<string, unknown> };
+        const partial = record(failure.partial);
+        outcome = {
+          ...partial,
+          execution_id: itemExecutionId,
+          status: partial.requires_reconciliation === true ? "OUTCOME_UNKNOWN" : "SYSTEM_FAILED",
+          account_lock: "RELEASED",
+          error_code: failure.code ?? "P0_MODERATION_POLL_FAILED",
+          error_message: failure.message || "Moderation poll failed.",
+        };
+      }
+      if (outcome.execution_id !== itemExecutionId) {
+        outcome = {
+          execution_id: itemExecutionId,
+          status: "OUTCOME_UNKNOWN",
+          account_lock: "RELEASED",
+          error_code: "P0_PACKAGE_ITEM_IDENTITY_MISMATCH",
+          error_message: "Moderation outcome did not match the durable package item identity.",
+        };
+      }
+      const pollCompletedAt = this.adapters.now();
+      state.package_execution = await recordPackageItemOutcome(
+        state.package_execution,
+        itemExecutionId,
+        outcome,
+        pollCompletedAt,
+        { moderationPoll: true },
+      );
+      await persistPollCheckpoint(pollCompletedAt);
     } else if (action === "confirm_creation") {
 
       if (payload.confirmation !== "CREATE_NON_SERVING_CAMPAIGN") {
@@ -2701,7 +2820,7 @@ export class P0Application {
     if (!await this.store.compareAndSwap(key, persistedRevision, next)) {
       fail("P0_REVISION_CONFLICT", "P0 изменился в другой вкладке. Обновите страницу.");
     }
-    const decisionOnly = action === "review_package" || action === "confirm_package" || action === "dispatch_package";
+    const decisionOnly = action === "review_package" || action === "confirm_package" || action === "dispatch_package" || action === "poll_package_moderation";
     const context = decisionOnly
       ? persistedDecisionContext(state)
       : sanitizeContext(await this.adapters.readContext());

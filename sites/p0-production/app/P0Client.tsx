@@ -96,7 +96,9 @@ export default function P0Client() {
           ? "Сохраняю решение владельца и начинаю полную аналитику…"
           : action === "dispatch_package"
             ? "Исполняю exact package независимо по каждой кампании…"
-            : "Сохраняю production-ревизию…",
+            : action === "poll_package_moderation"
+              ? "Проверяю один due moderation item через официальный Direct readback…"
+              : "Сохраняю production-ревизию…",
     );
     try {
       const result = await request("/api/p0", {
@@ -645,15 +647,28 @@ const executionProgressLabels = {
   moderation: "Moderation",
 } as const;
 
-function PackageExecutionPanel({ execution }: { execution: Record<string, any> }) {
+function PackageExecutionPanel({
+  execution,
+  busy,
+  canPoll,
+  poll,
+}: {
+  execution: Record<string, any>;
+  busy: boolean;
+  canPoll: boolean;
+  poll: (itemExecutionId: string) => void;
+}) {
   const items = Array.isArray(execution.items) ? execution.items : [];
   return <section className="package-executions" aria-label="Package campaign executions">
-    <header><div><p className="eyebrow">DURABLE INDEPENDENT EXECUTIONS</p><h3>Результат каждого Campaign Draft сохранён отдельно</h3><p>Package status {execution.status}. Это accountability selected set, а не атомарная транзакция и не финальный moderation verdict.</p></div><strong>{execution.dispatched_count}/{execution.selected_count}</strong></header>
+    <header><div><p className="eyebrow">DURABLE INDEPENDENT EXECUTIONS</p><h3>Результат каждого Campaign Draft сохранён отдельно</h3><p>Package verdict {execution.verdict || "PENDING"} · status {execution.status}. PASS появляется только после полной accountability selected set.</p></div><strong>{execution.dispatched_count}/{execution.selected_count}</strong></header>
     <ol>{items.map((item: Record<string, any>) => <li key={item.item_execution_id} className={`package-execution-item ${String(item.ownership || "unknown").toLowerCase()}`}>
       <header><div><span>#{Number(item.position) + 1}</span><strong>{item.selection?.draft_revision_id}</strong><code>{item.item_execution_id}</code></div><div><b>{item.status}</b><small>Ownership · {item.ownership}</small></div></header>
       <dl className="execution-progress">{Object.entries(executionProgressLabels).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{item.progress?.[key] || "PENDING"}</dd></div>)}</dl>
-      <div className="execution-identifiers"><span>Campaign <code>{item.provider_ids?.campaign_id || "—"}</code></span><span>Ad group <code>{item.provider_ids?.ad_group_id || "—"}</code></span><span>Keyword <code>{item.provider_ids?.keyword_id || "—"}</code></span><span>Ads <code>{item.provider_ids?.ad_ids?.join(", ") || "—"}</code></span></div>
+      <div className="execution-identifiers"><span>Campaign <code>{item.provider_ids?.campaign_id || "—"}</code></span><span>Ad groups <code>{item.provider_ids?.ad_group_ids?.join(", ") || item.provider_ids?.ad_group_id || "—"}</code></span><span>Keywords <code>{item.provider_ids?.keyword_ids?.join(", ") || item.provider_ids?.keyword_id || "—"}</code></span><span>Ads <code>{item.provider_ids?.ad_ids?.join(", ") || "—"}</code></span></div>
+      {item.accountability && <dl className="execution-progress"><div><dt>Graph</dt><dd>{item.accountability.supported_graph_verified ? "VERIFIED" : "PENDING"}</dd></div><div><dt>Non-serving</dt><dd>{item.accountability.campaign_suspended ? "SUSPENDED" : "UNCONFIRMED"}</dd></div><div><dt>Ads terminal</dt><dd>{item.accountability.all_ads_terminal ? "YES" : "NO"}</dd></div><div><dt>Direct accepted</dt><dd>{item.accountability.direct_accepted ? "YES" : "NO"}</dd></div></dl>}
       <footer><span>Containment · <strong>{item.containment}</strong></span><span>Account lock · <strong>{item.account_lock}</strong></span></footer>
+      {item.moderation?.next_poll_at && <p className="execution-failure" role="status"><strong>Next moderation poll</strong> · {item.moderation.next_poll_at} · attempts {item.moderation.poll_attempts}<button type="button" disabled={busy || !canPoll} onClick={() => poll(String(item.item_execution_id))}>Проверить due item</button></p>}
+      {Array.isArray(item.moderation?.ad_outcomes) && item.moderation.ad_outcomes.length > 0 && <details><summary>Ad moderation outcomes · {item.moderation.ad_outcomes.length}</summary><ul>{item.moderation.ad_outcomes.map((ad: Record<string, any>) => <li key={ad.ad_id}><strong>{ad.ad_id} · {ad.status}</strong><span>{ad.status_clarification || "StatusClarification отсутствует"}</span></li>)}</ul></details>}
       {item.failure && <p className="execution-failure" role="status"><strong>{item.failure.code}</strong> · {item.failure.message}</p>}
       {Array.isArray(item.provider_issues) && item.provider_issues.length > 0 && <details><summary>Provider details · {item.provider_issues.length}</summary><ul>{item.provider_issues.map((issue: Record<string, any>, index: number) => <li key={`${issue.operation}-${issue.code}-${index}`}><strong>{issue.operation} · {issue.code}</strong><span>{issue.message}{issue.details ? ` · ${issue.details}` : ""}</span></li>)}</ul></details>}
       {item.readback && <details><summary>Semantic readback</summary><code>{JSON.stringify(item.readback)}</code></details>}
@@ -666,6 +681,7 @@ function ConfirmationStep({ payload, apply, busy, back }: { payload: Payload; ap
   const review = payload.state.package_review;
   const gate = payload.state.human_decision_gate;
   const execution = payload.state.package_execution;
+  const canDispatch = payload.workflow.allowed_commands.includes("dispatch_package");
   const authority = review?.authority;
   const selections = Array.isArray(authority?.ordered_selections) ? authority.ordered_selections : [];
   if (!review || !authority) {
@@ -696,9 +712,14 @@ function ConfirmationStep({ payload, apply, busy, back }: { payload: Payload; ap
     </section>
     <div className="confirmation"><p className="eyebrow">НЕАТОМАРНЫЙ ПАКЕТ</p><h3>Кампании исполняются и оцениваются независимо</h3><p>{authority.orchestration.disclosure} Confirmation сохраняет durable authority и timestamp, но не вызывает Direct, не deploy’ит, не запускает показы и не начинает spend.</p></div>
     {gate ? <section className="gate-confirmed" role="status"><strong>Human Decision Gate подтверждён</strong><p>{gate.confirmed_at} · {gate.gate_id}</p><small>External writes performed: {execution ? "YES, independently" : "NO"} · transactionality promised: NO</small></section> : <div className="decision-confirm"><input aria-label="Подтверждаю точный пакет и независимое исполнение кампаний" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю точный reviewed package</strong><small>Authority относится только к package {String(review.package_id).slice(0, 20)}…; каждая выбранная кампания будет dispatch/contain/moderate/evaluate независимо.</small></span></div>}
-    {execution && <PackageExecutionPanel execution={execution} />}
+    {execution && <PackageExecutionPanel
+      execution={execution}
+      busy={busy}
+      canPoll={payload.workflow.allowed_commands.includes("poll_package_moderation")}
+      poll={(itemExecutionId) => void apply("poll_package_moderation", undefined, { package_id: execution.package_id, item_execution_id: itemExecutionId })}
+    />}
     <footer className="actions"><span>Ревизия {payload.revision} · independent durable item executions</span><button type="button" className="secondary" disabled={busy} onClick={back}>Назад к shortlist</button>{!gate
       ? <button type="button" disabled={busy || !confirmed} onClick={() => void apply("confirm_package", undefined, { confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id })}>Подтвердить authority пакета</button>
-      : <button type="button" disabled={busy || !payload.workflow.allowed_commands.includes("dispatch_package")} onClick={() => void apply("dispatch_package", undefined, { package_id: gate.package_id, gate_id: gate.gate_id })}>{execution?.status === "DISPATCHING" ? "Продолжить безопасное исполнение" : execution ? "Package dispatch зафиксирован" : "Исполнить подтверждённый пакет"}</button>}</footer>
+      : <button type="button" disabled={busy || !canDispatch} onClick={() => void apply("dispatch_package", undefined, { package_id: gate.package_id, gate_id: gate.gate_id })}>{canDispatch && execution ? "Продолжить безопасное исполнение" : execution ? "Package dispatch зафиксирован" : "Исполнить подтверждённый пакет"}</button>}</footer>
   </>;
 }

@@ -424,6 +424,72 @@ async function readAndVerifyGraph(
   return semanticGraph(projection, ids, { campaign, adGroup, keyword, ad });
 }
 
+export async function pollSuspendedCampaignModeration(
+  config: DirectConfig,
+  projection: DirectProjection,
+  providerIds: { campaignId: string; adGroupId: string; keywordId: string; adIds: string[] },
+  fetcher: Fetcher = fetch,
+) {
+  if (!config.token || !config.account) {
+    throw new DirectWriteError("P0_WRITE_CREDENTIAL_MISSING", "Direct production credentials не настроены.");
+  }
+  if (providerIds.adIds.length !== 1) {
+    throw new DirectWriteError(
+      "P0_PROJECTION_INCOMPLETE",
+      "Core Direct moderation poll requires exactly one known TEXT_AD ID.",
+    );
+  }
+  for (const providerId of [providerIds.campaignId, providerIds.adGroupId, providerIds.keywordId, ...providerIds.adIds]) {
+    directId(providerId);
+  }
+  const ids: ProviderGraphIds = {
+    campaignId: providerIds.campaignId,
+    adGroupId: providerIds.adGroupId,
+    keywordId: providerIds.keywordId,
+    adId: providerIds.adIds[0],
+  };
+  const graph = await readAndVerifyGraph(config, projection, ids, fetcher);
+  const moderation = String(graph.ad.Status ?? "UNKNOWN");
+  const status = moderation === "ACCEPTED"
+    ? "DIRECT_ACCEPTED"
+    : moderation === "REJECTED"
+      ? "REJECTED_NEEDS_EDIT"
+      : ["MODERATION", "PREACCEPTED"].includes(moderation)
+        ? "MODERATION_PENDING"
+        : "OUTCOME_UNKNOWN";
+  return {
+    status,
+    campaign_id: providerIds.campaignId,
+    ad_group_id: providerIds.adGroupId,
+    keyword_id: providerIds.keywordId,
+    provider_ids: {
+      campaign_id: providerIds.campaignId,
+      ad_group_id: providerIds.adGroupId,
+      keyword_id: providerIds.keywordId,
+      ad_group_ids: [providerIds.adGroupId],
+      keyword_ids: [providerIds.keywordId],
+      ad_ids: structuredClone(providerIds.adIds),
+    },
+    campaign_state: String(graph.campaign.State ?? "UNKNOWN"),
+    moderation_status: moderation,
+    ad_outcomes: [{
+      ad_id: providerIds.adIds[0],
+      ad_group_id: providerIds.adGroupId,
+      status: moderation,
+      status_clarification: graph.ad.StatusClarification === null || graph.ad.StatusClarification === undefined
+        ? null
+        : String(graph.ad.StatusClarification),
+      provider_issues: [],
+    }],
+    semantic_graph: graph.semantic_graph,
+    supported_graph_verified: true,
+    provider_issues: [],
+    steps: ["OBJECT_GRAPH_VERIFIED", "MODERATION_POLLED"],
+    account_lock: "RELEASED",
+    spend_started: false,
+  };
+}
+
 async function suspendAndReadback(
   config: DirectConfig,
   campaignId: string,
@@ -602,7 +668,7 @@ export async function createSuspendedCampaign(
     const finalGraph = await readAndVerifyGraph(config, projection, ids, fetcher);
     const moderation = String(finalGraph.ad.Status ?? "UNKNOWN");
     const status = moderation === "ACCEPTED"
-      ? "READY_TO_LAUNCH"
+      ? "DIRECT_ACCEPTED"
       : moderation === "REJECTED"
         ? "REJECTED_NEEDS_EDIT"
         : "MODERATION_PENDING";
@@ -611,7 +677,25 @@ export async function createSuspendedCampaign(
       status,
       campaign_state: String(finalGraph.campaign.State ?? "UNKNOWN"),
       moderation_status: moderation,
+      provider_ids: {
+        campaign_id: campaignId,
+        ad_group_id: adGroupId,
+        keyword_id: keywordId,
+        ad_group_ids: [adGroupId],
+        keyword_ids: [keywordId],
+        ad_ids: [adId],
+      },
+      ad_outcomes: [{
+        ad_id: adId,
+        ad_group_id: adGroupId,
+        status: moderation,
+        status_clarification: finalGraph.ad.StatusClarification === null || finalGraph.ad.StatusClarification === undefined
+          ? null
+          : String(finalGraph.ad.StatusClarification),
+        provider_issues: [],
+      }],
       semantic_graph: finalGraph.semantic_graph,
+      supported_graph_verified: true,
       spend_started: false,
     };
     await onProgress(status, completed);

@@ -88,6 +88,11 @@ test("confirmation renders independent durable item progress and dispatches only
   assert.match(clientSource, /Moderation/u);
   assert.match(clientSource, /item\.ownership/u);
   assert.match(clientSource, /item\.provider_issues/u);
+  assert.match(clientSource, /Package verdict/u);
+  assert.match(clientSource, /next_poll_at/u);
+  assert.match(clientSource, /poll_package_moderation/u);
+  assert.match(clientSource, /status_clarification/u);
+  assert.match(clientSource, /item\.accountability\.direct_accepted/u);
   assert.match(clientSource, /item\.containment/u);
   assert.match(styles, /\.package-executions \{[^}]*min-width: 0/u);
   assert.match(styles, /\.execution-progress \{[^}]*grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/u);
