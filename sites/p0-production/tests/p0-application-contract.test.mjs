@@ -1636,6 +1636,11 @@ test("ordered multi-Draft shortlist supports add/remove/positional restore, exac
     value.application.command("owner", { action: "remove_from_shortlist", expected_revision: staleRemoveTab.revision, draft_id: second.draft_id }),
     (error) => error instanceof P0ApplicationError && error.code === "P0_REVISION_CONFLICT",
   );
+  result = await value.application.command("owner", { action: "remove_from_shortlist", expected_revision: result.revision, draft_id: second.draft_id });
+  assert.deepEqual(result.state.shortlist.selections, []);
+  assert.deepEqual(result.state.shortlist.removed_selections.map((item) => item.removed_index).sort((left, right) => left - right), [0, 1]);
+  result = await value.application.command("owner", { action: "restore_to_shortlist", expected_revision: result.revision, draft_id: second.draft_id });
+  assert.deepEqual(result.state.shortlist.selections.map((item) => item.draft_id), [second.draft_id]);
   result = await value.application.command("owner", { action: "restore_to_shortlist", expected_revision: result.revision, draft_id: first.draft_id });
   assert.deepEqual(result.state.shortlist.selections.map((item) => item.draft_id), [first.draft_id, second.draft_id]);
   assert.deepEqual(result.state.shortlist.removed_selections, []);
@@ -1689,6 +1694,13 @@ test("ordered multi-Draft shortlist supports add/remove/positional restore, exac
   assert.deepEqual(result.state.human_decision_gate.authority, review.authority);
   assert.equal(result.state.human_decision_gate.external_transactionality_promised, false);
   assert.equal(result.state.human_decision_gate.external_writes_performed, false);
+  const confirmedGate = JSON.stringify(result.state.human_decision_gate);
+  const confirmedReview = JSON.stringify(result.state.package_review);
+  const readsBeforeReopen = value.contextReads();
+  result = await restarted.command("owner", { action: "review_package", expected_revision: result.revision });
+  assert.equal(value.contextReads(), readsBeforeReopen, "reopening a current review must remain adapter-free");
+  assert.equal(JSON.stringify(result.state.package_review), confirmedReview);
+  assert.equal(JSON.stringify(result.state.human_decision_gate), confirmedGate);
   await assert.rejects(
     restarted.command("owner", { action: "confirm_package", expected_revision: result.revision, confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id }),
     (error) => error instanceof P0ApplicationError && error.code === "P0_TRANSITION_INVALID",

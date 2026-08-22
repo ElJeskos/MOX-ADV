@@ -190,7 +190,7 @@ export default function P0Client() {
             {step === 0 && <ContextStep payload={payload} busy={Boolean(busy)} apply={apply} />}
             {step === 1 && <ModelStep payload={payload} apply={apply} back={() => setStep(0)} />}
             {step === 2 && <StrategyStep payload={payload} apply={apply} back={() => setStep(1)} />}
-            {step === 3 && <DraftStep payload={payload} apply={apply} back={() => setStep(2)} />}
+            {step === 3 && <DraftStep payload={payload} apply={apply} back={() => setStep(2)} openReview={() => setStep(4)} />}
             {step === 4 && <ConfirmationStep payload={payload} apply={apply} busy={Boolean(busy)} back={() => setStep(3)} />}
             {busy && <p className="notice">{busy}</p>}
             {error && <p className="notice error">{error}</p>}
@@ -478,7 +478,7 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
   </>;
 }
 
-function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; back: () => void }) {
+function DraftStep({ payload, apply, back, openReview }: { payload: Payload; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>; back: () => void; openReview: () => void }) {
   const existing = payload.state.draft || {};
   const recommendationSet = payload.state.recommendation_set || {};
   const shortlist = payload.state.shortlist || { selections: [], removed_selections: [] };
@@ -610,9 +610,9 @@ function DraftStep({ payload, apply, back }: { payload: Payload; apply: (action:
     <section className="shortlist-footer" aria-label="Persistent shortlist summary">
       <div><p className="eyebrow">ORDERED SHORTLIST · {shortlistSelections.length}</p><strong>{shortlistSelections.length ? "Точный пакет выбранных Campaign Drafts" : "Добавьте publish-ready Drafts"}</strong><small>Footer не зависит от card filters. Порядок выбора фиксируется в package authority.</small></div>
       <ol>{shortlistSelections.map((item: Record<string, any>) => <li key={item.draft_id}><span>{item.draft_revision_id}</span><code>{String(item.publish_fingerprint || "").slice(0, 18)}…</code></li>)}</ol>
-      <button type="button" disabled={!shortlistSelections.length} onClick={() => void apply("review_package")}>Открыть package review</button>
+      <button type="button" disabled={!shortlistSelections.length} onClick={() => payload.state.package_review ? openReview() : void apply("review_package")}>{payload.state.package_review ? "Открыть current package review" : "Создать package review"}</button>
     </section>
-    {payload.state.last_decision_invalidation && <p className="decision-invalidation" role="status"><strong>Предыдущая authority инвалидирована:</strong> {payload.state.last_decision_invalidation.reason}</p>}
+    {payload.state.last_decision_invalidation && !payload.state.package_review && <p className="decision-invalidation" role="status"><strong>Предыдущая authority инвалидирована:</strong> {payload.state.last_decision_invalidation.reason}</p>}
     <footer className="actions"><span>{filteredDrafts.length} Drafts в canvas · {drafts.length} persisted Draft candidates</span><button type="button" className="secondary" onClick={() => void apply("recalculate_recommendations")}>Проверить active playbook</button><button type="button" className="secondary" onClick={back}>Назад</button></footer>
     {drawerOpen && selected?.draft_id && <div className="drawer-layer">
       <aside ref={drawerRef} className="campaign-drawer" role="dialog" aria-modal="true" aria-labelledby="campaign-drawer-title">
@@ -667,7 +667,6 @@ function ConfirmationStep({ payload, apply, busy, back }: { payload: Payload; ap
       </dl>
     </section>
     <div className="confirmation"><p className="eyebrow">НЕАТОМАРНЫЙ ПАКЕТ</p><h3>Кампании исполняются и оцениваются независимо</h3><p>{authority.orchestration.disclosure} Confirmation сохраняет durable authority и timestamp, но не вызывает Direct, не deploy’ит, не запускает показы и не начинает spend.</p></div>
-    {payload.state.last_decision_invalidation && <p className="decision-invalidation"><strong>Последняя invalidation:</strong> {payload.state.last_decision_invalidation.reason}</p>}
     {gate ? <section className="gate-confirmed" role="status"><strong>Human Decision Gate подтверждён</strong><p>{gate.confirmed_at} · {gate.gate_id}</p><small>External writes performed: NO · transactionality promised: NO</small></section> : <div className="decision-confirm"><input aria-label="Подтверждаю точный пакет и независимое исполнение кампаний" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю точный reviewed package</strong><small>Authority относится только к package {String(review.package_id).slice(0, 20)}…; каждая выбранная кампания будет dispatch/contain/moderate/evaluate независимо.</small></span></div>}
     <footer className="actions"><span>Ревизия {payload.revision} · durable decision only · no external write</span><button type="button" className="secondary" disabled={busy} onClick={back}>Назад к shortlist</button><button type="button" disabled={busy || Boolean(gate) || !confirmed} onClick={() => void apply("confirm_package", undefined, { confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id })}>{gate ? "Gate уже подтверждён" : "Подтвердить authority пакета"}</button></footer>
   </>;

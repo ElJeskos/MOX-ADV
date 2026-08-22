@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   emptyShortlist,
+  restoredInsertionIndex,
   selectionForDraft,
   shortlistSelectionBlockReason,
+  stableRemovedIndex,
   verifyShortlist,
 } from "../lib/campaign-decision-gate.ts";
 
@@ -58,6 +60,46 @@ test("shortlist eligibility rejects hidden, hard-blocked and unresolved evidence
   });
   assert.equal(shortlistSelectionBlockReason(evidenceGap), "Demand evidence gap remains unresolved.");
   assert.throws(() => selectionForDraft(evidenceGap, recommendationSet([evidenceGap])), /evidence gap/u);
+
+  const scoreBlocked = eligibleDraft({
+    viability_score: {
+      eligibility: {
+        status: "BLOCKED_UNKNOWN",
+        blockers: [{ code: "DIRECT_CAPABILITY_MISSING", remediation: "Persist exact capability.", input_pointer: "/draft/capability_selection" }],
+      },
+      evidence_gaps: { status: "RESOLVED", required: [] },
+    },
+  });
+  assert.equal(
+    shortlistSelectionBlockReason(scoreBlocked),
+    "DIRECT_CAPABILITY_MISSING: Persist exact capability.: /draft/capability_selection",
+  );
+
+  const scoreGap = eligibleDraft({
+    viability_score: {
+      eligibility: { status: "ELIGIBLE", blockers: [] },
+      evidence_gaps: {
+        status: "UNRESOLVED",
+        required: [{ code: "DEMAND_SCOPE_MISSING", description: "Official demand scope unavailable.", input_pointer: "/evidence/frequency" }],
+      },
+    },
+  });
+  assert.equal(
+    shortlistSelectionBlockReason(scoreGap),
+    "DEMAND_SCOPE_MISSING: Official demand scope unavailable.: /evidence/frequency",
+  );
+});
+
+test("positional restore keeps insertion order when multiple Drafts are removed and restored in any order", () => {
+  const removed = [];
+  const first = { draft_id: "a", removed_index: stableRemovedIndex(0, removed) };
+  removed.push(first);
+  const second = { draft_id: "b", removed_index: stableRemovedIndex(0, removed) };
+  removed.push(second);
+  assert.deepEqual(removed.map((item) => item.removed_index), [0, 1]);
+  assert.equal(restoredInsertionIndex(second, removed, 1), 0);
+  const afterSecond = removed.filter((item) => item.draft_id !== second.draft_id);
+  assert.equal(restoredInsertionIndex(first, afterSecond, 2), 0);
 });
 
 test("versioned empty shortlist is valid but exact selected lineage tampering fails closed", async () => {

@@ -93,7 +93,6 @@ export type DecisionInvalidationReason =
   | "ACCOUNT_OR_CAPABILITY_LINEAGE_CHANGED"
   | "EVIDENCE_LINEAGE_CHANGED"
   | "PLAYBOOK_REGENERATION"
-  | "PACKAGE_REVIEW_REPLACED"
   | "LEGACY_AUTHORITY_REQUIRES_REVIEW";
 
 export type DecisionInvalidation = {
@@ -122,6 +121,22 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function hasExactKeys(value: unknown, expected: string[]) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value as Record<string, unknown>).sort();
+  return JSON.stringify(actual) === JSON.stringify([...expected].sort());
+}
+
+function issueReason(value: unknown, fallback: string) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  const issue = record(value);
+  const code = String(issue.code ?? "").trim();
+  const explanation = String(issue.message ?? issue.remediation ?? issue.description ?? "").trim();
+  const pointer = String(issue.input_pointer ?? issue.field_path ?? "").trim();
+  const bounded = [code, explanation, pointer].filter(Boolean).join(": ");
+  return bounded || fallback;
+}
+
 function exactSelection(draft: DraftRecord, recommendationSet: CampaignRecommendationSet): ShortlistSelection {
   return {
     draft_id: String(draft.draft_id ?? ""),
@@ -147,13 +162,13 @@ export function shortlistSelectionBlockReason(draft: Record<string, unknown> | n
   const score = record(draft.viability_score);
   const eligibility = record(score.eligibility);
   if (eligibility.status !== "ELIGIBLE") {
-    const scoreBlockers = Array.isArray(eligibility.blockers) ? eligibility.blockers.map(String).filter(Boolean) : [];
-    return scoreBlockers[0] ?? `Hard eligibility: ${String(eligibility.status ?? "BLOCKED_UNKNOWN")}.`;
+    const blocker = Array.isArray(eligibility.blockers) ? eligibility.blockers[0] : null;
+    return issueReason(blocker, `Hard eligibility: ${String(eligibility.status ?? "BLOCKED_UNKNOWN")}.`);
   }
   const gaps = record(score.evidence_gaps);
   if (gaps.status !== "RESOLVED") {
-    const required = Array.isArray(gaps.required) ? gaps.required.map(String).filter(Boolean) : [];
-    return required[0] ?? "Required evidence gaps не разрешены.";
+    const gap = Array.isArray(gaps.required) ? gaps.required[0] : null;
+    return issueReason(gap, "Required evidence gaps не разрешены.");
   }
   if (draft.shortlist_eligible !== true) return "Draft не прошёл authoritative shortlist eligibility.";
   return null;
@@ -223,21 +238,37 @@ export async function verifyShortlist(
   strategyRevisionId: string,
 ) {
   const candidate = record(shortlist) as P0Shortlist;
-  if (candidate.schema_version !== SHORTLIST_SCHEMA
+  if (!hasExactKeys(candidate, [
+    "schema_version", "contract_version", "shortlist_revision_id", "strategy_revision_id",
+    "recommendation_set_id", "ordering", "selections", "removed_selections", "updated_at", "content_hash",
+  ])
+    || candidate.schema_version !== SHORTLIST_SCHEMA
     || candidate.contract_version !== "2.0.0"
     || candidate.ordering !== "INSERTION_ORDER_WITH_POSITIONAL_RESTORE"
     || !candidate.shortlist_revision_id
+    || !candidate.updated_at
     || candidate.strategy_revision_id !== strategyRevisionId
     || candidate.recommendation_set_id !== recommendationSet.recommendation_set_id
     || !Array.isArray(candidate.selections)
-    || !Array.isArray(candidate.removed_selections)) return false;
+    || !Array.isArray(candidate.removed_selections)
+    || candidate.selections.some((item) => !hasExactKeys(item, [
+      "draft_id", "draft_revision_id", "publish_fingerprint", "strategy_revision_id",
+      "capability_profile_id", "capability_profile_version", "recommendation_set_id",
+    ]))
+    || candidate.removed_selections.some((item) => !hasExactKeys(item, [
+      "draft_id", "draft_revision_id", "publish_fingerprint", "strategy_revision_id",
+      "capability_profile_id", "capability_profile_version", "recommendation_set_id", "removed_at", "removed_index",
+    ]))) return false;
   const unsigned = { ...candidate } as Record<string, unknown>;
   delete unsigned.content_hash;
   if (candidate.content_hash !== await sha256(unsigned)) return false;
   const selectedIds = candidate.selections.map((item) => item.draft_id);
   if (new Set(selectedIds).size !== selectedIds.length) return false;
   const removedIds = candidate.removed_selections.map((item) => item.draft_id);
-  if (new Set(removedIds).size !== removedIds.length || removedIds.some((id) => selectedIds.includes(id))) return false;
+  const removedIndexes = candidate.removed_selections.map((item) => item.removed_index);
+  if (new Set(removedIds).size !== removedIds.length
+    || new Set(removedIndexes).size !== removedIndexes.length
+    || removedIds.some((id) => selectedIds.includes(id))) return false;
   for (const item of [...candidate.selections, ...candidate.removed_selections]) {
     const draft = recommendationSet.drafts.find((entry) => entry.draft_id === item.draft_id);
     if (!draft || shortlistSelectionBlockReason(draft)) return false;
@@ -253,6 +284,26 @@ export async function verifyShortlist(
     if (!equalSelection(exactSelection(draft, recommendationSet), persistedIdentity)) return false;
   }
   return candidate.removed_selections.every((item) => Number.isSafeInteger(item.removed_index) && item.removed_index >= 0 && Boolean(item.removed_at));
+}
+
+export function stableRemovedIndex(currentIndex: number, removedSelections: RemovedShortlistSelection[]) {
+  let stableIndex = currentIndex;
+  for (;;) {
+    const next = currentIndex + removedSelections.filter((item) => item.removed_index <= stableIndex).length;
+    if (next === stableIndex) return stableIndex;
+    stableIndex = next;
+  }
+}
+
+export function restoredInsertionIndex(
+  removed: RemovedShortlistSelection,
+  removedSelections: RemovedShortlistSelection[],
+  selectedCount: number,
+) {
+  const stillRemovedBefore = removedSelections.filter((item) =>
+    item.draft_id !== removed.draft_id && item.removed_index < removed.removed_index
+  ).length;
+  return Math.max(0, Math.min(removed.removed_index - stillRemovedBefore, selectedCount));
 }
 
 export async function rebaseShortlist(input: {

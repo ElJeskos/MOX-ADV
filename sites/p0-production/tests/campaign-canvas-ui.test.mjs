@@ -58,7 +58,9 @@ test("card shortlist controls, persistent exact footer and package Gate disclose
   assert.match(clientSource, /aria-label="Persistent shortlist summary"/u);
   assert.match(clientSource, /draft_revision_id/u);
   assert.match(clientSource, /publish_fingerprint/u);
-  assert.match(clientSource, /Открыть package review/u);
+  assert.match(clientSource, /Создать package review/u);
+  assert.match(clientSource, /Открыть current package review/u);
+  assert.match(clientSource, /payload\.state\.package_review \? openReview\(\) : void apply\("review_package"\)/u);
   assert.match(clientSource, /Точный immutable package review/u);
   assert.match(clientSource, /Analytics Evidence Snapshot/u);
   assert.match(clientSource, /Direct account binding/u);

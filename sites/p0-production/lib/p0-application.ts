@@ -40,8 +40,10 @@ import {
   emptyShortlist,
   PACKAGE_CONFIRMATION_TOKEN,
   rebaseShortlist,
+  restoredInsertionIndex,
   reviseShortlist,
   selectionForDraft,
+  stableRemovedIndex,
   shortlistSelectionBlockReason,
   verifyDecisionInvalidation,
   verifyHumanDecisionGate,
@@ -2393,7 +2395,7 @@ export class P0Application {
         const [removed] = selections.splice(index, 1);
         removedSelections = [
           ...removedSelections.filter((item) => item.draft_id !== draftId),
-          { ...removed, removed_at: changedAt, removed_index: index },
+          { ...removed, removed_at: changedAt, removed_index: stableRemovedIndex(index, removedSelections) },
         ];
       } else {
         const removed = removedSelections.find((item) => item.draft_id === draftId);
@@ -2404,7 +2406,6 @@ export class P0Application {
         } catch (error) {
           fail("P0_SHORTLIST_BLOCKED", errorMessage(error));
         }
-        const removedIndex = removed.removed_index;
         const removedIdentity = {
           draft_id: removed.draft_id,
           draft_revision_id: removed.draft_revision_id,
@@ -2417,19 +2418,21 @@ export class P0Application {
         if (JSON.stringify(removedIdentity) !== JSON.stringify(exact)) {
           fail("P0_SHORTLIST_STALE", "Removed Draft revision больше не совпадает с current authoritative Draft.");
         }
-        selections.splice(Math.min(removedIndex, selections.length), 0, exact);
+        selections.splice(restoredInsertionIndex(removed, removedSelections, selections.length), 0, exact);
         removedSelections = removedSelections.filter((item) => item.draft_id !== draftId);
       }
-      await invalidateDecisionAuthority(
-        state,
-        action === "restore_to_shortlist" ? "SHORTLIST_ORDER_CHANGED" : "SHORTLIST_MEMBERSHIP_CHANGED",
-        action === "add_to_shortlist"
-          ? "Draft added to ordered shortlist."
-          : action === "remove_from_shortlist"
-            ? "Draft removed from ordered shortlist without changing Recommendation Set evidence or candidate audit."
-            : "Removed Draft restored at its previous shortlist position.",
-        changedAt,
-      );
+      if (state.package_review || state.human_decision_gate || state.shortlist.selections.length > 0) {
+        await invalidateDecisionAuthority(
+          state,
+          action === "restore_to_shortlist" ? "SHORTLIST_ORDER_CHANGED" : "SHORTLIST_MEMBERSHIP_CHANGED",
+          action === "add_to_shortlist"
+            ? "Draft added to ordered shortlist."
+            : action === "remove_from_shortlist"
+              ? "Draft removed from ordered shortlist without changing Recommendation Set evidence or candidate audit."
+              : "Removed Draft restored at its previous shortlist position.",
+          changedAt,
+        );
+      }
       state.shortlist = await reviseShortlist({
         previous: state.shortlist,
         shortlistRevisionId: `p0-shortlist-r${current.revision + 1}`,
@@ -2445,23 +2448,22 @@ export class P0Application {
       const reviewedAt = this.adapters.now();
       const binding = directAccountBinding(state);
       if (!binding) fail("P0_PACKAGE_ACCOUNT_BINDING_INVALID", "Exact Direct account binding отсутствует.");
-      if (state.package_review || state.human_decision_gate) {
-        await invalidateDecisionAuthority(state, "PACKAGE_REVIEW_REPLACED", "A fresh immutable package review replaced prior review authority.", reviewedAt);
+      if (!state.package_review) {
+        try {
+          state.package_review = await buildPackageReview({
+            shortlist: state.shortlist,
+            recommendationSet: state.recommendation_set,
+            strategyRevisionId: String(state.strategy.strategy_revision_id ?? ""),
+            accountBinding: binding,
+            capabilitySnapshot: state.context_state.facts.direct.capability_snapshot as unknown as Record<string, unknown>,
+            analyticsEvidenceSnapshotId: state.analytics_evidence_snapshot.snapshot_id,
+            reviewedAt,
+          });
+        } catch (error) {
+          fail("P0_PACKAGE_STALE", errorMessage(error));
+        }
+        state.human_decision_gate = null;
       }
-      try {
-        state.package_review = await buildPackageReview({
-          shortlist: state.shortlist,
-          recommendationSet: state.recommendation_set,
-          strategyRevisionId: String(state.strategy.strategy_revision_id ?? ""),
-          accountBinding: binding,
-          capabilitySnapshot: state.context_state.facts.direct.capability_snapshot as unknown as Record<string, unknown>,
-          analyticsEvidenceSnapshotId: state.analytics_evidence_snapshot.snapshot_id,
-          reviewedAt,
-        });
-      } catch (error) {
-        fail("P0_PACKAGE_STALE", errorMessage(error));
-      }
-      state.human_decision_gate = null;
     } else if (action === "confirm_package") {
       if (payload.confirmation !== PACKAGE_CONFIRMATION_TOKEN) {
         fail("P0_PACKAGE_CONFIRMATION_REQUIRED", `Нужно точное подтверждение ${PACKAGE_CONFIRMATION_TOKEN}.`);
