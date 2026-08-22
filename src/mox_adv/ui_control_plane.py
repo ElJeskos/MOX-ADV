@@ -23,6 +23,7 @@ from mox_adv.control_state import (
     AuthenticatedPrincipal,
     ControlRejected,
     DurableControlState,
+    ElevatedAuthenticatedPrincipal,
     ExecutionRecord,
     ExecutionStatus,
     TrustedScope,
@@ -323,7 +324,7 @@ class DashboardControlPlane:
         self,
         scope: str,
         reason: str,
-        principal: AuthenticatedPrincipal,
+        principal: ElevatedAuthenticatedPrincipal,
         now: datetime,
     ) -> dict[str, Any]:
         self.control_state.release_kill_switch(scope, reason, principal, now)

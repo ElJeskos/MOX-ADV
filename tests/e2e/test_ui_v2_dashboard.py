@@ -6,10 +6,15 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from playwright.sync_api import Page, sync_playwright
 
-from mox_adv.control_state import AuthenticatedPrincipal
+from mox_adv.control_state import (
+    AuthenticatedPrincipal,
+    ElevatedAuthenticatedPrincipal,
+    MacOSElevatedSecurityVerifier,
+)
 from mox_adv.ui_server import build_server
 from mox_adv.ui_service import UiRunService
 from tests.test_yandex_read import (
@@ -30,8 +35,16 @@ class StubDashboardAuthenticator:
         )
 
     @classmethod
-    def elevated_reauthenticate(cls) -> AuthenticatedPrincipal:
-        return cls.authenticate()
+    def elevated_reauthenticate(cls) -> ElevatedAuthenticatedPrincipal:
+        with patch.object(
+            MacOSElevatedSecurityVerifier,
+            "verify",
+            return_value=True,
+        ):
+            return ElevatedAuthenticatedPrincipal.verified(
+                cls.authenticate(),
+                MacOSElevatedSecurityVerifier(),
+            )
 
 
 def fill_autopilot_safe_scenario(page: Page) -> None:

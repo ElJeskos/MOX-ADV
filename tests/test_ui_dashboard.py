@@ -7,7 +7,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from mox_adv.control_state import AuthenticatedPrincipal
+from mox_adv.control_state import (
+    AuthenticatedPrincipal,
+    ElevatedAuthenticatedPrincipal,
+    MacOSElevatedSecurityVerifier,
+)
 from mox_adv.e2e_evidence import verify_e2e_artifact_manifest
 from mox_adv.ui_dashboard import DashboardApplication
 from mox_adv.ui_service import UiRunService
@@ -24,9 +28,17 @@ class StubDashboardAuthenticator:
             authentication="authenticated_macos_user",
         )
 
-    def elevated_reauthenticate(self) -> AuthenticatedPrincipal:
+    def elevated_reauthenticate(self) -> ElevatedAuthenticatedPrincipal:
         self.elevated_calls += 1
-        return self.authenticate()
+        with patch.object(
+            MacOSElevatedSecurityVerifier,
+            "verify",
+            return_value=True,
+        ):
+            return ElevatedAuthenticatedPrincipal.verified(
+                self.authenticate(),
+                MacOSElevatedSecurityVerifier(),
+            )
 
 
 class DashboardApplicationTests(unittest.TestCase):

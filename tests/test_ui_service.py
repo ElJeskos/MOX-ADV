@@ -635,9 +635,15 @@ class UiRunServiceTests(unittest.TestCase):
                 production_reader=StubProductionReader(),
             )
 
-            with patch(
-                "mox_adv.ui_service._execute_simulated_change"
-            ) as execute_change:
+            with (
+                patch("mox_adv.ui_service.datetime", wraps=datetime) as clock,
+                patch(
+                    "mox_adv.ui_service._execute_simulated_change"
+                ) as execute_change,
+            ):
+                clock.now.return_value = datetime.fromisoformat(
+                    "2026-07-28T12:00:00+00:00"
+                )
                 report = service.run("production")
 
             self.assertEqual("SUCCEEDED", report["status"])

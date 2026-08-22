@@ -5,12 +5,15 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from mox_adv.commands import OptimizationAction, calculate_relative_target
 from mox_adv.control_state import (
     AuthenticatedPrincipal,
     ControlRejected,
     DurableControlState,
+    ElevatedAuthenticatedPrincipal,
+    MacOSElevatedSecurityVerifier,
     PreparedChange,
     TrustedScope,
 )
@@ -33,6 +36,18 @@ def principal(identity: str = "sviridov") -> AuthenticatedPrincipal:
         identity=identity,
         authentication="authenticated_macos_user",
     )
+
+
+def elevated_principal() -> ElevatedAuthenticatedPrincipal:
+    with patch.object(
+        MacOSElevatedSecurityVerifier,
+        "verify",
+        return_value=True,
+    ):
+        return ElevatedAuthenticatedPrincipal.verified(
+            principal(),
+            MacOSElevatedSecurityVerifier(),
+        )
 
 
 def prepared_change(proposal_id: str = "proposal-ui-control") -> PreparedChange:
@@ -272,7 +287,7 @@ class DashboardControlPlaneTests(unittest.TestCase):
         released = self.facade.release_kill_switch(
             "campaign:campaign-1",
             "Incident resolved.",
-            principal(),
+            elevated_principal(),
             NOW + timedelta(minutes=1),
         )
         self.assertFalse(released["active"])
