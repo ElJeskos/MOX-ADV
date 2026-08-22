@@ -89,6 +89,8 @@ export type PackageItemAccountability = {
   published_ad_group_ids: string[];
   published_ad_ids: string[];
   accepted_ad_group_ids: string[];
+  all_selected_ad_ids_visible: boolean;
+  moderation_relationships_verified: boolean;
   all_ads_terminal: boolean;
   all_additional_ads_visible: boolean;
   direct_accepted: boolean;
@@ -328,6 +330,8 @@ function emptyAccountability(): PackageItemAccountability {
     published_ad_group_ids: [],
     published_ad_ids: [],
     accepted_ad_group_ids: [],
+    all_selected_ad_ids_visible: false,
+    moderation_relationships_verified: false,
     all_ads_terminal: false,
     all_additional_ads_visible: false,
     direct_accepted: false,
@@ -395,11 +399,15 @@ export async function initializePackageExecution(input: {
   });
 }
 
+const INCOMPLETE_ACCOUNTABILITY_STATUSES = new Set<PackageItemStatus>([
+  "MODERATION_PENDING", "OUTCOME_UNKNOWN", "RECONCILIATION_REQUIRED",
+]);
+const ACTIVE_DISPATCH_STATUSES = new Set<PackageItemStatus>(["QUEUED", "DISPATCHING"]);
+
 function packageVerdict(items: PackageItemExecution[]): PackageVerdict {
+  if (items.some((item) => INCOMPLETE_ACCOUNTABILITY_STATUSES.has(item.status))) return "PENDING";
   if (items.some((item) => item.ownership === "SYSTEM" || item.status === "SYSTEM_FAILED")) return "FAIL";
-  if (items.some((item) => [
-    "QUEUED", "DISPATCHING", "MODERATION_PENDING", "OUTCOME_UNKNOWN", "RECONCILIATION_REQUIRED",
-  ].includes(item.status))) return "PENDING";
+  if (items.some((item) => ACTIVE_DISPATCH_STATUSES.has(item.status))) return "PENDING";
   const accepted = items.filter((item) => item.accountability.direct_accepted);
   if (!accepted.length) return "FAIL";
   if (accepted.length === items.length) return "PASS";
@@ -411,10 +419,8 @@ function packageVerdict(items: PackageItemExecution[]): PackageVerdict {
 
 function packageStatus(items: PackageItemExecution[], verdict: PackageVerdict): PackageExecution["status"] {
   if (verdict !== "PENDING") return verdict;
-  const dispatching = items.some((item) => item.status === "QUEUED" || item.status === "DISPATCHING");
-  const moderationOrUnknown = items.some((item) => [
-    "MODERATION_PENDING", "OUTCOME_UNKNOWN", "RECONCILIATION_REQUIRED",
-  ].includes(item.status));
+  const dispatching = items.some((item) => ACTIVE_DISPATCH_STATUSES.has(item.status));
+  const moderationOrUnknown = items.some((item) => INCOMPLETE_ACCOUNTABILITY_STATUSES.has(item.status));
   return dispatching && !moderationOrUnknown ? "DISPATCHING" : "PENDING";
 }
 
@@ -529,15 +535,6 @@ function outcomeAdRows(
   });
 }
 
-function mergeAdOutcomes(
-  previous: PackageAdModerationOutcome[],
-  current: PackageAdModerationOutcome[],
-) {
-  const byId = new Map(previous.map((item) => [item.ad_id, structuredClone(item)]));
-  for (const item of current) byId.set(item.ad_id, structuredClone(item));
-  return [...byId.values()];
-}
-
 function aggregateModerationStatus(outcomes: PackageAdModerationOutcome[]): PackageItemModeration["provider_status"] {
   if (!outcomes.length) return "NOT_SUBMITTED";
   const statuses = [...new Set(outcomes.map((item) => item.status))];
@@ -586,9 +583,17 @@ function accountabilityEvidence(input: {
     && keywordRelationsMatch
     && adRelationsMatch;
   const outcomeIds = input.adOutcomes.map((item) => item.ad_id);
-  const allAdditionalAdsVisible = input.ids.ad_ids.length > 0
+  const allSelectedAdIdsVisible = input.ids.ad_ids.length > 0
     && input.adOutcomes.length === input.ids.ad_ids.length
     && exactIdSet(outcomeIds, input.ids.ad_ids);
+  const adById = new Map(ads.map((item) => [String(item.Id ?? ""), item]));
+  const moderationRelationshipsVerified = allSelectedAdIdsVisible && input.adOutcomes.every((item) => {
+    const ad = adById.get(item.ad_id);
+    return Boolean(ad)
+      && input.ids.ad_group_ids.includes(item.ad_group_id)
+      && String(ad?.AdGroupId ?? "") === item.ad_group_id;
+  });
+  const allAdditionalAdsVisible = allSelectedAdIdsVisible && moderationRelationshipsVerified;
   const allAdsTerminal = allAdditionalAdsVisible && input.adOutcomes.every((item) => item.terminal);
   const acceptedGroupIds = input.ids.ad_group_ids.filter((groupId) => input.adOutcomes.some((item) => item.ad_group_id === groupId && item.accepted));
   const campaignSuspended = input.campaignState === "SUSPENDED" && campaign.State === "SUSPENDED";
@@ -602,6 +607,8 @@ function accountabilityEvidence(input: {
     published_ad_group_ids: structuredClone(input.ids.ad_group_ids),
     published_ad_ids: structuredClone(input.ids.ad_ids),
     accepted_ad_group_ids: acceptedGroupIds,
+    all_selected_ad_ids_visible: allSelectedAdIdsVisible,
+    moderation_relationships_verified: moderationRelationshipsVerified,
     all_ads_terminal: allAdsTerminal,
     all_additional_ads_visible: allAdditionalAdsVisible,
     direct_accepted: directAccepted,
@@ -628,7 +635,11 @@ function mergeIssues(
 
 function explicitProviderOutcome(status: PackageItemStatus, issues: Array<Record<string, unknown>>, adOutcomes: PackageAdModerationOutcome[]) {
   return ["PROVIDER_REJECTED", "REJECTED_NEEDS_EDIT"].includes(status)
-    && (issues.length > 0 || (adOutcomes.length > 0 && adOutcomes.every((item) => item.terminal)));
+    && (issues.length > 0 || (
+      adOutcomes.length > 0
+      && adOutcomes.every((item) => item.terminal)
+      && adOutcomes.some((item) => item.status === "REJECTED")
+    ));
 }
 
 function normalizedOutcomeStatus(input: {
@@ -649,9 +660,12 @@ function normalizedOutcomeStatus(input: {
   if (requested === "SYSTEM_FAILED") return "SYSTEM_FAILED";
   if (input.evidence.direct_accepted) return "DIRECT_ACCEPTED";
   if (input.adOutcomes.length > 0) {
+    if (!input.evidence.all_selected_ad_ids_visible) return "OUTCOME_UNKNOWN";
     if (input.adOutcomes.some((item) => item.status === "UNKNOWN")) return "OUTCOME_UNKNOWN";
     if (input.adOutcomes.some((item) => item.status === "MODERATION" || item.status === "PREACCEPTED")) return "MODERATION_PENDING";
+    if (!input.evidence.moderation_relationships_verified) return "SYSTEM_FAILED";
     if (!input.evidence.supported_graph_verified || !input.evidence.campaign_suspended) return "SYSTEM_FAILED";
+    if (!input.adOutcomes.some((item) => item.status === "REJECTED")) return "SYSTEM_FAILED";
     return "REJECTED_NEEDS_EDIT";
   }
   if (input.ids.campaign_id && input.campaignState !== "SUSPENDED") return "SYSTEM_FAILED";
@@ -741,6 +755,12 @@ function failureFor(
   if (status === "SYSTEM_FAILED" && !evidence.supported_graph_verified) {
     return { code: "P0_DIRECT_GRAPH_INCOMPLETE", message: "Final Direct readback did not prove the complete supported graph." };
   }
+  if (status === "SYSTEM_FAILED" && !evidence.moderation_relationships_verified) {
+    return { code: "P0_MODERATION_RELATIONSHIP_MISMATCH", message: "Moderation outcomes do not match the final supported graph relationships." };
+  }
+  if (status === "SYSTEM_FAILED" && adOutcomes.length > 0 && !adOutcomes.some((item) => item.status === "REJECTED")) {
+    return { code: "P0_CAMPAIGN_ACCEPTANCE_INVARIANT", message: "Final accepted ad outcomes did not satisfy every published group." };
+  }
   return null;
 }
 
@@ -757,7 +777,11 @@ export async function recordPackageItemOutcome(
     const readback = Object.keys(semanticGraph).length ? structuredClone(semanticGraph) : item.readback;
     const campaignState = outcome.campaign_state ? String(outcome.campaign_state) : item.campaign_state;
     const observedAds = outcomeAdRows(outcome, ids, updatedAt);
-    const adOutcomes = mergeAdOutcomes(item.moderation.ad_outcomes, observedAds);
+    const hasCurrentAdObservation = Array.isArray(outcome.ad_outcomes)
+      || Boolean(outcome.moderation_status && ids.ad_ids.length === 1);
+    const adOutcomes = hasCurrentAdObservation
+      ? structuredClone(observedAds)
+      : item.moderation.ad_outcomes;
     const observedProviderStatus = observedAds.length
       ? aggregateModerationStatus(observedAds)
       : item.moderation.provider_status;
@@ -802,7 +826,7 @@ export async function recordPackageItemOutcome(
         next_poll_at: pending ? nextPollAt(updatedAt) : null,
         ad_outcomes: adOutcomes,
         observations: observation
-          ? [...item.moderation.observations, observation].slice(-100)
+          ? [...item.moderation.observations, observation]
           : item.moderation.observations,
       },
       accountability: {
