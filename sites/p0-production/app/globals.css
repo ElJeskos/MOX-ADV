@@ -61,6 +61,12 @@ body::before {
 .hero p:not(.eyebrow) { max-width: 840px; margin: 0; color: var(--muted); font-size: 14px; }
 .real-badge { display: inline-flex; align-items: center; min-height: 38px; padding: 0 18px; border: 1px solid #9fc8b0; border-radius: 999px; color: var(--green-dark); background: var(--green-soft); font-size: 9px; letter-spacing: .06em; }
 .real-badge::before { width: 7px; height: 7px; margin-right: 9px; border-radius: 50%; background: var(--green); content: ""; }
+.fixture-acceptance-banner { display: grid; grid-template-columns: auto 1fr; gap: 8px 18px; margin: 14px 0 -8px; padding: 11px 14px; border: 1px solid #d2a64a; border-radius: 9px; background: #fff7df; color: #5c4310; }
+.fixture-acceptance-banner > strong { font-size: 9px; letter-spacing: .04em; }
+.fixture-acceptance-banner > span { color: #795f24; font-size: 9px; }
+.fixture-acceptance-banner details { grid-column: 1 / -1; font-size: 9px; }
+.fixture-acceptance-banner summary { cursor: pointer; font-weight: 800; }
+.fixture-acceptance-banner pre { max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 
 .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; margin: 26px 0; padding: 0; list-style: none; }
 .steps button { display: grid; grid-template-columns: 30px 1fr; gap: 10px; width: 100%; min-height: 66px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: rgba(255,255,255,.72); text-align: left; }

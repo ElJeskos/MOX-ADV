@@ -1,5 +1,11 @@
+import { env } from "cloudflare:workers";
+import { localP0E2EFixtureScenario } from "../../../lib/p0-e2e-boundary";
 import { P0ApplicationError } from "../../../lib/p0-application";
-import { applyAction, overview, userKey } from "../../../lib/p0";
+import {
+  applyAction as productionApplyAction,
+  overview as productionOverview,
+  userKey,
+} from "../../../lib/p0";
 
 function failure(error: unknown) {
   return {
@@ -8,9 +14,32 @@ function failure(error: unknown) {
   };
 }
 
+function localFixtureScenario(request: Request) {
+  return localP0E2EFixtureScenario(
+    request.url,
+    (env as unknown as { P0_E2E_FIXTURE_SCENARIO?: string })
+      .P0_E2E_FIXTURE_SCENARIO,
+  );
+}
+
+async function fixtureBackend(request: Request) {
+  const scenario = localFixtureScenario(request);
+  if (!scenario) return null;
+  const fixture = await import("../../../lib/p0-e2e-runtime");
+  const key = userKey(request);
+  return {
+    overview: () => fixture.fixtureOverview(scenario, key),
+    applyAction: (payload: Record<string, unknown>) => fixture.fixtureApplyAction(scenario, key, payload),
+  };
+}
+
 export async function GET(request: Request) {
   try {
-    return Response.json(await overview(userKey(request)));
+    const fixture = await fixtureBackend(request);
+    const value = fixture
+      ? await fixture.overview()
+      : await productionOverview(userKey(request));
+    return Response.json(value);
   } catch (error) {
     return Response.json(failure(error), { status: 503 });
   }
@@ -19,7 +48,11 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const payload = (await request.json()) as Record<string, unknown>;
-    return Response.json(await applyAction(userKey(request), payload), { status: 201 });
+    const fixture = await fixtureBackend(request);
+    const value = fixture
+      ? await fixture.applyAction(payload)
+      : await productionApplyAction(userKey(request), payload);
+    return Response.json(value, { status: 201 });
   } catch (error) {
     return Response.json(failure(error), { status: 409 });
   }

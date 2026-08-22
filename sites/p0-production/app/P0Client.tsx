@@ -42,6 +42,7 @@ type Payload = {
   decision_readiness: { ready: boolean; blockers: string[]; confirmed: boolean; independent_execution: true; external_writes_performed: boolean };
   revision_history?: Array<Record<string, any>>;
   write_readiness: { ready: boolean; blockers: string[] };
+  fixture_acceptance_evidence?: Record<string, any>;
 };
 
 async function request(path: string, init?: RequestInit) {
@@ -162,6 +163,8 @@ export default function P0Client() {
           <strong className="real-badge">ТОЛЬКО РЕАЛЬНЫЕ ДАННЫЕ</strong>
         </section>
 
+        {payload.fixture_acceptance_evidence && <FixtureAcceptanceEvidence evidence={payload.fixture_acceptance_evidence} />}
+
         <ol className="steps" aria-label="Путь создания кампании">
           {steps.map(({ id, label, detail }, index) => (
             <li key={id}>
@@ -205,6 +208,17 @@ export default function P0Client() {
       </main>
     </div>
   );
+}
+
+function FixtureAcceptanceEvidence({ evidence }: { evidence: Record<string, any> }) {
+  return <section className="fixture-acceptance-banner">
+    <strong>DETERMINISTIC PROVIDER FIXTURE · NO EXTERNAL NETWORK OR MONEY</strong>
+    <span>Localhost-only acceptance harness; production bindings and credentials are not loaded.</span>
+    <details aria-label="Deterministic provider fixture evidence">
+      <summary>Machine-readable acceptance evidence · {evidence.calls?.length || 0} provider calls</summary>
+      <pre>{JSON.stringify(evidence, null, 2)}</pre>
+    </details>
+  </section>;
 }
 
 function Connection({ label, ready, detail }: { label: string; ready: boolean; detail?: string }) {

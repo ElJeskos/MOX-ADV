@@ -1,0 +1,861 @@
+{
+  "fixture": {
+    "application": {
+      "analytics_evidence_snapshot_id": "sha256:055bb84649d3c6f44bd17fb96406bb002cd161110a0674fbfeb06179220a69a3",
+      "corrections": [
+        {
+          "campaign_states": [
+            "SUSPENDED"
+          ],
+          "corrected_draft_revision_id": "draft-b36db1388dfcd72b2621-r2",
+          "corrected_publish_fingerprint": "sha256:66b369405a09a1828985876810037f2cb5d96ee3c8c51567e008cd8829237b34",
+          "correction_id": "sha256:269656a03fb4867495faba4971821b78c317a6fdfbb4fa0198cda5cabae745c7",
+          "item_statuses": [
+            "DIRECT_ACCEPTED"
+          ],
+          "source_initial_package_verdict": "PASS_WITH_PLATFORM_REJECTIONS",
+          "source_item_execution_id": "sha256:cc36a33d66148de4d57dbeea16212a31cb9f2addb8d7da3cc7e3a3f297958671",
+          "status": "PASS_AFTER_CORRECTION",
+          "terminal_outcome": "PASS_AFTER_CORRECTION"
+        }
+      ],
+      "document_revision": 33,
+      "landing_advisory": {
+        "axe_incomplete": 1,
+        "lighthouse_runs": 5,
+        "run_id": "landing-advisory:sha256:63caca0ea27b28e90a9fb22e3335064c0adf493d7619e905ba3f0280fc912cfc",
+        "tool_versions": {
+          "axe_core": "4.10.3",
+          "chrome": "136.0.7103.113",
+          "lighthouse": "12.8.2",
+          "lighthouse_config": "p0-lighthouse-desktop-1920x1080-v1"
+        }
+      },
+      "package": {
+        "gate_id": "sha256:d73a4883e68328a030695a27b510c1df7eb305db90f287da26c35f1d2d366caa",
+        "items": [
+          {
+            "account_lock": "RELEASED",
+            "campaign_state": "SUSPENDED",
+            "containment": "CONFIRMED_SUSPENDED",
+            "direct_accepted": true,
+            "draft_revision_id": "draft-61a2a2a36c1546fa889a-r2",
+            "item_execution_id": "sha256:95cb8f785db7b6b46aa520adc0fbd3287b7d421135d11fcea02ef18b298ef892",
+            "ownership": "PROVIDER",
+            "provider_ids": {
+              "ad_group_id": "7102",
+              "ad_group_ids": [
+                "7102"
+              ],
+              "ad_ids": [
+                "7104"
+              ],
+              "campaign_id": "7101",
+              "keyword_id": "7103",
+              "keyword_ids": [
+                "7103"
+              ]
+            },
+            "publish_fingerprint": "sha256:11ed410bf4fdb201e8d3b998d36bb822d415385687dc25e7e0255e90d8346b3b",
+            "status": "DIRECT_ACCEPTED"
+          },
+          {
+            "account_lock": "RELEASED",
+            "campaign_state": "SUSPENDED",
+            "containment": "CONFIRMED_SUSPENDED",
+            "direct_accepted": false,
+            "draft_revision_id": "draft-b36db1388dfcd72b2621-r1",
+            "item_execution_id": "sha256:cc36a33d66148de4d57dbeea16212a31cb9f2addb8d7da3cc7e3a3f297958671",
+            "ownership": "PROVIDER",
+            "provider_ids": {
+              "ad_group_id": "7202",
+              "ad_group_ids": [
+                "7202"
+              ],
+              "ad_ids": [
+                "7204"
+              ],
+              "campaign_id": "7201",
+              "keyword_id": "7203",
+              "keyword_ids": [
+                "7203"
+              ]
+            },
+            "publish_fingerprint": "sha256:36bb8f2a50ee3991341fe6e6029491db84819b650bfeadb127e9d3946499b0c6",
+            "status": "REJECTED_NEEDS_EDIT"
+          }
+        ],
+        "package_id": "sha256:f46681c57e1bf4055898ecced7b298e150a7d4c6fe2545f6d9d59fb2fb732707",
+        "package_review_id": "sha256:b476dec8f69bc26cd2aa27239e9b1bea40eda53fecc609d6816e9df6f9f9b7ef",
+        "status": "PASS_WITH_PLATFORM_REJECTIONS",
+        "verdict": "PASS_WITH_PLATFORM_REJECTIONS"
+      },
+      "recommendation_set_id": "recommendation-set-revision:f70bf2ab5a05ad2f2f403b29",
+      "selected_drafts": [
+        {
+          "capability_profile_id": "direct-v501-unified-search-explicit-text",
+          "capability_profile_version": "1.0.0",
+          "draft_id": "draft-61a2a2a36c1546fa889a",
+          "draft_revision_id": "draft-61a2a2a36c1546fa889a-r2",
+          "publish_fingerprint": "sha256:11ed410bf4fdb201e8d3b998d36bb822d415385687dc25e7e0255e90d8346b3b",
+          "recommendation_set_id": "recommendation-set-revision:f70bf2ab5a05ad2f2f403b29",
+          "strategy_revision_id": "campaign-strategy-r5"
+        },
+        {
+          "capability_profile_id": "direct-v501-unified-search-explicit-text",
+          "capability_profile_version": "1.0.0",
+          "draft_id": "draft-b36db1388dfcd72b2621",
+          "draft_revision_id": "draft-b36db1388dfcd72b2621-r1",
+          "publish_fingerprint": "sha256:36bb8f2a50ee3991341fe6e6029491db84819b650bfeadb127e9d3946499b0c6",
+          "recommendation_set_id": "recommendation-set-revision:f70bf2ab5a05ad2f2f403b29",
+          "strategy_revision_id": "campaign-strategy-r5"
+        }
+      ],
+      "strategy_revision_id": "campaign-strategy-r5"
+    },
+    "calls": [
+      {
+        "kind": "MUTATION",
+        "operation": "campaigns.add",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0001",
+        "response_id": "fixture-response-0001"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "campaigns.suspend",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0002",
+        "response_id": "fixture-response-0002"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0003",
+        "response_id": "fixture-response-0003"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "adgroups.add",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0004",
+        "response_id": "fixture-response-0004"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "keywords.add",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0005",
+        "response_id": "fixture-response-0005"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "ads.add",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0006",
+        "response_id": "fixture-response-0006"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0007",
+        "response_id": "fixture-response-0007"
+      },
+      {
+        "kind": "READ",
+        "operation": "adgroups.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0008",
+        "response_id": "fixture-response-0008"
+      },
+      {
+        "kind": "READ",
+        "operation": "keywords.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0009",
+        "response_id": "fixture-response-0009"
+      },
+      {
+        "kind": "READ",
+        "operation": "ads.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0010",
+        "response_id": "fixture-response-0010"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "ads.moderate",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0011",
+        "response_id": "fixture-response-0011"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0012",
+        "response_id": "fixture-response-0012"
+      },
+      {
+        "kind": "READ",
+        "operation": "adgroups.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0013",
+        "response_id": "fixture-response-0013"
+      },
+      {
+        "kind": "READ",
+        "operation": "keywords.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0014",
+        "response_id": "fixture-response-0014"
+      },
+      {
+        "kind": "READ",
+        "operation": "ads.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0015",
+        "response_id": "fixture-response-0015"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "campaigns.add",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0016",
+        "response_id": "fixture-response-0016"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "campaigns.suspend",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0017",
+        "response_id": "fixture-response-0017"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0018",
+        "response_id": "fixture-response-0018"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "adgroups.add",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0019",
+        "response_id": "fixture-response-0019"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "keywords.add",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0020",
+        "response_id": "fixture-response-0020"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "ads.add",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0021",
+        "response_id": "fixture-response-0021"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0022",
+        "response_id": "fixture-response-0022"
+      },
+      {
+        "kind": "READ",
+        "operation": "adgroups.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0023",
+        "response_id": "fixture-response-0023"
+      },
+      {
+        "kind": "READ",
+        "operation": "keywords.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0024",
+        "response_id": "fixture-response-0024"
+      },
+      {
+        "kind": "READ",
+        "operation": "ads.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0025",
+        "response_id": "fixture-response-0025"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "ads.moderate",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0026",
+        "response_id": "fixture-response-0026"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0027",
+        "response_id": "fixture-response-0027"
+      },
+      {
+        "kind": "READ",
+        "operation": "adgroups.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0028",
+        "response_id": "fixture-response-0028"
+      },
+      {
+        "kind": "READ",
+        "operation": "keywords.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0029",
+        "response_id": "fixture-response-0029"
+      },
+      {
+        "kind": "READ",
+        "operation": "ads.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0030",
+        "response_id": "fixture-response-0030"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0031",
+        "response_id": "fixture-response-0031"
+      },
+      {
+        "kind": "READ",
+        "operation": "adgroups.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0032",
+        "response_id": "fixture-response-0032"
+      },
+      {
+        "kind": "READ",
+        "operation": "keywords.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0033",
+        "response_id": "fixture-response-0033"
+      },
+      {
+        "kind": "READ",
+        "operation": "ads.get",
+        "provider_ids": [
+          "7101",
+          "7102",
+          "7103",
+          "7104"
+        ],
+        "request_id": "fixture-request-0034",
+        "response_id": "fixture-response-0034"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0035",
+        "response_id": "fixture-response-0035"
+      },
+      {
+        "kind": "READ",
+        "operation": "adgroups.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0036",
+        "response_id": "fixture-response-0036"
+      },
+      {
+        "kind": "READ",
+        "operation": "keywords.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0037",
+        "response_id": "fixture-response-0037"
+      },
+      {
+        "kind": "READ",
+        "operation": "ads.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0038",
+        "response_id": "fixture-response-0038"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0039",
+        "response_id": "fixture-response-0039"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "ads.update",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0040",
+        "response_id": "fixture-response-0040"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0041",
+        "response_id": "fixture-response-0041"
+      },
+      {
+        "kind": "READ",
+        "operation": "adgroups.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0042",
+        "response_id": "fixture-response-0042"
+      },
+      {
+        "kind": "READ",
+        "operation": "keywords.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0043",
+        "response_id": "fixture-response-0043"
+      },
+      {
+        "kind": "READ",
+        "operation": "ads.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0044",
+        "response_id": "fixture-response-0044"
+      },
+      {
+        "kind": "MUTATION",
+        "operation": "ads.moderate",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0045",
+        "response_id": "fixture-response-0045"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0046",
+        "response_id": "fixture-response-0046"
+      },
+      {
+        "kind": "READ",
+        "operation": "adgroups.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0047",
+        "response_id": "fixture-response-0047"
+      },
+      {
+        "kind": "READ",
+        "operation": "keywords.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0048",
+        "response_id": "fixture-response-0048"
+      },
+      {
+        "kind": "READ",
+        "operation": "ads.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0049",
+        "response_id": "fixture-response-0049"
+      },
+      {
+        "kind": "READ",
+        "operation": "campaigns.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0050",
+        "response_id": "fixture-response-0050"
+      },
+      {
+        "kind": "READ",
+        "operation": "adgroups.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0051",
+        "response_id": "fixture-response-0051"
+      },
+      {
+        "kind": "READ",
+        "operation": "keywords.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0052",
+        "response_id": "fixture-response-0052"
+      },
+      {
+        "kind": "READ",
+        "operation": "ads.get",
+        "provider_ids": [
+          "7201",
+          "7202",
+          "7203",
+          "7204"
+        ],
+        "request_id": "fixture-request-0053",
+        "response_id": "fixture-response-0053"
+      }
+    ],
+    "contract_coverage": [
+      {
+        "executable_test": "direct-write.test.mjs · creates a real-shape Direct graph and ends owner-suspended after moderation",
+        "scenario": "all-success"
+      },
+      {
+        "executable_test": "test_p0_production_candidate.py · UI mixed acceptance/rejection package",
+        "scenario": "mixed-provider-outcomes"
+      },
+      {
+        "executable_test": "p0-application-contract.test.mjs · moderation polling is durable, due-time bounded, and treats PREACCEPTED as pending",
+        "scenario": "pending-and-preaccepted"
+      },
+      {
+        "executable_test": "execution-safety.test.mjs · holds the account writer after an ambiguous add and forbids blind restart",
+        "scenario": "unknown-and-reconciliation"
+      },
+      {
+        "executable_test": "p0-application-contract.test.mjs · package dispatch continues after contained system failure but stops unsafe remaining items behind reconciliation",
+        "scenario": "system-failure"
+      },
+      {
+        "executable_test": "test_p0_production_candidate.py · renewed Gate and PASS_AFTER_CORRECTION",
+        "scenario": "correction"
+      }
+    ],
+    "external_network_requests": 0,
+    "official_api_shape": true,
+    "operations": {
+      "mutations": [
+        "campaigns.add",
+        "campaigns.suspend",
+        "adgroups.add",
+        "keywords.add",
+        "ads.add",
+        "ads.moderate",
+        "campaigns.add",
+        "campaigns.suspend",
+        "adgroups.add",
+        "keywords.add",
+        "ads.add",
+        "ads.moderate",
+        "ads.update",
+        "ads.moderate"
+      ],
+      "reads": [
+        "campaigns.get",
+        "campaigns.get",
+        "adgroups.get",
+        "keywords.get",
+        "ads.get",
+        "campaigns.get",
+        "adgroups.get",
+        "keywords.get",
+        "ads.get",
+        "campaigns.get",
+        "campaigns.get",
+        "adgroups.get",
+        "keywords.get",
+        "ads.get",
+        "campaigns.get",
+        "adgroups.get",
+        "keywords.get",
+        "ads.get",
+        "campaigns.get",
+        "adgroups.get",
+        "keywords.get",
+        "ads.get",
+        "campaigns.get",
+        "adgroups.get",
+        "keywords.get",
+        "ads.get",
+        "campaigns.get",
+        "campaigns.get",
+        "adgroups.get",
+        "keywords.get",
+        "ads.get",
+        "campaigns.get",
+        "adgroups.get",
+        "keywords.get",
+        "ads.get",
+        "campaigns.get",
+        "adgroups.get",
+        "keywords.get",
+        "ads.get"
+      ],
+      "resume_calls": 0
+    },
+    "production_credentials_loaded": false,
+    "scenario": "mixed-correction",
+    "schema_version": "p0-production-candidate-fixture-evidence-v1",
+    "spend_started": false
+  },
+  "schema_version": "p0-production-candidate-acceptance-v1",
+  "ui": {
+    "accessible_labels": true,
+    "console_errors": [],
+    "five_steps": 5,
+    "horizontal_overflow": false,
+    "keyboard_drawer_path": true,
+    "nonlocal_browser_requests": [],
+    "page_errors": []
+  },
+  "viewport": {
+    "height": 1080,
+    "width": 1920
+  }
+}

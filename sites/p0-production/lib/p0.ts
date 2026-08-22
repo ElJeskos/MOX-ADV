@@ -680,7 +680,7 @@ async function ensureTables() {
   ).run();
 }
 
-class D1P0ApplicationStore implements P0ApplicationStore {
+export class D1P0ApplicationStore implements P0ApplicationStore {
   async load(key: string): Promise<P0StoredRow | null> {
     await ensureTables();
     const row = await runtimeEnv().DB
