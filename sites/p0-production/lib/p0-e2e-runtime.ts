@@ -501,7 +501,7 @@ function fixtureAdapters(): {
       },
       {
         scenario: "pending-and-preaccepted",
-        executable_test: "p0-application-contract.test.mjs · moderation polling is durable, due-time bounded, and treats PREACCEPTED as pending",
+        executable_test: "direct-write.test.mjs · official PREACCEPTED remains pending before the same suspended graph becomes accepted",
       },
       {
         scenario: "unknown-and-reconciliation",

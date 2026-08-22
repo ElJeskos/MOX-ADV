@@ -306,6 +306,72 @@ test("polls one exact supported graph without mutation and preserves terminal ad
   assert.equal(result.semantic_graph.campaign.State, "SUSPENDED");
 });
 
+test("official PREACCEPTED remains pending before the same suspended graph becomes accepted", async () => {
+  const expected = projection();
+  const calls = [];
+  let adStatus = "PREACCEPTED";
+  const fetcher = async (url, init) => {
+    const body = JSON.parse(String(init.body));
+    const service = new URL(url).pathname.split("/").at(-1);
+    const operation = `${service}.${body.method}`;
+    calls.push(operation);
+    if (operation === "campaigns.get") return jsonResponse({ Campaigns: [{
+      Id: 101,
+      Name: expected.direct.campaign.Name,
+      Type: "UNIFIED_CAMPAIGN",
+      State: "SUSPENDED",
+      Status: adStatus === "ACCEPTED" ? "ACCEPTED" : "MODERATION",
+      StartDate: expected.direct.campaign.StartDate,
+      EndDate: expected.direct.campaign.EndDate,
+      UnifiedCampaign: expected.direct.campaign.UnifiedCampaign,
+    }] });
+    if (operation === "adgroups.get") return jsonResponse({ AdGroups: [{
+      Id: 201,
+      CampaignId: 101,
+      Type: "UNIFIED_AD_GROUP",
+      ...expected.direct.ad_group,
+    }] });
+    if (operation === "keywords.get") return jsonResponse({ Keywords: [{
+      Id: 301,
+      AdGroupId: 201,
+      Keyword: expected.direct.keyword.Keyword,
+    }] });
+    if (operation === "ads.get") return jsonResponse({ Ads: [{
+      Id: 401,
+      CampaignId: 101,
+      AdGroupId: 201,
+      Type: "TEXT_AD",
+      Status: adStatus,
+      State: "OFF",
+      StatusClarification: adStatus === "PREACCEPTED" ? "Автоматическая предварительная проверка" : null,
+      TextAd: expected.direct.ad.TextAd,
+    }] });
+    throw new Error(`Unexpected Direct call ${operation}`);
+  };
+
+  const pending = await pollSuspendedCampaignModeration(
+    { token: "secret", account: "moxstudio" },
+    expected,
+    { campaignId: "101", adGroupId: "201", keywordId: "301", adIds: ["401"] },
+    fetcher,
+  );
+  assert.equal(pending.status, "MODERATION_PENDING");
+  assert.equal(pending.moderation_status, "PREACCEPTED");
+  assert.equal(pending.ad_outcomes[0].status_clarification, "Автоматическая предварительная проверка");
+
+  adStatus = "ACCEPTED";
+  const accepted = await pollSuspendedCampaignModeration(
+    { token: "secret", account: "moxstudio" },
+    expected,
+    { campaignId: "101", adGroupId: "201", keywordId: "301", adIds: ["401"] },
+    fetcher,
+  );
+  assert.equal(accepted.status, "DIRECT_ACCEPTED");
+  assert.equal(accepted.campaign_state, "SUSPENDED");
+  assert.equal(accepted.spend_started, false);
+  assert.equal(calls.every((operation) => operation.endsWith(".get")), true);
+});
+
 test("preserves a Direct ad ID larger than JavaScript safe integer", async () => {
   const calls = [];
   const exactAdId = "1919036093096389375";
