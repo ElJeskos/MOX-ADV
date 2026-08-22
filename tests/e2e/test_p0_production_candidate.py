@@ -124,6 +124,10 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 console_errors: list[str] = []
                 page_errors: list[str] = []
                 nonlocal_requests: list[str] = []
+                visible_copy_samples: list[str] = []
+
+                def capture_visible_copy() -> None:
+                    visible_copy_samples.append(page.locator("body").inner_text())
                 page.on(
                     "console",
                     lambda message: console_errors.append(message.text)
@@ -143,16 +147,16 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 self.assertEqual("Стратегия — MOX-ADV", page.title())
                 self.assertTrue(
                     page.get_by_text(
-                        "DETERMINISTIC PROVIDER FIXTURE · NO EXTERNAL NETWORK OR MONEY",
+                        "ДЕТЕРМИНИРОВАННЫЙ СТЕНД ПРОВАЙДЕРА · БЕЗ ВНЕШНЕЙ СЕТИ И ДЕНЕГ",
                         exact=True,
                     ).is_visible()
                 )
                 self.assertTrue(
-                    page.get_by_text("API bindings подтверждены", exact=True).is_visible()
+                    page.get_by_text("Подключения API подтверждены", exact=True).is_visible()
                 )
                 self.assertEqual(
                     0,
-                    page.get_by_text("Preflight заблокирован", exact=True).count(),
+                    page.get_by_text("Предварительная проверка заблокирована", exact=True).count(),
                 )
                 step_buttons = page.get_by_label("Путь создания кампании").get_by_role(
                     "button"
@@ -172,17 +176,18 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 self.assertEqual([], page_errors)
                 self.assertEqual([], nonlocal_requests)
                 assert_no_horizontal_overflow(self, page)
+                capture_visible_copy()
 
-                page.get_by_label("Публичный first-party сайт бизнеса").fill(
+                page.get_by_label("Публичный сайт бизнеса").fill(
                     "https://owner.example/"
                 )
                 page.get_by_role(
                     "button",
-                    name="Проверить Context и предложить цель",
+                    name="Проверить контекст и предложить цель",
                     exact=True,
                 ).click()
                 page.get_by_text(
-                    "Одна provisional бизнес-цель",
+                    "Одна предварительная бизнес-цель",
                     exact=True,
                 ).wait_for()
                 page.get_by_role(
@@ -198,7 +203,7 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 self.assertTrue(
                     page.get_by_role(
                         "heading",
-                        name="Landing advisory",
+                        name="Рекомендации по посадочной странице",
                         exact=True,
                     ).is_visible()
                 )
@@ -210,6 +215,7 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                     ).is_visible()
                 )
                 self.assertTrue(page.get_by_text("67+ запросов", exact=True).is_visible())
+                capture_visible_copy()
                 page.get_by_role(
                     "button",
                     name="Подтвердить вывод агента",
@@ -217,10 +223,11 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 ).click()
                 page.get_by_role(
                     "heading",
-                    name="Фиксированный Campaign Strategy questionnaire",
+                    name="Фиксированная анкета стратегии кампании",
                     exact=True,
                 ).wait_for()
 
+                capture_visible_copy()
                 strategy_fields = page.locator("[data-strategy-field]")
                 self.assertEqual(11, strategy_fields.count())
                 self.assertEqual(
@@ -248,14 +255,15 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 page.locator("input[name='target_result_cost']").fill("10000")
                 page.get_by_role(
                     "button",
-                    name="Утвердить всю Campaign Strategy",
+                    name="Утвердить всю стратегию кампании",
                     exact=True,
                 ).click()
                 page.get_by_role(
                     "heading",
-                    name="Campaign Canvas",
+                    name="Полотно кампаний",
                     exact=True,
                 ).wait_for()
+                capture_visible_copy()
                 cards = page.locator(".draft-card-shell")
                 self.assertGreaterEqual(cards.count(), 2)
                 stale_page = browser.new_page(viewport=VIEWPORT)
@@ -279,29 +287,29 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 stale_page.goto(base_url, wait_until="networkidle")
                 stale_page.get_by_role(
                     "heading",
-                    name="Campaign Canvas",
+                    name="Полотно кампаний",
                     exact=True,
                 ).wait_for()
-                page.get_by_label("Фильтр variant").select_option("IMPROVEMENT")
+                page.get_by_label("Фильтр вариантов").select_option("IMPROVEMENT")
                 self.assertGreaterEqual(page.locator(".draft-card-shell").count(), 1)
-                page.get_by_label("Фильтр variant").select_option("ALL")
-                page.get_by_label("Сортировка Drafts").select_option("SCORE")
+                page.get_by_label("Фильтр вариантов").select_option("ALL")
+                page.get_by_label("Сортировка черновиков").select_option("SCORE")
                 page.get_by_text(
-                    "Показать hidden Drafts с suppression reasons",
+                    "Показать скрытые черновики с причинами скрытия",
                     exact=True,
                 ).click()
                 self.assertGreaterEqual(page.locator(".draft-card-shell").count(), 2)
 
                 first_open = page.get_by_role(
                     "button",
-                    name=re.compile(r"^Открыть Draft "),
+                    name=re.compile(r"^Открыть черновик "),
                 ).first
                 first_open.focus()
                 first_open.press("Enter")
-                drawer = page.get_by_role("dialog", name="Точная будущая Direct projection")
+                drawer = page.get_by_role("dialog", name="Точная будущая проекция Яндекс Директа")
                 drawer.wait_for()
                 self.assertEqual(
-                    "Закрыть drawer",
+                    "Закрыть панель",
                     page.evaluate("document.activeElement?.getAttribute('aria-label')"),
                 )
                 page.keyboard.press("Escape")
@@ -317,17 +325,17 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 ad_text.fill(f"{original_ad_text} Уточнение для участия.")
                 drawer.get_by_role(
                     "button",
-                    name="Сохранить material revision",
+                    name="Сохранить существенную редакцию",
                     exact=True,
                 ).click()
                 drawer.get_by_text(
-                    "Создана новая immutable Draft revision",
+                    "Создана новая неизменяемая редакция черновика кампании",
                     exact=False,
                 ).wait_for()
-                drawer.get_by_role("button", name="Закрыть drawer").click()
+                drawer.get_by_role("button", name="Закрыть панель").click()
 
                 stale_page.locator(
-                    "button[aria-label^='Добавить в shortlist:']:not([disabled])"
+                    "button[aria-label^='Добавить в список:']:not([disabled])"
                 ).first.click()
                 stale_conflict = stale_page.locator(".notice.error")
                 stale_conflict.wait_for()
@@ -337,57 +345,58 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 stale_page.close()
 
                 shortlist_buttons = page.locator(
-                    "button[aria-label^='Добавить в shortlist:']:not([disabled])"
+                    "button[aria-label^='Добавить в список:']:not([disabled])"
                 )
                 self.assertGreaterEqual(shortlist_buttons.count(), 2)
                 shortlist_labels = shortlist_buttons.evaluate_all(
                     "elements => elements.slice(0, 2).map(element => element.getAttribute('aria-label'))"
                 )
-                shortlist = page.get_by_label("Persistent shortlist summary")
+                shortlist = page.get_by_label("Постоянная сводка списка")
                 page.get_by_role(
                     "button",
                     name=shortlist_labels[0],
                     exact=True,
                 ).click()
-                shortlist.get_by_text("ORDERED SHORTLIST · 1", exact=True).wait_for()
+                shortlist.get_by_text("УПОРЯДОЧЕННЫЙ СПИСОК · 1", exact=True).wait_for()
                 page.get_by_role(
                     "button",
                     name=shortlist_labels[1],
                     exact=True,
                 ).click()
-                shortlist.get_by_text("ORDERED SHORTLIST · 2", exact=True).wait_for()
+                shortlist.get_by_text("УПОРЯДОЧЕННЫЙ СПИСОК · 2", exact=True).wait_for()
                 shortlist.get_by_role(
                     "button",
-                    name="Создать package review",
+                    name="Создать проверку пакета",
                     exact=True,
                 ).click()
                 page.get_by_role(
                     "heading",
-                    name="Точный immutable package review",
+                    name="Точная неизменяемая проверка пакета",
                     exact=True,
                 ).wait_for()
                 self.assertTrue(
                     page.get_by_role(
                         "heading",
-                        name="2 независимых Campaign Drafts",
+                        name="2 независимых черновика кампаний",
                         exact=True,
                     ).is_visible()
                 )
+                capture_visible_copy()
                 page.get_by_label(
                     "Подтверждаю точный пакет и независимое исполнение кампаний"
                 ).check()
                 page.get_by_role(
                     "button",
-                    name="Подтвердить authority пакета",
+                    name="Подтвердить полномочие пакета",
                     exact=True,
                 ).click()
                 page.get_by_text(
-                    "Human Decision Gate подтверждён",
+                    "Контрольное решение человека подтверждено",
                     exact=True,
                 ).wait_for()
                 page.reload(wait_until="networkidle")
                 page.get_by_text(
-                    "Human Decision Gate подтверждён",
+                    "Контрольное решение человека подтверждено",
                     exact=True,
                 ).wait_for()
                 page.get_by_role(
@@ -397,10 +406,10 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 ).click()
 
                 initial_execution = page.get_by_label(
-                    "Package campaign executions"
+                    "Исполнения кампаний пакета"
                 ).first
                 initial_execution.get_by_text(
-                    "Package verdict PENDING",
+                    "Вердикт пакета: Ожидает",
                     exact=False,
                 ).wait_for()
                 self.assertEqual(
@@ -409,18 +418,18 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 )
                 initial_execution.get_by_role(
                     "button",
-                    name="Проверить due item",
+                    name="Проверить запланированный элемент",
                     exact=True,
                 ).first.click()
-                initial_execution.get_by_text("DIRECT_ACCEPTED", exact=True).wait_for()
+                initial_execution.get_by_text("Принято Яндекс Директом", exact=True).wait_for()
                 initial_execution.get_by_role(
                     "button",
-                    name="Проверить due item",
+                    name="Проверить запланированный элемент",
                     exact=True,
                 ).click()
                 page.wait_for_function(
                     "text => document.body.innerText.includes(text) || Boolean(document.querySelector('.notice.error'))",
-                    arg="Package verdict PASS_WITH_PLATFORM_REJECTIONS",
+                    arg="Вердикт пакета: Пройдено с отклонениями площадки",
                 )
                 self.assertEqual(
                     [],
@@ -428,15 +437,15 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                     page.locator("body").inner_text(),
                 )
                 initial_execution.get_by_text(
-                    "Package verdict PASS_WITH_PLATFORM_REJECTIONS",
+                    "Вердикт пакета: Пройдено с отклонениями площадки",
                     exact=False,
                 ).wait_for()
                 rejected = initial_execution.locator(
                     ".package-execution-item",
-                    has_text="REJECTED_NEEDS_EDIT",
+                    has_text="Отклонено — требуется исправление",
                 )
                 rejected.get_by_text(
-                    "Ad moderation outcomes · 1",
+                    "Результаты модерации объявлений · 1",
                     exact=True,
                 ).click()
                 rejected.get_by_text(
@@ -445,57 +454,57 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                 ).wait_for()
                 rejected.get_by_role(
                     "button",
-                    name="Исправить отклонённый Draft",
+                    name="Исправить отклонённый черновик",
                     exact=True,
                 ).click()
 
-                correction = page.get_by_label("Focused correction flows")
-                correction.get_by_text("EDITING", exact=True).first.wait_for()
+                correction = page.get_by_label("Точечные исправления")
+                correction.get_by_text("Редактируется", exact=True).first.wait_for()
                 correction.locator("textarea[name='ad_text']").fill(
                     "Подайте заявку на участие без гарантии результата."
                 )
                 correction.get_by_role(
                     "button",
-                    name="Сохранить новую material correction revision",
+                    name="Сохранить новую существенную редакцию исправления",
                     exact=True,
                 ).click()
                 correction.get_by_text(
-                    "PACKAGE_REVIEW_REQUIRED",
+                    "Требуется проверка пакета",
                     exact=True,
                 ).first.wait_for()
                 correction.get_by_role(
                     "button",
-                    name="Проверить corrected package revision",
+                    name="Проверить исправленную редакцию пакета",
                     exact=True,
                 ).click()
                 correction.get_by_text(
-                    "HUMAN_GATE_REQUIRED",
+                    "Требуется контрольное решение человека",
                     exact=True,
                 ).first.wait_for()
                 correction.get_by_text(
-                    "Рекомендация · RESUBMIT_CORRECTED_REVISION",
+                    "Рекомендация · Повторно отправить исправленную редакцию",
                     exact=True,
                 ).wait_for()
                 correction.get_by_text(
-                    "Подтверждаю recommendation, evidence, confidence, alternatives, consequences и новый exact corrected fingerprint",
+                    "Подтверждаю рекомендацию, доказательства, уверенность, альтернативы, последствия и новый точный отпечаток исправления",
                     exact=True,
                 ).click()
                 correction.get_by_role(
                     "button",
-                    name="Создать новый Human Decision Gate",
+                    name="Создать новое контрольное решение человека",
                     exact=True,
                 ).click()
                 correction.get_by_text(
-                    "READY_TO_RESUBMIT",
+                    "Готово к повторной отправке",
                     exact=True,
                 ).first.wait_for()
                 correction.get_by_role(
                     "button",
-                    name="Повторно отправить confirmed correction revision",
+                    name="Повторно отправить подтверждённую редакцию исправления",
                     exact=True,
                 ).click()
                 corrected_execution = correction.get_by_label(
-                    "Package campaign executions"
+                    "Исполнения кампаний пакета"
                 )
                 page.wait_for_function(
                     "() => Boolean(document.querySelector('.package-corrections .package-executions')) || Boolean(document.querySelector('.notice.error'))"
@@ -506,17 +515,17 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                     page.locator("body").inner_text(),
                 )
                 corrected_execution.get_by_text(
-                    "Package verdict PENDING",
+                    "Вердикт пакета: Ожидает",
                     exact=False,
                 ).wait_for()
                 corrected_execution.get_by_role(
                     "button",
-                    name="Проверить due item",
+                    name="Проверить запланированный элемент",
                     exact=True,
                 ).click()
                 page.wait_for_function(
                     "text => document.body.innerText.includes(text) || Boolean(document.querySelector('.notice.error'))",
-                    arg="PASS_AFTER_CORRECTION",
+                    arg="ПРОЙДЕНО ПОСЛЕ ИСПРАВЛЕНИЯ",
                 )
                 self.assertEqual(
                     [],
@@ -524,33 +533,58 @@ class P0ProductionCandidateE2ETests(unittest.TestCase):
                     page.locator("body").inner_text(),
                 )
                 correction.get_by_text(
-                    "PASS_AFTER_CORRECTION",
+                    "ПРОЙДЕНО ПОСЛЕ ИСПРАВЛЕНИЯ",
                     exact=True,
                 ).last.wait_for()
                 self.assertTrue(
                     correction.get_by_text(
-                        "Initial package verdict",
+                        "Первичный вердикт пакета",
                         exact=True,
                     ).is_visible()
                 )
                 self.assertTrue(
                     correction.get_by_text(
-                        "Corrected terminal outcome",
+                        "Итог исправленной редакции",
                         exact=True,
                     ).is_visible()
                 )
                 page.reload(wait_until="networkidle")
                 page.get_by_text(
-                    "PASS_AFTER_CORRECTION",
+                    "ПРОЙДЕНО ПОСЛЕ ИСПРАВЛЕНИЯ",
                     exact=True,
                 ).last.wait_for()
+                capture_visible_copy()
+
+                forbidden_visible_phrases = [
+                    "Production Module",
+                    "Guarded write",
+                    "Versioned shortlist",
+                    "first-party",
+                    "provisional бизнес-цель",
+                    "Campaign Canvas",
+                    "Campaign Draft",
+                    "Human Decision Gate",
+                    "Package verdict",
+                    "Focused correction",
+                    "Provider rejection correction",
+                    "Initial package verdict",
+                    "Correction progress",
+                    "Corrected terminal outcome",
+                    "Review доступен",
+                    "Publish readiness",
+                    "material revision",
+                    "API bindings",
+                ]
+                visible_copy = "\n".join(visible_copy_samples)
+                for phrase in forbidden_visible_phrases:
+                    self.assertNotIn(phrase, visible_copy)
 
                 self.assertTrue(
-                    page.get_by_text("API bindings подтверждены", exact=True).is_visible(),
+                    page.get_by_text("Подключения API подтверждены", exact=True).is_visible(),
                     page.locator("body").inner_text(),
                 )
                 fixture_evidence = page.get_by_label(
-                    "Deterministic provider fixture evidence"
+                    "Доказательства проверочного стенда провайдера"
                 )
                 fixture_evidence.locator("summary").click()
                 observed_evidence = json.loads(

@@ -19,6 +19,7 @@ import {
   RecommendationSetDisclosure,
   ViabilityScoreDisclosure,
 } from "./RecommendationSetDisclosure";
+import { localizedText, machineLabel } from "./ui-copy.ts";
 
 type Payload = {
   contract: { name: string; version: string; document_schema: string };
@@ -92,16 +93,16 @@ export default function P0Client() {
     setError("");
     setBusy(
       action === "analyze_site"
-        ? "Проверяю точные API bindings и исследую безопасный first-party target…"
+        ? "Проверяю точные подключения API и безопасно исследую собственный сайт…"
         : action === "confirm_context_goal"
           ? "Сохраняю решение владельца и начинаю полную аналитику…"
           : action === "dispatch_package"
-            ? "Исполняю exact package независимо по каждой кампании…"
+            ? "Исполняю точный пакет независимо по каждой кампании…"
             : action === "poll_package_moderation" || action === "poll_package_correction_moderation"
-              ? "Проверяю один due moderation item через официальный Direct readback…"
+              ? "Проверяю один запланированный результат модерации через официальный API Яндекс Директа…"
               : action === "resubmit_package_correction"
-                ? "Повторно отправляю только новую confirmed correction revision…"
-                : "Сохраняю production-ревизию…",
+                ? "Повторно отправляю только новую подтверждённую редакцию исправления…"
+                : "Сохраняю рабочую редакцию…",
     );
     try {
       const result = await request("/api/p0", {
@@ -129,15 +130,15 @@ export default function P0Client() {
       <div className="site-shell">
         <header className="topbar">
           <Link className="brand" href="/"><span>M</span>MOX-ADV</Link>
-          <nav aria-label="Основная навигация"><Link className="active" href="/">Стратегия</Link><span>Production Module · P0</span></nav>
+          <nav aria-label="Основная навигация"><Link className="active" href="/">Стратегия</Link><span>Рабочий модуль · P0</span></nav>
           <div className="ready"><i />Подключение</div>
         </header>
         <main className="page">
           <section className="hero">
-            <div><p className="eyebrow">GPT SITES · PRODUCTION MODULE · P0</p><h1>Стратегия и создание кампании</h1><p>Агент выполняет всю безопасную работу. Человеку остаются критические решения и существенная неопределённость.</p></div>
+            <div><p className="eyebrow">GPT SITES · РАБОЧИЙ МОДУЛЬ · P0</p><h1>Стратегия и создание кампании</h1><p>Агент выполняет всю безопасную работу. Человеку остаются критические решения и существенная неопределённость.</p></div>
             <strong className="real-badge">ТОЛЬКО РЕАЛЬНЫЕ ДАННЫЕ</strong>
           </section>
-          <section className="loading-product"><strong>Подключаю production-контекст</strong><p>{error || busy}</p></section>
+          <section className="loading-product"><strong>Подключаю рабочий контекст</strong><p>{error || busy}</p></section>
         </main>
       </div>
     );
@@ -153,13 +154,13 @@ export default function P0Client() {
     <div className="site-shell">
       <header className="topbar">
         <Link className="brand" href="/"><span>M</span>MOX-ADV</Link>
-        <nav aria-label="Основная навигация"><Link className="active" href="/">Стратегия</Link><span>Production Module · P0</span></nav>
-        <div className={`ready ${payload.context_preflight.ready ? "" : "blocked"}`}><i />{payload.context_preflight.ready ? "API bindings подтверждены" : "Preflight заблокирован"}</div>
+        <nav aria-label="Основная навигация"><Link className="active" href="/">Стратегия</Link><span>Рабочий модуль · P0</span></nav>
+        <div className={`ready ${payload.context_preflight.ready ? "" : "blocked"}`}><i />{payload.context_preflight.ready ? "Подключения API подтверждены" : "Предварительная проверка заблокирована"}</div>
       </header>
 
       <main className="page">
         <section className="hero">
-          <div><p className="eyebrow">GPT SITES · PRODUCTION MODULE · P0</p><h1>Стратегия и создание кампании</h1><p>Агент выполняет всю безопасную работу. Человеку остаются критические решения и существенная неопределённость.</p></div>
+          <div><p className="eyebrow">GPT SITES · РАБОЧИЙ МОДУЛЬ · P0</p><h1>Стратегия и создание кампании</h1><p>Агент выполняет всю безопасную работу. Человеку остаются критические решения и существенная неопределённость.</p></div>
           <strong className="real-badge">ТОЛЬКО РЕАЛЬНЫЕ ДАННЫЕ</strong>
         </section>
 
@@ -177,25 +178,25 @@ export default function P0Client() {
 
         <div className="workspace">
           <aside className="agent-pane">
-            <div className="agent-head"><span>AI</span><div><strong>Агент кампании</strong><small>GPT Sites · production-only</small></div></div>
+            <div className="agent-head"><span>ИИ</span><div><strong>Агент кампании</strong><small>GPT Sites · только рабочие данные</small></div></div>
             <section className="agent-message"><strong>{steps[step]?.label}</strong><p>{[
-              "Проверяю точные API bindings, исследую безопасный сайт и предлагаю одну provisional бизнес-цель.",
+              "Проверяю точные подключения API, исследую безопасный сайт и предлагаю одну предварительную бизнес-цель.",
               "Показываю готовую модель с доказательствами и уверенностью.",
-              "Готовлю Strategy; владелец задаёт только денежные и временные границы.",
-              "Компилирую точную publish projection без молчаливых полей.",
-              "Внешняя запись остаётся закрытой, пока production gates не готовы.",
+              "Готовлю стратегию; владелец задаёт только денежные и временные границы.",
+              "Компилирую точную проекцию публикации без молчаливо отброшенных полей.",
+              "Внешняя запись остаётся закрытой, пока рабочие проверки не готовы.",
             ][step]}</p></section>
             <section className="connections"><h3>Подключённые данные</h3>
-              <Connection label="Яндекс Директ" ready={direct.ready === true} detail={direct.ready ? `${direct.account} · binding подтверждён · ${direct.campaigns_total} кампаний` : direct.blockers?.[0]} />
+              <Connection label="Яндекс Директ" ready={direct.ready === true} detail={direct.ready ? `${direct.account} · привязка подтверждена · ${direct.campaigns_total} кампаний` : direct.blockers?.[0]} />
               <Connection label="Яндекс Метрика" ready={metrika.ready === true} detail={metrika.ready ? `Счётчик ${metrika.counter_id} · цель ${metrika.goal_id} · API` : metrika.blockers?.[0]} />
               <Connection label="Последний реальный срез" ready={Boolean(performance)} detail={performance ? `${performance.period_start} — ${performance.period_end} · ${performance.display_metrics.goal_visits} целей` : "Нет подтверждённого среза"} />
             </section>
-            <section className="write-boundary"><span>Human Decision Gate</span><strong>{payload.state.package_execution ? `Package · ${payload.state.package_execution.status}` : payload.decision_readiness.confirmed ? "Authority подтверждена" : payload.state.package_review ? "Пакет reviewed" : "Требует package review"}</strong><small>{payload.state.package_execution ? `${payload.state.package_execution.dispatched_count}/${payload.state.package_execution.selected_count} item executions durable; atomic transaction: NO.` : payload.decision_readiness.confirmed ? "Authority готова к независимому item dispatch." : payload.decision_readiness.blockers[0] || "Точный пакет готов к подтверждению."}</small></section>
+            <section className="write-boundary"><span>Контрольное решение человека</span><strong>{payload.state.package_execution ? `Пакет · ${machineLabel(payload.state.package_execution.status)}` : payload.decision_readiness.confirmed ? "Полномочие подтверждено" : payload.state.package_review ? "Пакет проверен" : "Требуется проверка пакета"}</strong><small>{payload.state.package_execution ? `${payload.state.package_execution.dispatched_count}/${payload.state.package_execution.selected_count} независимых исполнений сохранено; атомарная транзакция: нет.` : payload.decision_readiness.confirmed ? "Полномочие готово к независимой отправке элементов." : localizedText(payload.decision_readiness.blockers[0]) || "Точный пакет готов к подтверждению."}</small></section>
           </aside>
 
           <section className="artifact">
-            {payload.state.last_cascade?.recomputation_status === "PENDING" && <div className="recomputation-pending" role="status"><strong>Идёт downstream recomputation</strong><p>Confirmation и все mutations заблокированы. Обновите данные после завершения пересчёта.</p></div>}
-            {payload.state.last_cascade?.recomputation_status === "REQUIRED" && <div className="recomputation-pending" role="status"><strong>Downstream пересчёт обязателен</strong><p>Material Context/Model change уже инвалидировал Strategy, Drafts, shortlist и confirmation. Завершите следующие шаги заново.</p></div>}
+            {payload.state.last_cascade?.recomputation_status === "PENDING" && <div className="recomputation-pending" role="status"><strong>Идёт пересчёт зависимых данных</strong><p>Подтверждение и все изменения заблокированы. Обновите данные после завершения пересчёта.</p></div>}
+            {payload.state.last_cascade?.recomputation_status === "REQUIRED" && <div className="recomputation-pending" role="status"><strong>Пересчёт зависимых данных обязателен</strong><p>Существенное изменение контекста или модели уже отменило стратегию, черновики, список и подтверждение. Завершите следующие шаги заново.</p></div>}
             {step === 0 && <ContextStep payload={payload} busy={Boolean(busy)} apply={apply} />}
             {step === 1 && <ModelStep payload={payload} apply={apply} back={() => setStep(0)} />}
             {step === 2 && <StrategyStep payload={payload} apply={apply} back={() => setStep(1)} />}
@@ -212,10 +213,10 @@ export default function P0Client() {
 
 function FixtureAcceptanceEvidence({ evidence }: { evidence: Record<string, any> }) {
   return <section className="fixture-acceptance-banner">
-    <strong>DETERMINISTIC PROVIDER FIXTURE · NO EXTERNAL NETWORK OR MONEY</strong>
-    <span>Localhost-only acceptance harness; production bindings and credentials are not loaded.</span>
-    <details aria-label="Deterministic provider fixture evidence">
-      <summary>Machine-readable acceptance evidence · {evidence.calls?.length || 0} provider calls</summary>
+    <strong>ДЕТЕРМИНИРОВАННЫЙ СТЕНД ПРОВАЙДЕРА · БЕЗ ВНЕШНЕЙ СЕТИ И ДЕНЕГ</strong>
+    <span>Проверочный стенд доступен только локально; рабочие подключения и учётные данные не загружены.</span>
+    <details aria-label="Доказательства проверочного стенда провайдера">
+      <summary>Машиночитаемые доказательства приёмки · {evidence.calls?.length || 0} вызовов провайдера</summary>
       <pre>{JSON.stringify(evidence, null, 2)}</pre>
     </details>
   </section>;
@@ -225,12 +226,12 @@ function Connection({ label, ready, detail }: { label: string; ready: boolean; d
   return <div className={`connection ${ready ? "" : "blocked"}`}><i /><div><strong>{label}</strong><small>{detail || "Не готово"}</small></div></div>;
 }
 
-function ArtifactHead({ eyebrow, title, copy, badge = "REAL DATA" }: { eyebrow: string; title: string; copy: string; badge?: string }) {
+function ArtifactHead({ eyebrow, title, copy, badge = "РЕАЛЬНЫЕ ДАННЫЕ" }: { eyebrow: string; title: string; copy: string; badge?: string }) {
   return <header className="artifact-head"><div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2><p>{copy}</p></div><strong>{badge}</strong></header>;
 }
 
 function Actions({ revision, label, disabled, back, submit }: { revision: number; label: string; disabled?: boolean; back?: () => void; submit?: boolean }) {
-  return <footer className="actions"><span>Ревизия {revision} · production data only</span>{back && <button type="button" className="secondary" onClick={back}>Назад</button>}<button type={submit ? "submit" : "button"} disabled={disabled}>{label}</button></footer>;
+  return <footer className="actions"><span>Ревизия {revision} · только рабочие данные</span>{back && <button type="button" className="secondary" onClick={back}>Назад</button>}<button type={submit ? "submit" : "button"} disabled={disabled}>{label}</button></footer>;
 }
 
 function ContextStep({ payload, busy, apply }: { payload: Payload; busy: boolean; apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void> }) {
@@ -250,22 +251,22 @@ function ContextStep({ payload, busy, apply }: { payload: Payload; busy: boolean
     });
   }
   return <>
-    <ArtifactHead eyebrow="Шаг 1 · production preflight" title="Контекст и provisional бизнес-цель" copy="До полной аналитики модуль проверяет точные official API bindings, безопасно исследует first-party target и просит одно явное решение владельца." badge={preflight.ready ? "BINDINGS VERIFIED" : "FAIL CLOSED"} />
-    <div className="context-strip"><Metric label="Директ" value={payload.context.direct.ready ? payload.context.direct.account : "Не готов"} copy={payload.context.direct.ready ? `clients.get подтвердил account · ${payload.context.direct.campaigns_total} кампаний` : preflight.blockers[0]} /><Metric label="Метрика" value={payload.context.metrika.ready ? `Счётчик ${payload.context.metrika.counter_id}` : "Не готова"} copy={payload.context.metrika.ready ? `Цель ${payload.context.metrika.goal_id} подтверждена Management API` : preflight.blockers[0]} /><Metric label="Сайт" value={analysis ? analysis.title || analysis.url : "Нужен публичный HTTPS URL"} copy={analysis ? `${analysis.research?.pages_analyzed || 1} first-party страниц · bounded research` : "Private/local targets и unsafe redirects отклоняются"} /></div>
-    {!preflight.ready && <div className="preflight-blocked"><strong>Продолжение заблокировано</strong><ul>{preflight.blockers.map((item) => <li key={item}>{item}</li>)}</ul><small>Credentials остаются только server-side и не передаются в этот state.</small></div>}
+    <ArtifactHead eyebrow="Шаг 1 · предварительная проверка рабочего контура" title="Контекст и предварительная бизнес-цель" copy="До полной аналитики модуль проверяет точные подключения официальных API, безопасно исследует собственный сайт и просит одно явное решение владельца." badge={preflight.ready ? "ПОДКЛЮЧЕНИЯ ПОДТВЕРЖДЕНЫ" : "БЕЗОПАСНО ЗАБЛОКИРОВАНО"} />
+    <div className="context-strip"><Metric label="Директ" value={payload.context.direct.ready ? payload.context.direct.account : "Не готов"} copy={payload.context.direct.ready ? `Метод clients.get подтвердил аккаунт · ${payload.context.direct.campaigns_total} кампаний` : preflight.blockers[0]} /><Metric label="Метрика" value={payload.context.metrika.ready ? `Счётчик ${payload.context.metrika.counter_id}` : "Не готова"} copy={payload.context.metrika.ready ? `Цель ${payload.context.metrika.goal_id} подтверждена управляющим API` : preflight.blockers[0]} /><Metric label="Сайт" value={analysis ? analysis.title || analysis.url : "Нужен публичный HTTPS URL"} copy={analysis ? `${analysis.research?.pages_analyzed || 1} страниц собственного сайта · ограниченное исследование` : "Частные и локальные адреса, а также небезопасные перенаправления отклоняются"} /></div>
+    {!preflight.ready && <div className="preflight-blocked"><strong>Продолжение заблокировано</strong><ul>{preflight.blockers.map((item) => <li key={item}>{localizedText(item)}</li>)}</ul><small>Учётные данные остаются только на сервере и не передаются в это состояние.</small></div>}
     <form className="form" onSubmit={submitResearch}>
-      <label className="wide"><span>Публичный first-party сайт бизнеса</span><input type="text" inputMode="url" name="url" required defaultValue={analysis?.url || ""} placeholder="example.ru или https://example.ru/" /><small>HTTPS добавляется технически; credentials, private/local/link-local targets, unsafe redirects и превышение лимитов отклоняются до исследования.</small></label>
-      {analysis && <div className="material-impact"><strong>До material Context change</strong><p>Будут затронуты: {payload.context_change_policy.affected_steps.map((item) => item.label).join(" → ")}. Confirmation заблокируется до пересчёта. Пробелы и техническая URL-нормализация сами по себе ничего не инвалидируют.</p></div>}
-      <div className="agent-work"><strong>Что агент сделает сам до полной аналитики</strong><p>Проверит exact account/counter/goal authority через official APIs, обойдёт не более шести bounded first-party страниц и предложит ровно одну evidence-grounded цель.</p></div>
-      <Actions revision={payload.revision} label={analysis ? "Повторно проверить Context" : "Проверить Context и предложить цель"} disabled={busy || !preflight.ready} submit />
+      <label className="wide"><span>Публичный сайт бизнеса</span><input type="text" inputMode="url" name="url" required defaultValue={analysis?.url || ""} placeholder="example.ru или https://example.ru/" /><small>HTTPS добавляется технически; адреса с учётными данными, частные, локальные и служебные адреса, небезопасные перенаправления и превышение лимитов отклоняются до исследования.</small></label>
+      {analysis && <div className="material-impact"><strong>До существенного изменения контекста</strong><p>Будут затронуты: {payload.context_change_policy.affected_steps.map((item) => item.label).join(" → ")}. Подтверждение заблокируется до пересчёта. Пробелы и техническая нормализация URL сами по себе ничего не отменяют.</p></div>}
+      <div className="agent-work"><strong>Что агент сделает сам до полной аналитики</strong><p>Проверит точные полномочия аккаунта, счётчика и цели через официальные API, обойдёт не более шести страниц собственного сайта в заданных пределах и предложит ровно одну цель на основе доказательств.</p></div>
+      <Actions revision={payload.revision} label={analysis ? "Повторно проверить контекст" : "Проверить контекст и предложить цель"} disabled={busy || !preflight.ready} submit />
     </form>
     {contextState && <form key={`${payload.revision}-${contextState.status}`} className="goal-decision" onSubmit={submitGoal}>
-      <header><div><p className="eyebrow">Одна provisional бизнес-цель</p><h3>{contextState.status === "GOAL_CONFIRMED" ? "Решение владельца сохранено" : "Подтвердите или исправьте до полной аналитики"}</h3></div><strong>{contextState.status === "GOAL_CONFIRMED" ? "OWNER CONFIRMED" : "PROVISIONAL"}</strong></header>
+      <header><div><p className="eyebrow">Одна предварительная бизнес-цель</p><h3>{contextState.status === "GOAL_CONFIRMED" ? "Решение владельца сохранено" : "Подтвердите или исправьте до полной аналитики"}</h3></div><strong>{contextState.status === "GOAL_CONFIRMED" ? "ПОДТВЕРЖДЕНО ВЛАДЕЛЬЦЕМ" : "ПРЕДВАРИТЕЛЬНО"}</strong></header>
       <label><span>Бизнес-цель</span><textarea name="goal" required maxLength={500} defaultValue={goal} /></label>
       <blockquote>{contextState.provisional_business_goal.rationale}</blockquote>
-      {contextState.status === "GOAL_CONFIRMED" && <div className="material-impact"><strong>Перед изменением подтверждённой цели</strong><p>Material edit затронет: {payload.context_change_policy.affected_steps.map((item) => item.label).join(" → ")}. Техническая нормализация пробелов не создаёт invalidation.</p></div>}
-      {contextState.last_material_change && <p className="invalidation-note">Downstream lineage сохранён в audit history; Strategy, Recommendation Set, Campaign Drafts, shortlist и confirmation инвалидированы.</p>}
-      <Actions revision={payload.revision} label={contextState.status === "GOAL_CONFIRMED" ? "Сохранить Context goal" : "Подтвердить цель и продолжить анализ"} disabled={busy || !preflight.ready} submit />
+      {contextState.status === "GOAL_CONFIRMED" && <div className="material-impact"><strong>Перед изменением подтверждённой цели</strong><p>Существенная правка затронет: {payload.context_change_policy.affected_steps.map((item) => item.label).join(" → ")}. Техническая нормализация пробелов не отменяет решения.</p></div>}
+      {contextState.last_material_change && <p className="invalidation-note">Происхождение зависимых данных сохранено в истории проверки; стратегия, набор рекомендаций, черновики кампаний, список и подтверждение отменены.</p>}
+      <Actions revision={payload.revision} label={contextState.status === "GOAL_CONFIRMED" ? "Сохранить цель контекста" : "Подтвердить цель и продолжить анализ"} disabled={busy || !preflight.ready} submit />
     </form>}
   </>;
 }
@@ -298,19 +299,19 @@ function evidenceValue(value: unknown) {
 function EvidenceClaimDisclosure({ claim, records }: { claim: Record<string, any>; records: Record<string, any>[] }) {
   const linkedRecords = records.filter((record) => (claim.evidence_ids || []).includes(record.evidence_id));
   return <details className="evidence-claim">
-    <summary aria-label={`Раскрыть claim ${claim.predicate}`}><strong>{claim.predicate}</strong><span>{claim.classification} · {claim.confidence?.tier}</span></summary>
+    <summary aria-label={`Раскрыть утверждение ${claim.predicate}`}><strong>{claim.predicate}</strong><span>{machineLabel(claim.classification)} · {machineLabel(claim.confidence?.tier)}</span></summary>
     <div className="evidence-claim-body">
-      <p><strong>Normalized claim:</strong> {evidenceValue(claim.normalized?.value ?? claim.value).slice(0, 500)}</p>
-      <dl className="claim-confidence"><div><dt>Quality</dt><dd>{claim.confidence?.quality}</dd></div><div><dt>Freshness</dt><dd>{claim.confidence?.freshness}</dd></div><div><dt>Consistency</dt><dd>{claim.confidence?.consistency}</dd></div><div><dt>Coverage</dt><dd>{claim.confidence?.coverage}</dd></div><div><dt>Uncertainty</dt><dd>{claim.confidence?.uncertainty?.length || 0}</dd></div></dl>
+      <p><strong>Нормализованное утверждение:</strong> {evidenceValue(claim.normalized?.value ?? claim.value).slice(0, 500)}</p>
+      <dl className="claim-confidence"><div><dt>Качество</dt><dd>{machineLabel(claim.confidence?.quality)}</dd></div><div><dt>Свежесть</dt><dd>{machineLabel(claim.confidence?.freshness)}</dd></div><div><dt>Согласованность</dt><dd>{machineLabel(claim.confidence?.consistency)}</dd></div><div><dt>Покрытие</dt><dd>{machineLabel(claim.confidence?.coverage)}</dd></div><div><dt>Неопределённость</dt><dd>{claim.confidence?.uncertainty?.length || 0}</dd></div></dl>
       <code>{claim.claim_id}</code>
       {linkedRecords.map((record) => <details className="evidence-record" key={record.evidence_id}>
-        <summary aria-label={`Раскрыть Evidence Record ${record.evidence_id}`}><strong>Evidence Record · {record.source_kind}</strong><span>{record.observed_at || "as_of unavailable"}</span></summary>
+        <summary aria-label={`Раскрыть запись доказательства ${record.evidence_id}`}><strong>Запись доказательства · {record.source_kind}</strong><span>{record.observed_at || "дата наблюдения недоступна"}</span></summary>
         <div>
           {record.raw?.quote && <blockquote>«{record.raw.quote}»</blockquote>}
-          <p><strong>Bounded raw value</strong><code>{evidenceValue(record.raw?.value)}</code></p>
-          <p><strong>Raw locator</strong><code>{evidenceValue(record.source_locator)}</code></p>
-          <p><strong>Transform metadata</strong><code>{evidenceValue(record.transforms)}</code></p>
-          <p><strong>Versions and hashes</strong><code>{evidenceValue({ versions: record.versions, extraction: record.extraction, raw_sha256: record.raw?.sha256, record_hash: record.record_hash })}</code></p>
+          <p><strong>Ограниченное исходное значение</strong><code>{evidenceValue(record.raw?.value)}</code></p>
+          <p><strong>Исходный указатель</strong><code>{evidenceValue(record.source_locator)}</code></p>
+          <p><strong>Метаданные преобразований</strong><code>{evidenceValue(record.transforms)}</code></p>
+          <p><strong>Версии и хеши</strong><code>{evidenceValue({ versions: record.versions, extraction: record.extraction, raw_sha256: record.raw?.sha256, record_hash: record.record_hash })}</code></p>
         </div>
       </details>)}
     </div>
@@ -330,35 +331,35 @@ function AnalyticsEvidencePanel({ evidence }: { evidence: Record<string, any> })
   const prelaunchCost = evidence.prelaunch_cost || {};
   const marketEvidence = evidence.market_evidence || null;
   return <section className="evidence-overview" aria-labelledby="evidence-overview-title">
-    <header><div><p className="eyebrow">Versioned evidence snapshot</p><h3 id="evidence-overview-title">Краткая сводка аналитики</h3><p>Факты раскрываются до claim и source locator; score и hard blockers не смешиваются.</p></div><strong className={String(evidence.recommendation_status || "").toLowerCase()}>{evidenceStatusLabel(evidence.recommendation_status)}</strong></header>
-    <div className="evidence-kpis"><Metric label="Источники" value={`${summary.sources_verified || 0} проверено · ${summary.sources_partial || 0} частично`} copy={`${summary.sources_unavailable || 0} недоступно из ${summary.sources_total || 0}`} /><Metric label="Claims" value={String(summary.claims_supported || 0)} copy="Каждый связан с Evidence Record" /><Metric label="Стоимость до запуска" value={prelaunchCost.status === "AVAILABLE" ? String(prelaunchCost.compact_source || "Qualified source") : "Недоступна"} copy={prelaunchCost.status === "AVAILABLE" ? `${prelaunchCost.range?.low}–${prelaunchCost.range?.high} ${prelaunchCost.currency} · VAT ${prelaunchCost.vat_treatment}` : "Нет квалифицированного comparable source"} /></div>
+    <header><div><p className="eyebrow">Версионный снимок доказательств</p><h3 id="evidence-overview-title">Краткая сводка аналитики</h3><p>Факты раскрываются до утверждения и указателя источника; оценка и жёсткие блокирующие причины не смешиваются.</p></div><strong className={String(evidence.recommendation_status || "").toLowerCase()}>{evidenceStatusLabel(evidence.recommendation_status)}</strong></header>
+    <div className="evidence-kpis"><Metric label="Источники" value={`${summary.sources_verified || 0} проверено · ${summary.sources_partial || 0} частично`} copy={`${summary.sources_unavailable || 0} недоступно из ${summary.sources_total || 0}`} /><Metric label="Утверждения" value={String(summary.claims_supported || 0)} copy="Каждое связано с записью доказательства" /><Metric label="Стоимость до запуска" value={prelaunchCost.status === "AVAILABLE" ? String(prelaunchCost.compact_source || "Подходящий источник") : "Недоступна"} copy={prelaunchCost.status === "AVAILABLE" ? `${prelaunchCost.range?.low}–${prelaunchCost.range?.high} ${prelaunchCost.currency} · НДС ${prelaunchCost.vat_treatment}` : "Нет подходящего сопоставимого источника"} /></div>
     {marketEvidence && <MarketEvidenceDisclosure evidence={marketEvidence} context="model" />}
-    <dl className="confidence-vector" aria-label="Confidence dimensions"><div><dt>Качество</dt><dd>{confidence.quality || "UNKNOWN"}</dd></div><div><dt>Свежесть</dt><dd>{confidence.freshness || "UNKNOWN"}</dd></div><div><dt>Согласованность</dt><dd>{confidence.consistency || "NOT_EVALUATED"}</dd></div><div><dt>Покрытие</dt><dd>{confidence.coverage || "UNKNOWN"}</dd></div><div><dt>Неопределённость</dt><dd>{uncertainties.length}</dd></div></dl>
-    <div className="evidence-source-grid">{sources.map((source: Record<string, any>) => <details key={source.source_id} className={`evidence-source ${String(source.status || "").toLowerCase()}`}><summary><span /><div><strong>{source.title}</strong><small>{sourceStatusLabel(source.status)}</small></div></summary><div className="evidence-source-body">{source.facts?.length > 0 && <ul>{source.facts.map((fact: string) => <li key={fact}>{fact}</li>)}</ul>}{source.limitations?.length > 0 && <ul className="limitations">{source.limitations.map((item: string) => <li key={item}>{item}</li>)}</ul>}<code>{source.source_kind} · {source.observed_at || "as_of unavailable"}</code></div></details>)}</div>
-    {blockers.length > 0 && <section className="evidence-blockers" aria-labelledby="evidence-hard-blockers"><strong id="evidence-hard-blockers">Hard blockers оцениваются отдельно от score</strong><ul>{blockers.map((item: string) => <li key={item}>{item}</li>)}</ul></section>}
+    <dl className="confidence-vector" aria-label="Измерения уверенности"><div><dt>Качество</dt><dd>{machineLabel(confidence.quality)}</dd></div><div><dt>Свежесть</dt><dd>{machineLabel(confidence.freshness)}</dd></div><div><dt>Согласованность</dt><dd>{machineLabel(confidence.consistency)}</dd></div><div><dt>Покрытие</dt><dd>{machineLabel(confidence.coverage)}</dd></div><div><dt>Неопределённость</dt><dd>{uncertainties.length}</dd></div></dl>
+    <div className="evidence-source-grid">{sources.map((source: Record<string, any>) => <details key={source.source_id} className={`evidence-source ${String(source.status || "").toLowerCase()}`}><summary><span /><div><strong>{localizedText(source.title)}</strong><small>{sourceStatusLabel(source.status)}</small></div></summary><div className="evidence-source-body">{source.facts?.length > 0 && <ul>{source.facts.map((fact: string) => <li key={fact}>{localizedText(fact)}</li>)}</ul>}{source.limitations?.length > 0 && <ul className="limitations">{source.limitations.map((item: string) => <li key={item}>{localizedText(item)}</li>)}</ul>}<code>{source.source_kind} · {source.observed_at || "дата наблюдения недоступна"}</code></div></details>)}</div>
+    {blockers.length > 0 && <section className="evidence-blockers" aria-labelledby="evidence-hard-blockers"><strong id="evidence-hard-blockers">Жёсткие блокирующие причины оцениваются отдельно от балла</strong><ul>{blockers.map((item: string) => <li key={item}>{localizedText(item)}</li>)}</ul></section>}
     <div className="evidence-separate-grid">
-      <section className="evidence-missing" aria-labelledby="evidence-missing-title"><strong id="evidence-missing-title">Missing evidence</strong>{gaps.length ? <ul>{gaps.map((gap: Record<string, any>) => <li key={gap.gap_id}><b>{gap.material ? "MATERIAL" : "GAP"}</b>{gap.description}</li>)}</ul> : <p>Не зафиксировано.</p>}</section>
-      <section className="evidence-conflicts" aria-labelledby="evidence-conflicts-title"><strong id="evidence-conflicts-title">Conflicts</strong>{conflicts.length ? <ul>{conflicts.map((conflict: Record<string, any>) => <li key={conflict.conflict_id}><b>{conflict.material ? "MATERIAL" : conflict.relation}</b>{conflict.predicate} · {conflict.resolution}</li>)}</ul> : <p>Неразрешённых конфликтов нет.</p>}</section>
+      <section className="evidence-missing" aria-labelledby="evidence-missing-title"><strong id="evidence-missing-title">Недостающие доказательства</strong>{gaps.length ? <ul>{gaps.map((gap: Record<string, any>) => <li key={gap.gap_id}><b>{gap.material ? "СУЩЕСТВЕННО" : "ПРОБЕЛ"}</b>{localizedText(gap.description)}</li>)}</ul> : <p>Не зафиксировано.</p>}</section>
+      <section className="evidence-conflicts" aria-labelledby="evidence-conflicts-title"><strong id="evidence-conflicts-title">Противоречия</strong>{conflicts.length ? <ul>{conflicts.map((conflict: Record<string, any>) => <li key={conflict.conflict_id}><b>{conflict.material ? "СУЩЕСТВЕННО" : machineLabel(conflict.relation)}</b>{localizedText(conflict.predicate)} · {localizedText(conflict.resolution)}</li>)}</ul> : <p>Неразрешённых конфликтов нет.</p>}</section>
     </div>
-    {uncertainties.length > 0 && <div className="evidence-uncertainty"><strong>Неопределённость раскрыта, а не заполнена догадкой</strong><ul>{uncertainties.slice(0, 5).map((item: string) => <li key={item}>{item}</li>)}</ul></div>}
-    <details className="evidence-index"><summary aria-label="Раскрыть Evidence index">Evidence index · claim → Evidence Record → bounded raw locator/value · {claims.length} claims · {records.length} records</summary><div>{claims.map((claim: Record<string, any>) => <EvidenceClaimDisclosure key={claim.claim_id} claim={claim} records={records} />)}</div></details>
-    <footer><code>{String(evidence.snapshot_id || "")}</code><span>generated {evidence.generated_at}</span><span>as of {evidence.as_of}</span><span>{evidence.schema_version}</span></footer>
+    {uncertainties.length > 0 && <div className="evidence-uncertainty"><strong>Неопределённость раскрыта, а не заполнена догадкой</strong><ul>{uncertainties.slice(0, 5).map((item: string) => <li key={item}>{localizedText(item)}</li>)}</ul></div>}
+    <details className="evidence-index"><summary aria-label="Раскрыть указатель доказательств">Указатель доказательств · утверждение → запись доказательства → ограниченный исходный указатель и значение · {claims.length} утверждений · {records.length} записей</summary><div>{claims.map((claim: Record<string, any>) => <EvidenceClaimDisclosure key={claim.claim_id} claim={claim} records={records} />)}</div></details>
+    <footer><code>{String(evidence.snapshot_id || "")}</code><span>создано {evidence.generated_at}</span><span>актуально на {evidence.as_of}</span><span>{evidence.schema_version}</span></footer>
   </section>;
 }
 
 function BusinessModelSummary({ model }: { model: Record<string, any> }) {
-  return <section className="business-model-summary" aria-labelledby="business-model-summary-title"><header><p className="eyebrow">Business model</p><h3 id="business-model-summary-title">Краткая модель бизнеса</h3></header><div><Metric label="Предложение" value={model.product || "Missing evidence"} copy={model.value || "Ценность не подтверждена"} /><Metric label="Аудитория" value={model.audience || "Missing evidence"} copy={model.exclusions || "Исключения не подтверждены"} /><Metric label="Квалифицированный результат" value={model.qualified_result || "Missing evidence"} copy="Owner confirmation хранится отдельно от first-party evidence" /></div></section>;
+  return <section className="business-model-summary" aria-labelledby="business-model-summary-title"><header><p className="eyebrow">Модель бизнеса</p><h3 id="business-model-summary-title">Краткая модель бизнеса</h3></header><div><Metric label="Предложение" value={model.product || "Доказательство отсутствует"} copy={model.value || "Ценность не подтверждена"} /><Metric label="Аудитория" value={model.audience || "Доказательство отсутствует"} copy={model.exclusions || "Исключения не подтверждены"} /><Metric label="Квалифицированный результат" value={model.qualified_result || "Доказательство отсутствует"} copy="Подтверждение владельца хранится отдельно от доказательств собственного сайта" /></div></section>;
 }
 
 const landingDimensionLabels: Record<string, string> = {
-  OFFER_MESSAGE_MATCH: "Offer / message match",
-  CTA_ACTION: "CTA / qualified action",
-  FORMS: "Forms",
-  MEASUREMENT_READINESS: "Measurement readiness",
-  TECHNICAL_ACCESS: "Technical access",
-  PERFORMANCE: "Performance",
-  ACCESSIBILITY: "Accessibility",
-  OBSERVED_METRIKA_BEHAVIOR: "Observed Metrika behavior",
+  OFFER_MESSAGE_MATCH: "Соответствие предложения сообщению",
+  CTA_ACTION: "Призыв к целевому действию",
+  FORMS: "Формы",
+  MEASUREMENT_READINESS: "Готовность измерения",
+  TECHNICAL_ACCESS: "Техническая доступность",
+  PERFORMANCE: "Быстродействие",
+  ACCESSIBILITY: "Доступность интерфейса",
+  OBSERVED_METRIKA_BEHAVIOR: "Наблюдаемое поведение Метрики",
 };
 
 function LandingAdvisoryPanel({ run }: { run: Record<string, any> | null }) {
@@ -367,13 +368,13 @@ function LandingAdvisoryPanel({ run }: { run: Record<string, any> | null }) {
   const coverage = Array.isArray(run?.coverage) ? run.coverage : [];
   const insufficient = !run || run.status === "INSUFFICIENT_EVIDENCE" || run.status === "SAFETY_BLOCKED" || coverage.some((item: Record<string, any>) => item.evidence_status === "INSUFFICIENT_EVIDENCE");
   return <section className="landing-advisory" aria-labelledby="landing-advisory-title">
-    <header><div><p className="eyebrow">LANDING PAGE · ADVISORY ONLY</p><h3 id="landing-advisory-title">Landing advisory</h3><p>Неблокирующий анализ точной Strategy revision. Findings не меняют eligibility, publish readiness, score, rank, thresholds, calibration или publish fingerprint.</p></div><strong>ADVISORY · NON-BLOCKING</strong></header>
-    {!run && <div className="advisory-insufficient" role="status"><strong>Недостаточно доказательств</strong><p>Сначала утвердите Campaign Strategy revision. Отсутствие landing findings не считается успехом и не блокирует publish decisions.</p></div>}
+    <header><div><p className="eyebrow">ПОСАДОЧНАЯ СТРАНИЦА · ТОЛЬКО РЕКОМЕНДАЦИИ</p><h3 id="landing-advisory-title">Рекомендации по посадочной странице</h3><p>Неблокирующий анализ точной редакции стратегии. Выводы не меняют допустимость, готовность к публикации, оценку, место, пороги, калибровку или отпечаток публикации.</p></div><strong>РЕКОМЕНДАЦИИ · НЕ БЛОКИРУЮТ</strong></header>
+    {!run && <div className="advisory-insufficient" role="status"><strong>Недостаточно доказательств</strong><p>Сначала утвердите редакцию стратегии кампании. Отсутствие выводов по посадочной странице не считается успехом и не блокирует решения о публикации.</p></div>}
     {run && <>
-      <div className="advisory-lineage"><span>{run.strategy_revision_id}</span><code>{run.final_url || run.requested_url}</code><b>{run.status}</b></div>
-      {insufficient && <div className="advisory-insufficient" role="status"><strong>Insufficient evidence раскрыто явно</strong><p>Неполные tool runs, Metrika coverage или manual-review items не превращены в zero, pass или факт.</p></div>}
-      <section className="advisory-priorities" aria-label="До трёх landing advisory priorities"><h4>Приоритеты · максимум 3</h4>{priorities.length ? <ol>{priorities.map((item) => <li key={item.finding_id}><span>{landingDimensionLabels[item.dimension] || item.dimension}</span><strong>{item.title}</strong><small>{item.type} · {item.evidence_status}</small></li>)}</ol> : <p>Детерминированных приоритетов нет. Это не означает доказанное отсутствие проблем.</p>}</section>
-      <details className="advisory-details"><summary>Все details · evidence types, statuses и tool versions</summary><div className="advisory-tools"><code>{JSON.stringify({ required: run.tools?.required, observed: run.tools?.observed, version_status: run.tools?.version_status })}</code><p>Lighthouse: {run.lighthouse?.runs?.length || 0}/5 sequential desktop runs · median: {run.lighthouse?.median ? "available" : "insufficient evidence"}</p><p>axe incomplete: {run.axe?.categories?.incomplete?.count ?? "unavailable"} · {run.axe?.manual_review?.disclosure}</p></div><ul>{findings.map((item: Record<string, any>) => <li key={item.finding_id}><header><strong>{landingDimensionLabels[item.dimension] || item.dimension}</strong><span>{item.type} · {item.evidence_status}</span></header><p>{item.title}</p><small>{item.detail}</small></li>)}</ul></details>
+      <div className="advisory-lineage"><span>{run.strategy_revision_id}</span><code>{run.final_url || run.requested_url}</code><b>{machineLabel(run.status)}</b></div>
+      {insufficient && <div className="advisory-insufficient" role="status"><strong>Недостаток доказательств раскрыт явно</strong><p>Неполные запуски инструментов, покрытие Метрики и элементы ручной проверки не превращены в ноль, успех или факт.</p></div>}
+      <section className="advisory-priorities" aria-label="До трёх приоритетных рекомендаций по посадочной странице"><h4>Приоритеты · максимум 3</h4>{priorities.length ? <ol>{priorities.map((item) => <li key={item.finding_id}><span>{landingDimensionLabels[item.dimension] || item.dimension}</span><strong>{localizedText(item.title)}</strong><small>{machineLabel(item.type)} · {machineLabel(item.evidence_status)}</small></li>)}</ol> : <p>Детерминированных приоритетов нет. Это не означает доказанное отсутствие проблем.</p>}</section>
+      <details className="advisory-details"><summary>Все подробности · типы доказательств, состояния и версии инструментов</summary><div className="advisory-tools"><code>{JSON.stringify({ required: run.tools?.required, observed: run.tools?.observed, version_status: run.tools?.version_status })}</code><p>Lighthouse: {run.lighthouse?.runs?.length || 0}/5 последовательных запусков для компьютера · медиана: {run.lighthouse?.median ? "доступна" : "недостаточно доказательств"}</p><p>Незавершённые проверки axe-core: {run.axe?.categories?.incomplete?.count ?? "недоступно"} · {localizedText(run.axe?.manual_review?.disclosure)}</p></div><ul>{findings.map((item: Record<string, any>) => <li key={item.finding_id}><header><strong>{landingDimensionLabels[item.dimension] || item.dimension}</strong><span>{machineLabel(item.type)} · {machineLabel(item.evidence_status)}</span></header><p>{localizedText(item.title)}</p><small>{localizedText(item.detail)}</small></li>)}</ul></details>
     </>}
   </section>;
 }
@@ -388,13 +389,13 @@ function ModelStep({ payload, apply, back }: { payload: Payload; apply: (action:
     void apply("save_business_model", Object.fromEntries(["product", "audience", "value", "qualified_result", "exclusions"].map((name) => [name, fieldValue(form, name)])));
   }
   return <>
-    <ArtifactHead eyebrow="Шаг 2 · агентное исследование" title="Агент уже собрал модель бизнеса" copy="Сначала — краткая сводка, затем раскрываемые доказательства. Исправьте только неверную гипотезу или факт, которого действительно нет в разрешённых источниках." badge="AGENT RESEARCH" />
+    <ArtifactHead eyebrow="Шаг 2 · агентное исследование" title="Агент уже собрал модель бизнеса" copy="Сначала — краткая сводка, затем раскрываемые доказательства. Исправьте только неверную гипотезу или факт, которого действительно нет в разрешённых источниках." badge="ИССЛЕДОВАНИЕ АГЕНТА" />
     <BusinessModelSummary model={model} />
     <LandingAdvisoryPanel run={payload.state.landing_advisory_run || null} />
     {analyticsEvidence && <AnalyticsEvidencePanel evidence={analyticsEvidence} />}
-    <div className="research-strip"><Metric label="Исследовано" value={`${research.pages_analyzed || 1} страниц`} copy="First-party public HTTPS" /><Metric label="Источники" value={String(research.sources?.length || 0)} copy={(research.sources || []).join(" · ")} /><Metric label="Сделано агентом" value={`${research.completed_fields?.length || 0} / 5 полей`} copy="Человеку — подтверждение и разногласия" /></div>
-    {model.assumptions?.length > 0 && <div className="assumption"><strong>Где нужна проверка</strong><span>{model.assumptions.join(" · ")}</span></div>}
-    {payload.state.strategy && <div className="material-impact"><strong>До material Model change</strong><p>Strategy, Recommendation Set, Campaign Drafts, shortlist и confirmation будут инвалидированы. Пробелы и техническая нормализация значений не запускают каскад.</p></div>}
+    <div className="research-strip"><Metric label="Исследовано" value={`${research.pages_analyzed || 1} страниц`} copy="Публичный HTTPS собственного сайта" /><Metric label="Источники" value={String(research.sources?.length || 0)} copy={(research.sources || []).join(" · ")} /><Metric label="Сделано агентом" value={`${research.completed_fields?.length || 0} / 5 полей`} copy="Человеку — подтверждение и разногласия" /></div>
+    {model.assumptions?.length > 0 && <div className="assumption"><strong>Где нужна проверка</strong><span>{model.assumptions.map((item: string) => localizedText(item)).join(" · ")}</span></div>}
+    {payload.state.strategy && <div className="material-impact"><strong>До существенного изменения модели</strong><p>Стратегия, набор рекомендаций, черновики кампаний, список и подтверждение будут отменены. Пробелы и техническая нормализация значений не запускают каскад.</p></div>}
     <form className="form two" onSubmit={submit}>
       <Field wide label="Рекламируемое предложение" name="product" value={model.product}><Evidence model={model} field="product" /></Field>
       <Field label="Лица, принимающие решение" name="audience" value={model.audience}><Evidence model={model} field="audience" /></Field>
@@ -435,9 +436,9 @@ function StrategyRecommendation({ field }: { field: Record<string, any> }) {
     ? `${recommendation.start_date || "—"} — ${recommendation.end_date || "—"}`
     : recommendation ?? "Рекомендации нет";
   return <aside className={`strategy-recommendation ${field.status === "нет данных" ? "missing" : ""}`}>
-    <span>Рекомендация агента</span><strong>{String(display)}</strong><p>{field.explanation}</p>
+    <span>Рекомендация агента</span><strong>{String(display)}</strong><p>{localizedText(field.explanation)}</p>
     <footer><b>{field.source_category}</b><em>{field.status}</em></footer>
-    {field.prepared_decision && <div className="prepared-decision"><strong>{field.prepared_decision.question}</strong><ul>{field.prepared_decision.consequences.map((item: string) => <li key={item}>{item}</li>)}</ul></div>}
+    {field.prepared_decision && <div className="prepared-decision"><strong>{localizedText(field.prepared_decision.question)}</strong><ul>{field.prepared_decision.consequences.map((item: string) => <li key={item}>{localizedText(item)}</li>)}</ul></div>}
   </aside>;
 }
 
@@ -453,7 +454,7 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
   const minimumWeeklyBudgetAvailable = Number.isFinite(minimumWeeklyBudget) && minimumWeeklyBudget > 0;
   const weeklyBudgetError = minimumWeeklyBudgetAvailable
     ? weeklyBudgetValidationMessage(weeklyBudget, minimumWeeklyBudget)
-    : "Direct minimum недоступен; approval заблокирован без доказуемого platform constraint.";
+    : "Минимум Яндекс Директа недоступен; утверждение заблокировано без доказуемого ограничения площадки.";
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -476,24 +477,24 @@ function StrategyStep({ payload, apply, back }: { payload: Payload; apply: (acti
     const value = initialValue(fieldId);
     if (fieldId === "business_goal") return <input name={fieldId} required readOnly value={String(value)} />;
     if (["advertised_offer", "target_audience", "qualified_result", "exclusions", "core_message"].includes(fieldId)) return <textarea name={fieldId} required defaultValue={String(value)} />;
-    if (fieldId === "geography") return <select name={fieldId} required defaultValue={String(value)}><option value="" disabled>Выберите business-owned географию</option><option>Россия</option><option>Москва</option><option>Санкт-Петербург</option></select>;
+    if (fieldId === "geography") return <select name={fieldId} required defaultValue={String(value)}><option value="" disabled>Выберите географию, заданную владельцем</option><option>Россия</option><option>Москва</option><option>Санкт-Петербург</option></select>;
     if (fieldId === "period") return <div className="period-inputs"><label><span>Начало</span><input type="date" name="period_start" required defaultValue={String(existingPeriod?.start_date || "")} /></label><label><span>Окончание</span><input type="date" name="period_end" required defaultValue={String(existingPeriod?.end_date || "")} /></label></div>;
     if (fieldId === "landing_page") return <input type="url" name={fieldId} required defaultValue={String(value)} />;
-    if (fieldId === "weekly_budget") return <><input className={weeklyBudgetError ? "field-invalid" : ""} type="number" {...(minimumWeeklyBudgetAvailable ? { min: minimumWeeklyBudget } : {})} name={fieldId} required value={weeklyBudget} aria-invalid={Boolean(weeklyBudgetError)} aria-describedby="weekly-budget-help" onChange={(event) => setWeeklyBudget(event.target.value)} /><small id="weekly-budget-help" className={weeklyBudgetError ? "field-error" : ""} role={weeklyBudgetError ? "alert" : undefined}>{weeklyBudgetError || `Минимум Direct: ${minimumWeeklyBudget} ₽; это constraint, не recommendation.`}</small></>;
+    if (fieldId === "weekly_budget") return <><input className={weeklyBudgetError ? "field-invalid" : ""} type="number" {...(minimumWeeklyBudgetAvailable ? { min: minimumWeeklyBudget } : {})} name={fieldId} required value={weeklyBudget} aria-invalid={Boolean(weeklyBudgetError)} aria-describedby="weekly-budget-help" onChange={(event) => setWeeklyBudget(event.target.value)} /><small id="weekly-budget-help" className={weeklyBudgetError ? "field-error" : ""} role={weeklyBudgetError ? "alert" : undefined}>{weeklyBudgetError || `Минимум Яндекс Директа: ${minimumWeeklyBudget} ₽; это ограничение, а не рекомендация.`}</small></>;
     return <input type="number" min="1" name={fieldId} required defaultValue={String(value)} />;
   };
   return <>
-    <ArtifactHead eyebrow="Шаг 3 · одно approval" title="Фиксированный Campaign Strategy questionnaire" copy="Все 11 полей всегда идут в одном порядке. Агент рекомендует только доказуемое; business-owned пробелы остаются подготовленными решениями без defaults." />
-    {existing.strategy_revision_id && <div className="material-impact"><strong>До material Strategy change</strong><p>Будет создана новая immutable Strategy revision, Recommendation Set детерминированно регенерируется, Campaign Drafts и shortlist очистятся, confirmation останется заблокированным до завершения пересчёта. Пробелы и техническая нормализация не запускают каскад.</p></div>}
+    <ArtifactHead eyebrow="Шаг 3 · одно утверждение" title="Фиксированная анкета стратегии кампании" copy="Все 11 полей всегда идут в одном порядке. Агент рекомендует только доказуемое; пробелы, зависящие от владельца, остаются подготовленными решениями без значений по умолчанию." />
+    {existing.strategy_revision_id && <div className="material-impact"><strong>До существенного изменения стратегии</strong><p>Будет создана новая неизменяемая редакция стратегии, набор рекомендаций детерминированно пересоберётся, черновики кампаний и список очистятся, а подтверждение останется заблокированным до завершения пересчёта. Пробелы и техническая нормализация не запускают каскад.</p></div>}
     <form className="strategy-form" onSubmit={submit}>
-      <ol className="strategy-questionnaire" aria-label="Campaign Strategy questionnaire">
+      <ol className="strategy-questionnaire" aria-label="Анкета стратегии кампании">
         {fields.map((item: Record<string, any>, index: number) => <li key={item.field_id} data-strategy-field={item.field_id}>
           <header><span>{index + 1}</span><strong>{strategyFieldLabels[item.field_id] || item.field_id}</strong><code>{item.field_id}</code></header>
           <StrategyRecommendation field={item} />
           <div className="strategy-answer"><span>Утверждаемое значение</span>{inputFor(item.field_id)}</div>
         </li>)}
       </ol>
-      <footer className="actions"><span>Ревизия {payload.revision} · questionnaire {questionnaire.contract_version}</span><button type="button" className="secondary" onClick={back}>Назад</button><button type="submit" disabled={Boolean(weeklyBudgetError) || fields.length !== 11}>Утвердить всю Campaign Strategy</button></footer>
+      <footer className="actions"><span>Ревизия {payload.revision} · анкета {questionnaire.contract_version}</span><button type="button" className="secondary" onClick={back}>Назад</button><button type="submit" disabled={Boolean(weeklyBudgetError) || fields.length !== 11}>Утвердить всю стратегию кампании</button></footer>
     </form>
   </>;
 }
@@ -584,25 +585,25 @@ function DraftStep({ payload, apply, back, openReview }: { payload: Payload; app
     void apply("save_draft", value);
   }
   return <>
-    <ArtifactHead eyebrow="Шаг 4 · Campaign Drafts" title="Campaign Canvas" copy="Ranked cards показывают сравнительный приоритет без predictive claims. Правый drawer редактирует только exact server-supported Direct projection; blocked и hidden Drafts остаются reviewable." />
+    <ArtifactHead eyebrow="Шаг 4 · черновики кампаний" title="Полотно кампаний" copy="Карточки по местам показывают сравнительный приоритет без прогнозных утверждений. Правая панель редактирует только точную проекцию Яндекс Директа, поддержанную сервером; заблокированные и скрытые черновики остаются доступными для проверки." />
     {payload.state.recommendation_recalculation?.material_change === true && <section className="recommendation-recalculated" role="status">
-      <strong>Рекомендация пересчитана</strong><p>{payload.state.recommendation_recalculation.message}</p>
+      <strong>Рекомендация пересчитана</strong><p>{localizedText(payload.state.recommendation_recalculation.message)}</p>
       <ul>{payload.state.recommendation_recalculation.changes?.map((change: Record<string, any>) => <li key={`${change.change_type}-${change.previous_draft_id}-${change.current_draft_id}`}>
         <strong>{change.change_type} · {change.previous_draft_id || "—"} → {change.current_draft_id || "—"}</strong>
-        <small>score {change.previous_score ?? "—"} → {change.current_score ?? "—"} · rank {change.previous_rank ?? "—"} → {change.current_rank ?? "—"}</small>
+        <small>оценка {change.previous_score ?? "—"} → {change.current_score ?? "—"} · место {change.previous_rank ?? "—"} → {change.current_rank ?? "—"}</small>
         {(change.fields || []).length > 0
           ? <ul>{change.fields.map((field: Record<string, any>) => <li key={field.pointer}><code>{field.pointer}</code><span>{evidenceValue(field.previous_normalized_value)} → {evidenceValue(field.current_normalized_value)}</span></li>)}</ul>
-          : <span>Без соответствующего material Direct projection delta.</span>}
+          : <span>Без соответствующего существенного изменения проекции Яндекс Директа.</span>}
       </li>)}</ul>
     </section>}
     <RecommendationSetDisclosure recommendationSet={recommendationSet} />
-    <section className="canvas-controls" aria-label="Фильтры и сортировка Campaign Canvas">
-      <label><span>Variant</span><select aria-label="Фильтр variant" value={variantFilter} onChange={(event) => setVariantFilter(event.target.value as typeof variantFilter)}><option value="ALL">Все variants</option><option value="CONTROL">Comparator / control</option><option value="IMPROVEMENT">Improvements</option></select></label>
-      <label><span>Evidence</span><select aria-label="Фильтр evidence status" value={evidenceFilter} onChange={(event) => setEvidenceFilter(event.target.value as CampaignCanvasFilters["evidence"])}><option value="ALL">Все evidence statuses</option>{evidenceStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
-      <label><span>Sort</span><select aria-label="Сортировка Drafts" value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="RANK">Semantic rank</option><option value="SCORE">Comparative score</option></select></label>
-      <label className="show-hidden"><input type="checkbox" checked={includeHidden} onChange={(event) => setIncludeHidden(event.target.checked)} /><span>Показать hidden Drafts с suppression reasons</span></label>
+    <section className="canvas-controls" aria-label="Фильтры и сортировка полотна кампаний">
+      <label><span>Вариант</span><select aria-label="Фильтр вариантов" value={variantFilter} onChange={(event) => setVariantFilter(event.target.value as typeof variantFilter)}><option value="ALL">Все варианты</option><option value="CONTROL">Контрольные варианты</option><option value="IMPROVEMENT">Улучшения</option></select></label>
+      <label><span>Доказательства</span><select aria-label="Фильтр состояния доказательств" value={evidenceFilter} onChange={(event) => setEvidenceFilter(event.target.value as CampaignCanvasFilters["evidence"])}><option value="ALL">Все состояния доказательств</option>{evidenceStatuses.map((status) => <option key={status} value={status}>{machineLabel(status)}</option>)}</select></label>
+      <label><span>Сортировка</span><select aria-label="Сортировка черновиков" value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="RANK">Смысловое место</option><option value="SCORE">Сравнительная оценка</option></select></label>
+      <label className="show-hidden"><input type="checkbox" checked={includeHidden} onChange={(event) => setIncludeHidden(event.target.checked)} /><span>Показать скрытые черновики с причинами скрытия</span></label>
     </section>
-    <section className="draft-canvas" aria-label="Ranked Campaign Draft cards">
+    <section className="draft-canvas" aria-label="Карточки черновиков кампаний по местам">
       {filteredDrafts.map((item: Record<string, any>) => {
         const control = shortlistControlByDraft.get(item.draft_id);
         const shortlistAction = control?.status === "SELECTED"
@@ -611,42 +612,42 @@ function DraftStep({ payload, apply, back, openReview }: { payload: Payload; app
             ? "restore_to_shortlist"
             : "add_to_shortlist";
         const shortlistLabel = control?.status === "SELECTED"
-          ? "Исключить из shortlist"
+          ? "Исключить из списка"
           : control?.status === "REMOVED"
-            ? "Вернуть в shortlist"
-            : "Добавить в shortlist";
+            ? "Вернуть в список"
+            : "Добавить в список";
         return <article key={item.draft_id} className={`draft-card-shell ${item.draft_id === selected?.draft_id ? "selected" : ""}`}>
           <CampaignDraftCard draft={item} selected={item.draft_id === selected?.draft_id} />
           <div className="draft-card-actions">
             <button type="button" aria-label={`${shortlistLabel}: ${item.draft_id}`} disabled={!control || control.status === "BLOCKED"} onClick={() => void apply(shortlistAction, undefined, { draft_id: item.draft_id })}>{shortlistLabel}</button>
-            <button type="button" aria-label={`Открыть Draft ${item.draft_id}`} onClick={(event) => openDrawer(item.draft_id, event.currentTarget)}>Открыть точную Direct projection</button>
+            <button type="button" aria-label={`Открыть черновик ${item.draft_id}`} onClick={(event) => openDrawer(item.draft_id, event.currentTarget)}>Открыть точную проекцию Яндекс Директа</button>
           </div>
-          {control?.status === "BLOCKED" && <small className="shortlist-disabled-reason" role="status">Shortlist недоступен: {control.disabled_reason}</small>}
+          {control?.status === "BLOCKED" && <small className="shortlist-disabled-reason" role="status">Список недоступен: {localizedText(control.disabled_reason)}</small>}
         </article>;
       })}
-      {filteredDrafts.length === 0 && <p className="canvas-empty">Нет Drafts для выбранных deterministic filters. Измените variant/evidence filter; кандидаты остаются в audit.</p>}
+      {filteredDrafts.length === 0 && <p className="canvas-empty">Нет черновиков для выбранных детерминированных фильтров. Измените фильтр варианта или доказательств; кандидаты остаются в истории проверки.</p>}
     </section>
-    {revisionHistory.length > 0 && <details className="hidden-drafts revision-history"><summary>История Strategy и Draft · {revisionHistory.length}</summary><ul>{revisionHistory.map((item: Record<string, any>) => <li key={item.revision}><strong>Ревизия {item.revision} · {item.status}</strong><span>{item.strategy_revision_id}{item.draft_revision_id ? ` · ${item.draft_revision_id}` : " · Draft ещё не зафиксирован"}{item.publish_fingerprint ? ` · ${String(item.publish_fingerprint).slice(0, 12)}…` : ""}</span></li>)}</ul></details>}
-    <section className="shortlist-footer" aria-label="Persistent shortlist summary">
-      <div><p className="eyebrow">ORDERED SHORTLIST · {shortlistSelections.length}</p><strong>{shortlistSelections.length ? "Точный пакет выбранных Campaign Drafts" : "Добавьте publish-ready Drafts"}</strong><small>Footer не зависит от card filters. Порядок выбора фиксируется в package authority.</small></div>
+    {revisionHistory.length > 0 && <details className="hidden-drafts revision-history"><summary>История стратегии и черновиков · {revisionHistory.length}</summary><ul>{revisionHistory.map((item: Record<string, any>) => <li key={item.revision}><strong>Ревизия {item.revision} · {machineLabel(item.status)}</strong><span>{item.strategy_revision_id}{item.draft_revision_id ? ` · ${item.draft_revision_id}` : " · черновик ещё не зафиксирован"}{item.publish_fingerprint ? ` · ${String(item.publish_fingerprint).slice(0, 12)}…` : ""}</span></li>)}</ul></details>}
+    <section className="shortlist-footer" aria-label="Постоянная сводка списка">
+      <div><p className="eyebrow">УПОРЯДОЧЕННЫЙ СПИСОК · {shortlistSelections.length}</p><strong>{shortlistSelections.length ? "Точный пакет выбранных черновиков кампаний" : "Добавьте готовые к публикации черновики"}</strong><small>Нижняя панель не зависит от фильтров карточек. Порядок выбора фиксируется в полномочии пакета.</small></div>
       <ol>{shortlistSelections.map((item: Record<string, any>) => <li key={item.draft_id}><span>{item.draft_revision_id}</span><code>{String(item.publish_fingerprint || "").slice(0, 18)}…</code></li>)}</ol>
-      <button type="button" disabled={!shortlistSelections.length} onClick={() => payload.state.package_review ? openReview() : void apply("review_package")}>{payload.state.package_review ? "Открыть current package review" : "Создать package review"}</button>
+      <button type="button" disabled={!shortlistSelections.length} onClick={() => payload.state.package_review ? openReview() : void apply("review_package")}>{payload.state.package_review ? "Открыть текущую проверку пакета" : "Создать проверку пакета"}</button>
     </section>
-    {payload.state.last_decision_invalidation && !payload.state.package_review && <p className="decision-invalidation" role="status"><strong>Предыдущая authority инвалидирована:</strong> {payload.state.last_decision_invalidation.reason}</p>}
-    <footer className="actions"><span>{filteredDrafts.length} Drafts в canvas · {drafts.length} persisted Draft candidates</span><button type="button" className="secondary" onClick={() => void apply("recalculate_recommendations")}>Проверить active playbook</button><button type="button" className="secondary" onClick={back}>Назад</button></footer>
+    {payload.state.last_decision_invalidation && !payload.state.package_review && <p className="decision-invalidation" role="status"><strong>Предыдущее полномочие отменено:</strong> {localizedText(payload.state.last_decision_invalidation.reason)}</p>}
+    <footer className="actions"><span>{filteredDrafts.length} черновиков на полотне · {drafts.length} сохранённых кандидатов</span><button type="button" className="secondary" onClick={() => void apply("recalculate_recommendations")}>Проверить действующую сводку правил</button><button type="button" className="secondary" onClick={back}>Назад</button></footer>
     {drawerOpen && selected?.draft_id && <div className="drawer-layer">
       <aside ref={drawerRef} className="campaign-drawer" role="dialog" aria-modal="true" aria-labelledby="campaign-drawer-title">
-        <header className="drawer-head"><div><p className="eyebrow">CAMPAIGN DRAFT · REVIEW</p><h2 id="campaign-drawer-title">Точная будущая Direct projection</h2><span>{selected.draft_revision_id} · {String(selected.publish_fingerprint || "")}</span></div><button ref={closeButtonRef} type="button" aria-label="Закрыть drawer" onClick={closeDrawer}>×</button></header>
+        <header className="drawer-head"><div><p className="eyebrow">ЧЕРНОВИК КАМПАНИИ · ПРОВЕРКА</p><h2 id="campaign-drawer-title">Точная будущая проекция Яндекс Директа</h2><span>{selected.draft_revision_id} · {String(selected.publish_fingerprint || "")}</span></div><button ref={closeButtonRef} type="button" aria-label="Закрыть панель" onClick={closeDrawer}>×</button></header>
         <div className="drawer-scroll">
-          <div className="draft-lineage"><strong>{selected.variant?.kind === "CONTROL" ? selected.variant?.control_basis?.kind : selected.variant?.hypothesis?.changed_family}</strong><span>{selected.strategy_revision_id} · {selected.draft_revision_id}</span><small>{selected.playbook_release_id || "FAIL_CLOSED"}@{selected.playbook_release_version || "—"} · {selected.capability_profile_id}@{selected.capability_profile_version}</small></div>
+          <div className="draft-lineage"><strong>{selected.variant?.kind === "CONTROL" ? machineLabel(selected.variant?.control_basis?.kind) : machineLabel(selected.variant?.hypothesis?.changed_family)}</strong><span>{selected.strategy_revision_id} · {selected.draft_revision_id}</span><small>{selected.playbook_release_id || "безопасно заблокировано"}@{selected.playbook_release_version || "—"} · {selected.capability_profile_id}@{selected.capability_profile_version}</small></div>
           <DraftPublicationBlockers draft={selected} />
-          {!selectedShortlistEligible && <div className="preflight-blocked"><strong>Review доступен · Publish readiness заблокирована</strong><p>Hard blocker, hidden disposition или unresolved EVIDENCE_GAP нельзя обойти score, edit или provisional shortlist.</p></div>}
+          {!selectedShortlistEligible && <div className="preflight-blocked"><strong>Проверка доступна · готовность к публикации заблокирована</strong><p>Жёсткую блокирующую причину, скрытое состояние или неразрешённый пробел в доказательствах нельзя обойти оценкой, правкой или предварительным списком.</p></div>}
           <DraftEditFeedback draft={selected} />
           <ViabilityScoreDisclosure score={selected.viability_score} delta={selected.score_delta} />
           {selected.market_evidence && <MarketEvidenceDisclosure evidence={selected.market_evidence} context="draft" />}
           <form key={`${selected.draft_id}-${selected.draft_revision_id}-${payload.revision}`} className="drawer-form" onSubmit={submit}>
             <DraftFieldRegistryDisclosure registry={recommendationSet.field_registry} draft={selected} />
-            <Actions revision={payload.revision} label={selectedShortlistEligible ? "Сохранить material revision" : "Сохранить review-правки без publish readiness"} submit />
+            <Actions revision={payload.revision} label={selectedShortlistEligible ? "Сохранить существенную редакцию" : "Сохранить проверочные правки без готовности к публикации"} submit />
           </form>
         </div>
       </aside>
@@ -655,12 +656,12 @@ function DraftStep({ payload, apply, back, openReview }: { payload: Payload; app
 }
 
 const executionProgressLabels = {
-  validation: "Validation",
-  creation: "Creation",
-  suspension: "Suspension",
-  child_graph: "Child graph",
-  readback: "Readback",
-  moderation: "Moderation",
+  validation: "Проверка",
+  creation: "Создание",
+  suspension: "Остановка",
+  child_graph: "Дочерние объекты",
+  readback: "Обратная проверка",
+  moderation: "Модерация",
 } as const;
 
 function PackageExecutionPanel({
@@ -679,20 +680,20 @@ function PackageExecutionPanel({
   startCorrection?: (itemExecutionId: string) => void;
 }) {
   const items = Array.isArray(execution.items) ? execution.items : [];
-  return <section className="package-executions" aria-label="Package campaign executions">
-    <header><div><p className="eyebrow">DURABLE INDEPENDENT EXECUTIONS</p><h3>Результат каждого Campaign Draft сохранён отдельно</h3><p>Package verdict {execution.verdict || "PENDING"} · status {execution.status}. PASS появляется только после полной accountability selected set.</p></div><strong>{execution.dispatched_count}/{execution.selected_count}</strong></header>
+  return <section className="package-executions" aria-label="Исполнения кампаний пакета">
+    <header><div><p className="eyebrow">СОХРАНЯЕМЫЕ НЕЗАВИСИМЫЕ ИСПОЛНЕНИЯ</p><h3>Результат каждого черновика кампании сохранён отдельно</h3><p>Вердикт пакета: {machineLabel(execution.verdict, "Ожидает")} · состояние: {machineLabel(execution.status)}. Успех появляется только после полной отчётности по всему выбранному набору.</p></div><strong>{execution.dispatched_count}/{execution.selected_count}</strong></header>
     <ol>{items.map((item: Record<string, any>) => <li key={item.item_execution_id} className={`package-execution-item ${String(item.ownership || "unknown").toLowerCase()}`}>
-      <header><div><span>#{Number(item.position) + 1}</span><strong>{item.selection?.draft_revision_id}</strong><code>{item.item_execution_id}</code></div><div><b>{item.status}</b><small>Ownership · {item.ownership}</small></div></header>
-      <dl className="execution-progress">{Object.entries(executionProgressLabels).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{item.progress?.[key] || "PENDING"}</dd></div>)}</dl>
-      <div className="execution-identifiers"><span>Campaign <code>{item.provider_ids?.campaign_id || "—"}</code></span><span>Ad groups <code>{item.provider_ids?.ad_group_ids?.join(", ") || item.provider_ids?.ad_group_id || "—"}</code></span><span>Keywords <code>{item.provider_ids?.keyword_ids?.join(", ") || item.provider_ids?.keyword_id || "—"}</code></span><span>Ads <code>{item.provider_ids?.ad_ids?.join(", ") || "—"}</code></span></div>
-      {item.accountability && <dl className="execution-progress"><div><dt>Graph</dt><dd>{item.accountability.supported_graph_verified ? "VERIFIED" : "PENDING"}</dd></div><div><dt>Non-serving</dt><dd>{item.accountability.campaign_suspended ? "SUSPENDED" : "UNCONFIRMED"}</dd></div><div><dt>Ads terminal</dt><dd>{item.accountability.all_ads_terminal ? "YES" : "NO"}</dd></div><div><dt>Direct accepted</dt><dd>{item.accountability.direct_accepted ? "YES" : "NO"}</dd></div></dl>}
-      <footer><span>Containment · <strong>{item.containment}</strong></span><span>Account lock · <strong>{item.account_lock}</strong></span></footer>
-      {item.moderation?.next_poll_at && <p className="execution-failure" role="status"><strong>Next moderation poll</strong> · {item.moderation.next_poll_at} · attempts {item.moderation.poll_attempts}<button type="button" disabled={busy || !canPoll} onClick={() => poll(String(item.item_execution_id))}>Проверить due item</button></p>}
-      {Array.isArray(item.moderation?.ad_outcomes) && item.moderation.ad_outcomes.length > 0 && <details><summary>Ad moderation outcomes · {item.moderation.ad_outcomes.length}</summary><ul>{item.moderation.ad_outcomes.map((ad: Record<string, any>) => <li key={ad.ad_id}><strong>{ad.ad_id} · {ad.status}</strong><span>{ad.status_clarification || "StatusClarification отсутствует"}</span></li>)}</ul></details>}
-      {item.failure && <p className="execution-failure" role="status"><strong>{item.failure.code}</strong> · {item.failure.message}</p>}
-      {item.status === "REJECTED_NEEDS_EDIT" && startCorrection && <button type="button" className="correction-start" disabled={busy || correctionItemIds.includes(String(item.item_execution_id))} onClick={() => startCorrection(String(item.item_execution_id))}>{correctionItemIds.includes(String(item.item_execution_id)) ? "Focused correction уже открыта" : "Исправить отклонённый Draft"}</button>}
-      {Array.isArray(item.provider_issues) && item.provider_issues.length > 0 && <details><summary>Provider details · {item.provider_issues.length}</summary><ul>{item.provider_issues.map((issue: Record<string, any>, index: number) => <li key={`${issue.operation}-${issue.code}-${index}`}><strong>{issue.operation} · {issue.code}</strong><span>{issue.message}{issue.details ? ` · ${issue.details}` : ""}</span></li>)}</ul></details>}
-      {item.readback && <details><summary>Semantic readback</summary><code>{JSON.stringify(item.readback)}</code></details>}
+      <header><div><span>#{Number(item.position) + 1}</span><strong>{item.selection?.draft_revision_id}</strong><code>{item.item_execution_id}</code></div><div><b>{machineLabel(item.status)}</b><small>Ответственная сторона · {machineLabel(item.ownership)}</small></div></header>
+      <dl className="execution-progress">{Object.entries(executionProgressLabels).map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{machineLabel(item.progress?.[key], "Ожидает")}</dd></div>)}</dl>
+      <div className="execution-identifiers"><span>Кампания <code>{item.provider_ids?.campaign_id || "—"}</code></span><span>Группы объявлений <code>{item.provider_ids?.ad_group_ids?.join(", ") || item.provider_ids?.ad_group_id || "—"}</code></span><span>Ключевые фразы <code>{item.provider_ids?.keyword_ids?.join(", ") || item.provider_ids?.keyword_id || "—"}</code></span><span>Объявления <code>{item.provider_ids?.ad_ids?.join(", ") || "—"}</code></span></div>
+      {item.accountability && <dl className="execution-progress"><div><dt>Граф объектов</dt><dd>{item.accountability.supported_graph_verified ? "Проверен" : "Ожидает"}</dd></div><div><dt>Показы</dt><dd>{item.accountability.campaign_suspended ? "Остановлены" : "Не подтверждено"}</dd></div><div><dt>Объявления завершены</dt><dd>{item.accountability.all_ads_terminal ? "Да" : "Нет"}</dd></div><div><dt>Принято Директом</dt><dd>{item.accountability.direct_accepted ? "Да" : "Нет"}</dd></div></dl>}
+      <footer><span>Сдерживание · <strong>{machineLabel(item.containment)}</strong></span><span>Блокировка аккаунта · <strong>{machineLabel(item.account_lock)}</strong></span></footer>
+      {item.moderation?.next_poll_at && <p className="execution-failure" role="status"><strong>Следующая проверка модерации</strong> · {item.moderation.next_poll_at} · попыток: {item.moderation.poll_attempts}<button type="button" disabled={busy || !canPoll} onClick={() => poll(String(item.item_execution_id))}>Проверить запланированный элемент</button></p>}
+      {Array.isArray(item.moderation?.ad_outcomes) && item.moderation.ad_outcomes.length > 0 && <details><summary>Результаты модерации объявлений · {item.moderation.ad_outcomes.length}</summary><ul>{item.moderation.ad_outcomes.map((ad: Record<string, any>) => <li key={ad.ad_id}><strong>{ad.ad_id} · {machineLabel(ad.status)}</strong><span>{ad.status_clarification || "Пояснение состояния отсутствует"}</span></li>)}</ul></details>}
+      {item.failure && <p className="execution-failure" role="status"><strong>{item.failure.code}</strong> · {localizedText(item.failure.message)}</p>}
+      {item.status === "REJECTED_NEEDS_EDIT" && startCorrection && <button type="button" className="correction-start" disabled={busy || correctionItemIds.includes(String(item.item_execution_id))} onClick={() => startCorrection(String(item.item_execution_id))}>{correctionItemIds.includes(String(item.item_execution_id)) ? "Точечное исправление уже открыто" : "Исправить отклонённый черновик"}</button>}
+      {Array.isArray(item.provider_issues) && item.provider_issues.length > 0 && <details><summary>Подробности провайдера · {item.provider_issues.length}</summary><ul>{item.provider_issues.map((issue: Record<string, any>, index: number) => <li key={`${issue.operation}-${issue.code}-${index}`}><strong>{issue.operation} · {issue.code}</strong><span>{localizedText(issue.message)}{issue.details ? ` · ${localizedText(issue.details)}` : ""}</span></li>)}</ul></details>}
+      {item.readback && <details><summary>Смысловая обратная проверка</summary><code>{JSON.stringify(item.readback)}</code></details>}
     </li>)}</ol>
   </section>;
 }
@@ -723,8 +724,8 @@ function PackageCorrectionsPanel({
       ...Object.fromEntries(editableInputNames.map((name) => [name, fieldValue(form, name)])),
     }, { correction_id: correction.correction_id });
   }
-  return <section className="package-corrections" aria-label="Focused correction flows">
-    <header><div><p className="eyebrow">FOCUSED CORRECTION · IMMUTABLE LINEAGE</p><h3>Provider rejection correction</h3><p>Initial execution, provider responses и verdict остаются immutable. Только material Draft revision может получить новый review, Gate и resubmission.</p></div><strong>{corrections.length}</strong></header>
+  return <section className="package-corrections" aria-label="Точечные исправления">
+    <header><div><p className="eyebrow">ТОЧЕЧНОЕ ИСПРАВЛЕНИЕ · НЕИЗМЕНЯЕМОЕ ПРОИСХОЖДЕНИЕ</p><h3>Исправление отклонения провайдера</h3><p>Первичное исполнение, ответы провайдера и вердикт остаются неизменными. Только существенная редакция черновика может получить новую проверку, контрольное решение и повторную отправку.</p></div><strong>{corrections.length}</strong></header>
     {corrections.map((correction, correctionIndex) => {
       const source = correction.source || {};
       const sourceDraft = source.draft_snapshot || {};
@@ -734,31 +735,31 @@ function PackageCorrectionsPanel({
       const correctionItem = correctedExecution?.items?.[0] || null;
       const canConfirm = confirmedCorrectionId === correction.correction_id;
       return <article key={correction.correction_id} className="package-correction-flow">
-        <header><div><p className="eyebrow">Correction progress</p><strong>{correction.status}</strong><code>{correction.correction_id}</code></div><span>{source.item_execution_id}</span></header>
+        <header><div><p className="eyebrow">Ход исправления</p><strong>{machineLabel(correction.status)}</strong><code>{correction.correction_id}</code></div><span>{source.item_execution_id}</span></header>
         <dl className="correction-accounting">
-          <div><dt>Initial package verdict</dt><dd>{source.initial_package_verdict}</dd></div>
-          <div><dt>Correction progress</dt><dd>{correction.status}</dd></div>
-          <div><dt>Corrected terminal outcome</dt><dd>{correction.terminal_outcome || "PENDING"}</dd></div>
+          <div><dt>Первичный вердикт пакета</dt><dd>{machineLabel(source.initial_package_verdict)}</dd></div>
+          <div><dt>Ход исправления</dt><dd>{machineLabel(correction.status)}</dd></div>
+          <div><dt>Итог исправленной редакции</dt><dd>{machineLabel(correction.terminal_outcome, "Ожидает")}</dd></div>
         </dl>
-        <section className="correction-provider-context"><strong>StatusClarification</strong>{source.status_clarifications?.length ? <ul>{source.status_clarifications.map((item: string) => <li key={item}>{item}</li>)}</ul> : <p>Provider clarification отсутствует; correction остаётся fail-closed.</p>}{source.provider_issues?.length > 0 && <details open><summary>Конкретные provider issues · {source.provider_issues.length}</summary><ul>{source.provider_issues.map((issue: Record<string, any>, index: number) => <li key={`${issue.operation}-${issue.code}-${index}`}><strong>{issue.operation} · {issue.code}</strong><span>{issue.message}{issue.details ? ` · ${issue.details}` : ""}</span></li>)}</ul></details>}<small>Initial package {source.package_id} · Gate {source.gate_id}</small></section>
+        <section className="correction-provider-context"><strong>Пояснение состояния</strong>{source.status_clarifications?.length ? <ul>{source.status_clarifications.map((item: string) => <li key={item}>{localizedText(item)}</li>)}</ul> : <p>Пояснение провайдера отсутствует; исправление остаётся безопасно заблокированным.</p>}{source.provider_issues?.length > 0 && <details open><summary>Конкретные замечания провайдера · {source.provider_issues.length}</summary><ul>{source.provider_issues.map((issue: Record<string, any>, index: number) => <li key={`${issue.operation}-${issue.code}-${index}`}><strong>{issue.operation} · {issue.code}</strong><span>{localizedText(issue.message)}{issue.details ? ` · ${localizedText(issue.details)}` : ""}</span></li>)}</ul></details>}<small>Первичный пакет {source.package_id} · контрольное решение {source.gate_id}</small></section>
         {correction.status === "EDITING" && <form className="correction-form" onSubmit={(event) => submitCorrection(event, correction)}>
           <DraftFieldRegistryDisclosure registry={fieldRegistry} draft={sourceDraft} titleId={`correction-draft-fields-${correctionIndex}`} />
-          <button type="submit" disabled={busy}>Сохранить новую material correction revision</button>
+          <button type="submit" disabled={busy}>Сохранить новую существенную редакцию исправления</button>
         </form>}
-        {correctedDraft && <section className="corrected-draft-review"><DraftEditFeedback draft={correctedDraft} /><ViabilityScoreDisclosure score={correctedDraft.viability_score} delta={correctedDraft.score_delta} /><dl><div><dt>Draft revision</dt><dd>{correctedDraft.draft_revision_id}</dd></div><div><dt>Publish fingerprint</dt><dd><code>{correctedDraft.publish_fingerprint}</code></dd></div></dl></section>}
-        {decisionPacket && <section className="correction-decision-packet" aria-label="Prepared corrected Human Decision Gate packet">
-          <header><div><p className="eyebrow">PREPARED HUMAN DECISION GATE</p><h4>Рекомендация · {decisionPacket.recommendation.action}</h4><p>{decisionPacket.recommendation.rationale}</p></div><strong>Confidence · {decisionPacket.confidence.status}</strong></header>
-          <p>{decisionPacket.confidence.rationale}</p>
-          <dl><div><dt>Evidence</dt><dd>{decisionPacket.evidence.changed_pointers.join(" · ")}</dd></div><div><dt>Score / rank</dt><dd>{decisionPacket.evidence.score.previous ?? "—"} → {decisionPacket.evidence.score.current ?? "—"} · {decisionPacket.evidence.rank.previous ?? "—"} → {decisionPacket.evidence.rank.current ?? "—"}</dd></div></dl>
-          <div className="correction-options"><strong>Alternatives</strong><ul>{decisionPacket.alternatives.map((alternative: Record<string, any>) => <li key={alternative.action}><b>{alternative.action}</b><span>{alternative.consequence}</span></li>)}</ul></div>
-          <div className="correction-consequences"><strong>Consequences</strong><ul>{decisionPacket.consequences.map((consequence: string) => <li key={consequence}>{consequence}</li>)}</ul></div>
+        {correctedDraft && <section className="corrected-draft-review"><DraftEditFeedback draft={correctedDraft} /><ViabilityScoreDisclosure score={correctedDraft.viability_score} delta={correctedDraft.score_delta} /><dl><div><dt>Редакция черновика</dt><dd>{correctedDraft.draft_revision_id}</dd></div><div><dt>Отпечаток публикации</dt><dd><code>{correctedDraft.publish_fingerprint}</code></dd></div></dl></section>}
+        {decisionPacket && <section className="correction-decision-packet" aria-label="Подготовленный пакет исправленного контрольного решения человека">
+          <header><div><p className="eyebrow">ПОДГОТОВЛЕННОЕ КОНТРОЛЬНОЕ РЕШЕНИЕ ЧЕЛОВЕКА</p><h4>Рекомендация · {machineLabel(decisionPacket.recommendation.action)}</h4><p>{localizedText(decisionPacket.recommendation.rationale)}</p></div><strong>Уверенность · {machineLabel(decisionPacket.confidence.status)}</strong></header>
+          <p>{localizedText(decisionPacket.confidence.rationale)}</p>
+          <dl><div><dt>Доказательства</dt><dd>{decisionPacket.evidence.changed_pointers.join(" · ")}</dd></div><div><dt>Оценка и место</dt><dd>{decisionPacket.evidence.score.previous ?? "—"} → {decisionPacket.evidence.score.current ?? "—"} · {decisionPacket.evidence.rank.previous ?? "—"} → {decisionPacket.evidence.rank.current ?? "—"}</dd></div></dl>
+          <div className="correction-options"><strong>Альтернативы</strong><ul>{decisionPacket.alternatives.map((alternative: Record<string, any>) => <li key={alternative.action}><b>{machineLabel(alternative.action)}</b><span>{localizedText(alternative.consequence)}</span></li>)}</ul></div>
+          <div className="correction-consequences"><strong>Последствия</strong><ul>{decisionPacket.consequences.map((consequence: string) => <li key={consequence}>{localizedText(consequence)}</li>)}</ul></div>
         </section>}
-        {correction.status === "PACKAGE_REVIEW_REQUIRED" && <button type="button" disabled={busy} onClick={() => void apply("review_package_correction", undefined, { correction_id: correction.correction_id })}>Проверить corrected package revision</button>}
-        {correction.status === "HUMAN_GATE_REQUIRED" && <div className="correction-gate"><label><input type="checkbox" checked={canConfirm} onChange={(event) => setConfirmedCorrectionId(event.target.checked ? correction.correction_id : "")} /><span>Подтверждаю recommendation, evidence, confidence, alternatives, consequences и новый exact corrected fingerprint</span></label><button type="button" disabled={busy || !canConfirm} onClick={() => void apply("confirm_package_correction", undefined, { correction_id: correction.correction_id, confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: correction.package_review.package_review_id, package_id: correction.package_review.package_id })}>Создать новый Human Decision Gate</button></div>}
-        {correction.status === "READY_TO_RESUBMIT" && <button type="button" disabled={busy} onClick={() => void apply("resubmit_package_correction", undefined, { correction_id: correction.correction_id, package_id: correction.human_decision_gate.package_id, gate_id: correction.human_decision_gate.gate_id })}>Повторно отправить confirmed correction revision</button>}
+        {correction.status === "PACKAGE_REVIEW_REQUIRED" && <button type="button" disabled={busy} onClick={() => void apply("review_package_correction", undefined, { correction_id: correction.correction_id })}>Проверить исправленную редакцию пакета</button>}
+        {correction.status === "HUMAN_GATE_REQUIRED" && <div className="correction-gate"><label><input type="checkbox" checked={canConfirm} onChange={(event) => setConfirmedCorrectionId(event.target.checked ? correction.correction_id : "")} /><span>Подтверждаю рекомендацию, доказательства, уверенность, альтернативы, последствия и новый точный отпечаток исправления</span></label><button type="button" disabled={busy || !canConfirm} onClick={() => void apply("confirm_package_correction", undefined, { correction_id: correction.correction_id, confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: correction.package_review.package_review_id, package_id: correction.package_review.package_id })}>Создать новое контрольное решение человека</button></div>}
+        {correction.status === "READY_TO_RESUBMIT" && <button type="button" disabled={busy} onClick={() => void apply("resubmit_package_correction", undefined, { correction_id: correction.correction_id, package_id: correction.human_decision_gate.package_id, gate_id: correction.human_decision_gate.gate_id })}>Повторно отправить подтверждённую редакцию исправления</button>}
         {correctedExecution && <PackageExecutionPanel execution={correctedExecution} busy={busy} canPoll={canPoll} poll={(itemExecutionId) => void apply("poll_package_correction_moderation", undefined, { correction_id: correction.correction_id, package_id: correctedExecution.package_id, item_execution_id: itemExecutionId })} />}
-        {correctionItem?.status === "RECONCILIATION_REQUIRED" && <p className="execution-failure" role="status"><strong>Reconciliation boundary удерживается</strong> · ambiguous corrected write не является content correction.</p>}
-        {correction.terminal_outcome === "PASS_AFTER_CORRECTION" && <div className="correction-terminal" role="status"><strong>PASS_AFTER_CORRECTION</strong><p>Corrected revision принята и остаётся non-serving. Initial generation verdict не изменён.</p></div>}
+        {correctionItem?.status === "RECONCILIATION_REQUIRED" && <p className="execution-failure" role="status"><strong>Граница сверки удерживается</strong> · неоднозначная исправленная запись не является исправлением содержания.</p>}
+        {correction.terminal_outcome === "PASS_AFTER_CORRECTION" && <div className="correction-terminal" role="status"><strong>ПРОЙДЕНО ПОСЛЕ ИСПРАВЛЕНИЯ</strong><p>Исправленная редакция принята и остаётся без показов. Вердикт первичного создания не изменён.</p></div>}
       </article>;
     })}
   </section>;
@@ -775,32 +776,32 @@ function ConfirmationStep({ payload, apply, busy, back }: { payload: Payload; ap
   const selections = Array.isArray(authority?.ordered_selections) ? authority.ordered_selections : [];
   if (!review || !authority) {
     return <>
-      <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Package review недоступен" copy="Вернитесь в Campaign Canvas, сформируйте непустой ordered shortlist и откройте точный review из persistent footer." badge="FAIL CLOSED" />
-      <ul className="blockers">{payload.decision_readiness.blockers.map((item, index) => <li key={item}><span>{index + 1}</span>{item}</li>)}</ul>
-      <Actions revision={payload.revision} label="Вернуться к shortlist" disabled back={back} />
+      <ArtifactHead eyebrow="Шаг 5 · контрольное решение человека" title="Проверка пакета недоступна" copy="Вернитесь к полотну кампаний, сформируйте непустой упорядоченный список и откройте точную проверку из постоянной нижней панели." badge="БЕЗОПАСНО ЗАБЛОКИРОВАНО" />
+      <ul className="blockers">{payload.decision_readiness.blockers.map((item, index) => <li key={item}><span>{index + 1}</span>{localizedText(item)}</li>)}</ul>
+      <Actions revision={payload.revision} label="Вернуться к списку" disabled back={back} />
     </>;
   }
   const binding = authority.direct_account_binding || {};
   const capability = authority.direct_capability_snapshot || {};
   const profile = authority.capability_profile || {};
   return <>
-    <ArtifactHead eyebrow="Шаг 5 · Human Decision Gate" title="Точный immutable package review" copy="Gate даёт authority только этому ordered set revisions и fingerprints. Confirmation не выполняет Direct writes и не обещает атомарную внешнюю транзакцию." badge={gate ? "AUTHORITY CONFIRMED" : "REVIEWED"} />
+    <ArtifactHead eyebrow="Шаг 5 · контрольное решение человека" title="Точная неизменяемая проверка пакета" copy="Контрольное решение даёт полномочие только этому упорядоченному набору редакций и отпечатков. Подтверждение не выполняет записи в Яндекс Директ и не обещает атомарную внешнюю транзакцию." badge={gate ? "ПОЛНОМОЧИЕ ПОДТВЕРЖДЕНО" : "ПРОВЕРЕНО"} />
     <section className="package-review" aria-labelledby="package-review-title">
-      <header><div><p className="eyebrow">PACKAGE IDENTITY</p><h3 id="package-review-title">{selections.length} независимых Campaign Drafts</h3></div><strong>{review.reviewed_at}</strong></header>
+      <header><div><p className="eyebrow">ИДЕНТИЧНОСТЬ ПАКЕТА</p><h3 id="package-review-title">{selections.length} независимых черновика кампаний</h3></div><strong>{review.reviewed_at}</strong></header>
       <ol>{selections.map((item: Record<string, any>, index: number) => <li key={item.draft_id}><span>{index + 1}</span><div><strong>{item.draft_id}</strong><code>{item.draft_revision_id}</code><small>{item.publish_fingerprint}</small></div></li>)}</ol>
       <dl>
-        <div><dt>Package ID</dt><dd><code>{review.package_id}</code></dd></div>
-        <div><dt>Package review ID</dt><dd><code>{review.package_review_id}</code></dd></div>
-        <div><dt>Recommendation Set</dt><dd><code>{authority.recommendation_set_id}</code></dd></div>
-        <div><dt>Strategy revision</dt><dd><code>{authority.strategy_revision_id}</code></dd></div>
-        <div><dt>Direct account binding</dt><dd>{binding.account} · client {binding.client_id} · {binding.source_kind}</dd></div>
-        <div><dt>Capability snapshot</dt><dd><code>{capability.snapshot_id}</code></dd></div>
-        <div><dt>Capability profile</dt><dd><code>{profile.profile_id}@{profile.profile_version}</code></dd></div>
-        <div><dt>Analytics Evidence Snapshot</dt><dd><code>{authority.analytics_evidence_snapshot_id}</code></dd></div>
+        <div><dt>ID пакета</dt><dd><code>{review.package_id}</code></dd></div>
+        <div><dt>ID проверки пакета</dt><dd><code>{review.package_review_id}</code></dd></div>
+        <div><dt>Набор рекомендаций</dt><dd><code>{authority.recommendation_set_id}</code></dd></div>
+        <div><dt>Редакция стратегии</dt><dd><code>{authority.strategy_revision_id}</code></dd></div>
+        <div><dt>Привязка аккаунта Яндекс Директа</dt><dd>{binding.account} · клиент {binding.client_id} · {binding.source_kind}</dd></div>
+        <div><dt>Снимок возможностей</dt><dd><code>{capability.snapshot_id}</code></dd></div>
+        <div><dt>Профиль возможностей</dt><dd><code>{profile.profile_id}@{profile.profile_version}</code></dd></div>
+        <div><dt>Снимок аналитических доказательств</dt><dd><code>{authority.analytics_evidence_snapshot_id}</code></dd></div>
       </dl>
     </section>
-    <div className="confirmation"><p className="eyebrow">НЕАТОМАРНЫЙ ПАКЕТ</p><h3>Кампании исполняются и оцениваются независимо</h3><p>{authority.orchestration.disclosure} Confirmation сохраняет durable authority и timestamp, но не вызывает Direct, не deploy’ит, не запускает показы и не начинает spend.</p></div>
-    {gate ? <section className="gate-confirmed" role="status"><strong>Human Decision Gate подтверждён</strong><p>{gate.confirmed_at} · {gate.gate_id}</p><small>External writes performed: {execution ? "YES, independently" : "NO"} · transactionality promised: NO</small></section> : <div className="decision-confirm"><input aria-label="Подтверждаю точный пакет и независимое исполнение кампаний" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю точный reviewed package</strong><small>Authority относится только к package {String(review.package_id).slice(0, 20)}…; каждая выбранная кампания будет dispatch/contain/moderate/evaluate независимо.</small></span></div>}
+    <div className="confirmation"><p className="eyebrow">НЕАТОМАРНЫЙ ПАКЕТ</p><h3>Кампании исполняются и оцениваются независимо</h3><p>{authority.orchestration.disclosure} Подтверждение сохраняет полномочие и отметку времени, но не вызывает Яндекс Директ, не развёртывает изменения, не запускает показы и не начинает расходы.</p></div>
+    {gate ? <section className="gate-confirmed" role="status"><strong>Контрольное решение человека подтверждено</strong><p>{gate.confirmed_at} · {gate.gate_id}</p><small>Внешние записи выполнены: {execution ? "да, независимо" : "нет"} · транзакционность обещана: нет</small></section> : <div className="decision-confirm"><input aria-label="Подтверждаю точный пакет и независимое исполнение кампаний" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span><strong>Подтверждаю точный проверенный пакет</strong><small>Полномочие относится только к пакету {String(review.package_id).slice(0, 20)}…; каждая выбранная кампания будет отправлена, сдержана, промодерирована и оценена независимо.</small></span></div>}
     {execution && <PackageExecutionPanel
       execution={execution}
       busy={busy}
@@ -816,8 +817,8 @@ function ConfirmationStep({ payload, apply, busy, back }: { payload: Payload; ap
       canPoll={payload.workflow.allowed_commands.includes("poll_package_correction_moderation")}
       apply={apply}
     />}
-    <footer className="actions"><span>Ревизия {payload.revision} · independent durable item executions</span><button type="button" className="secondary" disabled={busy} onClick={back}>Назад к shortlist</button>{!gate
-      ? <button type="button" disabled={busy || !confirmed} onClick={() => void apply("confirm_package", undefined, { confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id })}>Подтвердить authority пакета</button>
-      : <button type="button" disabled={busy || !canDispatch} onClick={() => void apply("dispatch_package", undefined, { package_id: gate.package_id, gate_id: gate.gate_id })}>{canDispatch && execution ? "Продолжить безопасное исполнение" : execution ? "Package dispatch зафиксирован" : "Исполнить подтверждённый пакет"}</button>}</footer>
+    <footer className="actions"><span>Ревизия {payload.revision} · независимые сохраняемые исполнения элементов</span><button type="button" className="secondary" disabled={busy} onClick={back}>Назад к списку</button>{!gate
+      ? <button type="button" disabled={busy || !confirmed} onClick={() => void apply("confirm_package", undefined, { confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id })}>Подтвердить полномочие пакета</button>
+      : <button type="button" disabled={busy || !canDispatch} onClick={() => void apply("dispatch_package", undefined, { package_id: gate.package_id, gate_id: gate.gate_id })}>{canDispatch && execution ? "Продолжить безопасное исполнение" : execution ? "Отправка пакета зафиксирована" : "Исполнить подтверждённый пакет"}</button>}</footer>
   </>;
 }

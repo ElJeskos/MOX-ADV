@@ -61,8 +61,8 @@ test("Model disclosure renders scoped lower-bound frequency, batch, unique rows 
   const MarketEvidenceDisclosure = await loadComponent(t);
   const html = renderToStaticMarkup(React.createElement(MarketEvidenceDisclosure, { evidence: evidence(), context: "model" }));
   assert.match(html, /67\+ запросов/);
-  assert.match(html, /LOWER_BOUND_OBSERVED_TOP_ROWS/);
-  assert.match(html, /Москва · desktop · BROAD_CONTAINING · собрано 2026-08-21T10:00:04.000Z/);
+  assert.match(html, /Нижняя граница по наблюдаемым популярным запросам/);
+  assert.match(html, /Москва · компьютеры · профиль операторов: BROAD_CONTAINING · собрано 2026-08-21T10:00:04.000Z/);
   assert.match(html, /sha256:batch-104/);
   assert.match(html, /3 уникальн/);
   assert.match(html, /точный конец окна API не раскрывает/);
@@ -91,8 +91,8 @@ test("Model disclosure renders selected source without averaging plus scenario, 
   assert.match(html, /KEYWORDBIDS_V5_CURRENT_PROXY/);
   assert.match(html, /traffic volume 65/);
   assert.match(html, /2026-08-21T09:00:00.000Z/);
-  assert.match(html, /VAT EXCLUDED/);
+  assert.match(html, /НДС: EXCLUDED/);
   assert.match(html, /2 auction_scenarios/);
-  assert.match(html, /FIRST_QUALIFIED_SOURCE_NO_AVERAGING/);
+  assert.match(html, /первый подходящий источник/);
   assert.match(html, /9007199254740993/);
 });

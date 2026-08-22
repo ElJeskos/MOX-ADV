@@ -6,14 +6,14 @@ const clientSource = await readFile(new URL("../app/P0Client.tsx", import.meta.u
 const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 
 test("operator UI permanently labels landing analysis advisory and non-blocking with honest evidence disclosure", () => {
-  assert.match(clientSource, /LANDING PAGE · ADVISORY ONLY/u);
-  assert.match(clientSource, /ADVISORY · NON-BLOCKING/u);
-  assert.match(clientSource, /не меняют eligibility, publish readiness, score, rank, thresholds, calibration или publish fingerprint/u);
+  assert.match(clientSource, /ПОСАДОЧНАЯ СТРАНИЦА · ТОЛЬКО РЕКОМЕНДАЦИИ/u);
+  assert.match(clientSource, /РЕКОМЕНДАЦИИ · НЕ БЛОКИРУЮТ/u);
+  assert.match(clientSource, /не меняют допустимость, готовность к публикации, оценку, место, пороги, калибровку или отпечаток публикации/u);
   assert.match(clientSource, /Недостаточно доказательств/u);
-  assert.match(clientSource, /Insufficient evidence раскрыто явно/u);
-  assert.match(clientSource, /Lighthouse:.*\/5 sequential desktop runs/u);
-  assert.match(clientSource, /axe incomplete/u);
-  assert.match(clientSource, /Все details · evidence types, statuses и tool versions/u);
+  assert.match(clientSource, /Недостаток доказательств раскрыт явно/u);
+  assert.match(clientSource, /Lighthouse:.*\/5 последовательных запусков для компьютера/u);
+  assert.match(clientSource, /Незавершённые проверки axe-core/u);
+  assert.match(clientSource, /Все подробности · типы доказательств, состояния и версии инструментов/u);
   assert.match(clientSource, /landingAdvisoryPriorities\(run\)/u);
 });
 

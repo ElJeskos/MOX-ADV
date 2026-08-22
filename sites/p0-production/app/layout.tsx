@@ -8,9 +8,9 @@ const geist = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "MOX-ADV · Production P0",
+  title: "MOX-ADV · Рабочий модуль P0",
   description:
-    "AI-first оператор рекламных кампаний: агент выполняет безопасную работу, человек принимает критические решения.",
+    "Оператор рекламных кампаний с искусственным интеллектом: агент выполняет безопасную работу, человек принимает критические решения.",
   icons: {
     icon: "/favicon.png",
     shortcut: "/favicon.png",

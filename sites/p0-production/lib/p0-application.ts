@@ -374,7 +374,7 @@ const WORKFLOW_STEPS = [
   { id: "business_model", label: "Модель бизнеса", detail: "Агентное исследование" },
   { id: "campaign_strategy", label: "Стратегия кампании", detail: "Критические решения" },
   { id: "campaign_drafts", label: "Рекламные кампании", detail: "Точная проекция" },
-  { id: "confirmation", label: "Подтверждение", detail: "Guarded write" },
+  { id: "confirmation", label: "Подтверждение", detail: "Защищённая запись" },
 ] as const;
 
 function packageNotDispatched(state: P0Document) {

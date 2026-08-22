@@ -19,6 +19,7 @@ test("server-renders the MOX-ADV production P0 shell", async () => {
   const html = await response.text();
   assert.match(html, /<title>Стратегия — MOX-ADV<\/title>/i);
   assert.match(html, /Агент выполняет всю безопасную работу/);
-  assert.match(html, /Production Module · P0/);
+  assert.match(html, /Рабочий модуль · P0/);
+  assert.doesNotMatch(html, /Production Module|AI-first|production-кандидат/i);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Test Scenario/i);
 });

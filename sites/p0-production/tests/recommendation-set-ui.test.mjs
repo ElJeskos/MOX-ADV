@@ -54,14 +54,14 @@ const recommendationSet = {
 test("Recommendation Set UI discloses reconciled audit counts plus exact capability and playbook lineage", async (t) => {
   const { RecommendationSetDisclosure } = await loadComponents(t);
   const html = renderToStaticMarkup(React.createElement(RecommendationSetDisclosure, { recommendationSet }));
-  assert.match(html, /4 generated/);
-  assert.match(html, /3 visible · 1 hidden · reconciliation OK/);
+  assert.match(html, /4 создано/);
+  assert.match(html, /3 видимых · 1 скрытых · сверка успешна/);
   assert.match(html, /p0-curated-playbook-2026-08@1.0.0/);
-  assert.match(html, /ACTIVE_APPROVED/);
+  assert.match(html, /Активно и утверждено/);
   assert.match(html, /UNIFIED_CAMPAIGN · UNIFIED_AD_GROUP · EXPLICIT_KEYWORDS · TEXT_AD/);
-  assert.match(html, /WB_MAXIMUM_CLICKS · Network SERVING_OFF/);
+  assert.match(html, /стратегия поиска WB_MAXIMUM_CLICKS · стратегия сетей Показы отключены/);
   assert.match(html, /direct-capability:owner-account:core/);
-  assert.match(html, /Hidden candidate audit · 1/);
+  assert.match(html, /Проверка скрытых кандидатов · 1/);
   assert.match(html, /HIDDEN:PLAYBOOK_RULE_CONTRADICTED/);
 });
 
@@ -77,11 +77,11 @@ test("Recommendation Set UI distinguishes comparator and one-factor improvement 
       field_path: "/direct/keyword/AutotargetingSettings",
     }],
   };
-  assert.match(renderToStaticMarkup(React.createElement(DraftVariantLabel, { draft: comparator })), /STRATEGY_BASELINE_FALLBACK/);
-  assert.match(renderToStaticMarkup(React.createElement(DraftVariantLabel, { draft: improvement })), /IMPROVEMENT · QUALIFIED_ACTION/);
-  assert.match(renderToStaticMarkup(React.createElement(DraftTreatmentDelta, { draft: improvement })), /One-factor delta: \/direct\/keyword\/Keyword · \/direct\/ad\/TextAd\/Text/);
+  assert.match(renderToStaticMarkup(React.createElement(DraftVariantLabel, { draft: comparator })), /Контрольный вариант/);
+  assert.match(renderToStaticMarkup(React.createElement(DraftVariantLabel, { draft: improvement })), /Улучшение · целевое действие/);
+  assert.match(renderToStaticMarkup(React.createElement(DraftTreatmentDelta, { draft: improvement })), /Изменение одного фактора: \/direct\/keyword\/Keyword · \/direct\/ad\/TextAd\/Text/);
   const blockers = renderToStaticMarkup(React.createElement(DraftPublicationBlockers, { draft: improvement }));
-  assert.match(blockers, /aria-label="Publication blockers"/);
+  assert.match(blockers, /aria-label="Причины блокировки публикации"/);
   assert.match(blockers, /CONDITIONAL_CAPABILITY_EVIDENCE_MISSING/);
   assert.match(blockers, /\/direct\/keyword\/AutotargetingSettings/);
 });
@@ -123,21 +123,21 @@ function scoreFixture(overrides = {}) {
 test("score disclosure names comparative-not-predictive semantics, contributions, scopes, ties, cohort, sensitivity and threshold", async (t) => {
   const { ViabilityScoreDisclosure } = await loadComponents(t);
   const html = renderToStaticMarkup(React.createElement(ViabilityScoreDisclosure, { score: scoreFixture() }));
-  assert.match(html, /COMPARATIVE PRELAUNCH PRIORITY \/ NOT A PREDICTION/);
-  assert.match(html, /semantic tie/);
+  assert.match(html, /СРАВНИТЕЛЬНЫЙ ПРИОРИТЕТ ДО ЗАПУСКА · НЕ ПРОГНОЗ/);
+  assert.match(html, /смысловое равенство/);
   assert.match(html, /capability-cohort:core/);
   assert.match(html, /comparable-set:core/);
-  assert.match(html, /Sensitivity 62–82/);
-  assert.match(html, /midpoint 50/);
-  assert.match(html, /lower recomputes unknown dimensions at 0/);
-  assert.match(html, /Спрос · raw 80 · weight 18% → 14.40 points · KNOWN/);
+  assert.match(html, /Чувствительность 62–82/);
+  assert.match(html, /середина 50/);
+  assert.match(html, /нижняя граница пересчитывает неизвестные измерения как 0/);
+  assert.match(html, /Спрос · исходное значение 80 · вес 18% → 14.40 балла · Известно/);
   assert.match(html, /claim-demand/);
   assert.match(html, /evidence-demand/);
-  assert.match(html, /LOWER_BOUND_OBSERVED_TOP_ROWS/);
+  assert.match(html, /нижняя граница по наблюдаемым популярным запросам/);
   assert.match(html, /YANDEX_WORDSTAT_V1/);
-  assert.match(html, /SOURCES_NOT_AVERAGED/);
-  assert.match(html, /upper 82 &lt; 45: false/);
-  assert.match(html, /landing=false · post-launch=false · calibration=false/);
+  assert.match(html, /один подходящий источник, без усреднения/);
+  assert.match(html, /верхняя граница 82 &lt; 45: нет/);
+  assert.match(html, /посадочная страница = нет · после запуска = нет · калибровка = нет/);
 });
 
 test("Campaign Canvas card separately discloses variant, comparative rank, evidence, scoped frequency/cost and publish blockers", async (t) => {
@@ -154,16 +154,16 @@ test("Campaign Canvas card separately discloses variant, comparative rank, evide
     viability_score: scoreFixture(),
   };
   const html = renderToStaticMarkup(React.createElement(CampaignDraftCard, { draft, selected: true }));
-  assert.match(html, /IMPROVEMENT · QUALIFIED_ACTION/);
-  assert.match(html, /Comparative 72\/100/);
-  assert.match(html, /Semantic rank 1 · tie/);
-  assert.match(html, /Sensitivity 62–82/);
-  assert.match(html, /Evidence PARTIAL · quality 80/);
-  assert.match(html, /Frequency 67 · YANDEX_WORDSTAT_V1/);
-  assert.match(html, /Cost UNAVAILABLE · source unavailable/);
-  assert.match(html, /Review: доступен/);
-  assert.match(html, /Publish: BLOCKED_EVIDENCE_GAP/);
-  assert.match(html, /Publish blockers · 1/);
+  assert.match(html, /Улучшение · целевое действие/);
+  assert.match(html, /Сравнительная оценка 72\/100/);
+  assert.match(html, /Смысловое место 1 · равенство/);
+  assert.match(html, /Диапазон 62–82/);
+  assert.match(html, /Частично · качество 80/);
+  assert.match(html, /67 · YANDEX_WORDSTAT_V1/);
+  assert.match(html, /Недоступно · источник недоступен/);
+  assert.match(html, /Проверка: доступна/);
+  assert.match(html, /Публикация: Заблокировано из-за пробела в доказательствах/);
+  assert.match(html, /Блокирующие причины · 1/);
 });
 
 test("drawer registry renders every accepted Direct field while only the six round-tripped fields are editable", async (t) => {
@@ -189,10 +189,10 @@ test("drawer registry renders every accepted Direct field while only the six rou
   assert.equal((html.match(/data-direct-field=/gu) || []).length, 21);
   assert.equal((html.match(/data-editable="true"/gu) || []).length, 6);
   assert.match(html, /Название кампании/);
-  assert.match(html, /FIXED_BY_STRATEGY/);
-  assert.match(html, /FIXED_BY_CAPABILITY/);
+  assert.match(html, /Зафиксировано стратегией/);
+  assert.match(html, /Зафиксировано возможностями аккаунта/);
   assert.match(html, /AutotargetingSettings/);
-  assert.match(html, /CONDITIONALLY_ELIGIBLE · NOT_PRESENT/);
+  assert.match(html, /Доступно при выполнении условия · отсутствует/);
   assert.match(html, /Наборы быстрых ссылок/);
   assert.match(html, /Поле отсутствует/);
 });
@@ -200,7 +200,7 @@ test("drawer registry renders every accepted Direct field while only the six rou
 test("material and normalization-only drawer feedback exposes field deltas and concise policy reasons without evaluator traces", async (t) => {
   const { DraftEditFeedback } = await loadComponents(t);
   const noOp = renderToStaticMarkup(React.createElement(DraftEditFeedback, { draft: { draft_save_result: { material_change: false, message: "Нет material changes: нормализация не создала Draft revision." } } }));
-  assert.match(noOp, /Нет material changes/);
+  assert.match(noOp, /Нет существенных изменений/);
   const material = renderToStaticMarkup(React.createElement(DraftEditFeedback, { draft: {
     draft_save_result: { material_change: true, message: "Создана новая immutable Draft revision" },
     material_delta: {
@@ -213,7 +213,7 @@ test("material and normalization-only drawer feedback exposes field deltas and c
   assert.match(material, /Старый текст/);
   assert.match(material, /Новый текст/);
   assert.match(material, /WEIGHTED_SCORE_CHANGED_AFTER_FULL_RESCORE/);
-  assert.match(material, /Score 70 → 72/);
+  assert.match(material, /Оценка 70 → 72/);
   assert.doesNotMatch(material, /trace|chain.of.thought/iu);
 });
 
@@ -228,11 +228,11 @@ test("blocked score disclosure keeps hard blockers and unresolved gaps separate 
     ranking: { status: "BLOCKED_EVIDENCE_GAP", cohort_id: "capability-cohort:core" },
   });
   const html = renderToStaticMarkup(React.createElement(ViabilityScoreDisclosure, { score }));
-  assert.match(html, /Hard eligibility и required EVIDENCE_GAP оценены до score/);
+  assert.match(html, /Жёсткая допустимость и обязательные пробелы в доказательствах оцениваются до балла/);
   assert.match(html, /EVIDENCE_HARD_BLOCKER/);
-  assert.match(html, /Unresolved EVIDENCE_GAP/);
+  assert.match(html, /Неразрешённые обязательные пробелы в доказательствах/);
   assert.match(html, /DEMAND_EVIDENCE_GAP/);
-  assert.match(html, /rank отсутствует/);
-  assert.match(html, /Frequency scope/);
-  assert.match(html, /Cost scope/);
+  assert.match(html, /место отсутствует/);
+  assert.match(html, /Охват частотности/);
+  assert.match(html, /Охват стоимости/);
 });
