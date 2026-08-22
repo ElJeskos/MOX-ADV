@@ -67,10 +67,10 @@ export function CampaignDraftCard({ draft, selected = false }: { draft: Record<s
   </div>;
 }
 
-export function DraftFieldRegistryDisclosure({ registry, draft }: { registry: Record<string, any>; draft: Record<string, any> }) {
+export function DraftFieldRegistryDisclosure({ registry, draft, titleId = "draft-field-registry-title" }: { registry: Record<string, any>; draft: Record<string, any>; titleId?: string }) {
   const fields = Array.isArray(registry?.fields) ? registry.fields : [];
-  return <section className="draft-field-registry" aria-labelledby="draft-field-registry-title">
-    <header><div><p className="eyebrow">EXACT DIRECT v501 PROJECTION</p><h3 id="draft-field-registry-title">Поддерживаемые publishable fields</h3></div><code>{registry?.profile_id}@{registry?.profile_version}</code></header>
+  return <section className="draft-field-registry" aria-labelledby={titleId}>
+    <header><div><p className="eyebrow">EXACT DIRECT v501 PROJECTION</p><h3 id={titleId}>Поддерживаемые publishable fields</h3></div><code>{registry?.profile_id}@{registry?.profile_version}</code></header>
     <p>Editable controls round-trip server-side. Strategy/capability fixed and conditionally absent fields are review-only and are never silently dropped.</p>
     <div>{fields.map((field: Record<string, any>) => {
       const projectionValue = projectionFieldValue(draft.publish_projection, field.pointer);

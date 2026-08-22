@@ -85,7 +85,7 @@ export class DirectWriteError extends Error {
 async function callDirect(
   config: DirectConfig,
   service: "Campaigns" | "AdGroups" | "Keywords" | "Ads",
-  method: "add" | "suspend" | "get" | "moderate",
+  method: "add" | "update" | "suspend" | "get" | "moderate",
   params: Record<string, unknown>,
   fetcher: Fetcher,
 ): Promise<DirectResult> {
@@ -538,6 +538,165 @@ async function ensureExplicitlySuspended(
     );
   }
   return campaign;
+}
+
+export async function correctSuspendedCampaignAndResubmitModeration(
+  config: DirectConfig,
+  projection: DirectProjection,
+  providerIds: ProviderGraphIds,
+  changedPointers: string[],
+  fetcher: Fetcher = fetch,
+  onProgress: (status: string, result: Record<string, unknown>) => void | Promise<void> = () => undefined,
+  recovery: { completedUpdates?: string[]; moderationIntentPersisted?: boolean } | null = null,
+) {
+  if (!config.token || !config.account) {
+    throw new DirectWriteError("P0_WRITE_CREDENTIAL_MISSING", "Direct production credentials не настроены.");
+  }
+  if (
+    projection.safety.must_end_non_serving !== true
+    || projection.safety.resume_allowed !== false
+    || projection.safety.network_serving !== false
+  ) {
+    throw new DirectWriteError("P0_PROJECTION_UNSAFE", "Corrected Campaign Draft нарушает обязательный safety-контракт.");
+  }
+  for (const providerId of Object.values(providerIds)) directId(providerId);
+  const supportedPointerPrefixes = ["/direct/campaign/", "/direct/ad_group/", "/direct/keyword/", "/direct/ad/"];
+  if (!changedPointers.length || changedPointers.some((pointer) => !supportedPointerPrefixes.some((prefix) => pointer.startsWith(prefix)))) {
+    throw new DirectWriteError("P0_CORRECTION_DELTA_INVALID", "Correction requires non-empty supported Direct field-level delta.");
+  }
+  const result: Record<string, unknown> = {
+    campaign_id: providerIds.campaignId,
+    ad_group_id: providerIds.adGroupId,
+    keyword_id: providerIds.keywordId,
+    ad_id: providerIds.adId,
+    provider_ids: {
+      campaign_id: providerIds.campaignId,
+      ad_group_id: providerIds.adGroupId,
+      keyword_id: providerIds.keywordId,
+      ad_group_ids: [providerIds.adGroupId],
+      keyword_ids: [providerIds.keywordId],
+      ad_ids: [providerIds.adId],
+    },
+    steps: [] as string[],
+    provider_issues: [] as Array<Record<string, unknown>>,
+  };
+  try {
+    await ensureExplicitlySuspended(config, providerIds.campaignId, fetcher, result);
+    (result.steps as string[]).push("NON_SERVING_CONFIRMED");
+    await onProgress("NON_SERVING_CONFIRMED", result);
+
+    const updates: Array<{
+      service: "Campaigns" | "AdGroups" | "Keywords" | "Ads";
+      key: "Campaigns" | "AdGroups" | "Keywords" | "Ads";
+      id: string;
+      object: Record<string, unknown>;
+    }> = [
+      { service: "Campaigns", key: "Campaigns", id: providerIds.campaignId, object: projection.direct.campaign },
+      { service: "AdGroups", key: "AdGroups", id: providerIds.adGroupId, object: projection.direct.ad_group },
+      { service: "Keywords", key: "Keywords", id: providerIds.keywordId, object: projection.direct.keyword },
+      { service: "Ads", key: "Ads", id: providerIds.adId, object: projection.direct.ad },
+    ];
+    const changedServices = new Set(changedPointers.map((pointer) => pointer.split("/")[2]));
+    const completedUpdates = new Set(recovery?.completedUpdates ?? []);
+    for (const update of updates.filter((candidate) => changedServices.has({ Campaigns: "campaign", AdGroups: "ad_group", Keywords: "keyword", Ads: "ad" }[candidate.service]))) {
+      const operation = `${update.service}.update`;
+      if (completedUpdates.has(operation)) {
+        (result.steps as string[]).push(`${update.service.toUpperCase()}_CORRECTION_RECOVERED`);
+        continue;
+      }
+      (result.steps as string[]).push(`${update.service.toUpperCase()}_UPDATE_INTENT_PERSISTED`);
+      await onProgress(`${update.service.toUpperCase()}_UPDATE_INTENT_PERSISTED`, result);
+      const updated = await callDirect(
+        config,
+        update.service,
+        "update",
+        { [update.key]: [{ ...update.object, Id: directId(update.id) }] },
+        fetcher,
+      );
+      actionAccepted(updated, "UpdateResults", operation, result, [update.id]);
+      completedUpdates.add(operation);
+      result.completed_updates = [...completedUpdates];
+      (result.steps as string[]).push(`${update.service.toUpperCase()}_CORRECTED`);
+      await onProgress(`${update.service.toUpperCase()}_CORRECTED`, result);
+    }
+
+    const correctedGraph = await readAndVerifyGraph(config, projection, providerIds, fetcher);
+    (result.steps as string[]).push("CORRECTED_GRAPH_VERIFIED");
+    await onProgress("CORRECTED_GRAPH_VERIFIED", result);
+    const recoveredModeration = recovery?.moderationIntentPersisted === true
+      && String(correctedGraph.ad.Status ?? "UNKNOWN") !== "DRAFT";
+    if (recoveredModeration) {
+      (result.steps as string[]).push("CORRECTED_MODERATION_RECOVERED");
+      await onProgress("CORRECTED_MODERATION_RECOVERED", result);
+    } else {
+      result.moderation_intent_persisted = true;
+      (result.steps as string[]).push("CORRECTED_MODERATION_INTENT_PERSISTED");
+      await onProgress("CORRECTED_MODERATION_INTENT_PERSISTED", result);
+      const moderated = await callDirect(
+        config,
+        "Ads",
+        "moderate",
+        { SelectionCriteria: { Ids: [directId(providerIds.adId)] } },
+        fetcher,
+      );
+      actionAccepted(moderated, "ModerateResults", "Ads.moderate", result, [providerIds.adId]);
+      (result.steps as string[]).push("CORRECTED_MODERATION_SUBMITTED");
+      await onProgress("CORRECTED_MODERATION_SUBMITTED", result);
+    }
+
+    const finalGraph = await readAndVerifyGraph(config, projection, providerIds, fetcher);
+    const moderation = String(finalGraph.ad.Status ?? "UNKNOWN");
+    const status = moderation === "ACCEPTED"
+      ? "DIRECT_ACCEPTED"
+      : moderation === "REJECTED"
+        ? "REJECTED_NEEDS_EDIT"
+        : ["MODERATION", "PREACCEPTED"].includes(moderation)
+          ? "MODERATION_PENDING"
+          : "OUTCOME_UNKNOWN";
+    return {
+      ...result,
+      status,
+      campaign_state: String(finalGraph.campaign.State ?? "UNKNOWN"),
+      moderation_status: moderation,
+      ad_outcomes: [{
+        ad_id: providerIds.adId,
+        ad_group_id: providerIds.adGroupId,
+        status: moderation,
+        status_clarification: finalGraph.ad.StatusClarification === null || finalGraph.ad.StatusClarification === undefined
+          ? null
+          : String(finalGraph.ad.StatusClarification),
+        provider_issues: [],
+      }],
+      semantic_graph: finalGraph.semantic_graph,
+      supported_graph_verified: true,
+      containment: "CONFIRMED_SUSPENDED",
+      account_lock: "RELEASED",
+      spend_started: false,
+    };
+  } catch (error) {
+    if (error instanceof DirectWriteError && error.partial.requires_reconciliation === true) {
+      throw new DirectWriteError(error.code, error.message, {
+        ...result,
+        ...error.partial,
+        containment: "RECONCILIATION_REQUIRED",
+        account_lock: "HELD_FOR_RECONCILIATION",
+      });
+    }
+    try {
+      const campaign = await ensureNonServing(config, providerIds.campaignId, fetcher, result);
+      result.campaign_state = String(campaign.State ?? "UNKNOWN");
+      result.containment = campaign.State === "SUSPENDED" ? "CONFIRMED_SUSPENDED" : "NON_SERVING_CONFIRMED";
+    } catch {
+      result.containment = "MANUAL_RECONCILIATION_REQUIRED";
+    }
+    if (error instanceof DirectWriteError) {
+      throw new DirectWriteError(error.code, error.message, { ...result, ...error.partial, account_lock: "RELEASED" });
+    }
+    throw new DirectWriteError("P0_DIRECT_CORRECTION_FAILED", "Direct не завершил confirmed correction resubmission.", {
+      ...result,
+      account_lock: "RELEASED",
+    });
+  }
 }
 
 export async function createSuspendedCampaign(

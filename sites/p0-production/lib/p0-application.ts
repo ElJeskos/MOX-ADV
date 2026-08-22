@@ -22,6 +22,7 @@ import {
   DIRECT_V501_DRAFT_FIELD_REGISTRY,
   isCanonicalDirectV501DraftFieldRegistry,
   nextDraftRevisionId,
+  normalizeDraftFieldInput,
 } from "./campaign-draft-fields.ts";
 import {
   buildCampaignRecommendationSet,
@@ -33,6 +34,13 @@ import {
   type CampaignRecommendationSet,
   type DirectCapabilitySnapshot,
 } from "./campaign-fanout.ts";
+import {
+  initializePackageCorrection,
+  recordCorrectionExecution,
+  updatePackageCorrection,
+  verifyPackageCorrection,
+  type PackageCorrection,
+} from "./campaign-correction.ts";
 import {
   buildDecisionInvalidation,
   buildHumanDecisionGate,
@@ -104,9 +112,9 @@ import {
 } from "./landing-advisory.ts";
 
 export const P0_APPLICATION_CONTRACT = "mox-adv.p0.application";
-export const P0_APPLICATION_CONTRACT_VERSION = "1.10.0";
-export const P0_DOCUMENT_SCHEMA = "p0-application-document-v7";
-const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4", "p0-application-document-v5", "p0-application-document-v6"]);
+export const P0_APPLICATION_CONTRACT_VERSION = "1.11.0";
+export const P0_DOCUMENT_SCHEMA = "p0-application-document-v8";
+const P0_LEGACY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4", "p0-application-document-v5", "p0-application-document-v6", "p0-application-document-v7"]);
 const P0_PRE_PACKAGE_AUTHORITY_DOCUMENT_SCHEMAS = new Set(["p0-application-document-v1", "p0-application-document-v2", "p0-application-document-v3", "p0-application-document-v4"]);
 export const P0_CONTEXT_SCHEMA = "p0-context-v2";
 const P0_LEGACY_CONTEXT_SCHEMA = "p0-context-v1";
@@ -183,6 +191,7 @@ export type P0Document = {
   package_review: PackageReview | null;
   human_decision_gate: HumanDecisionGate | null;
   package_execution: PackageExecution | null;
+  package_corrections: PackageCorrection[];
   last_decision_invalidation: DecisionInvalidation | null;
   external_write_intent: {
     strategy_revision_id: string;
@@ -270,6 +279,18 @@ export interface P0ApplicationAdapters {
     selection: P0Shortlist["selections"][number];
     projection: DirectProjection;
     draft: CampaignRecommendationSet["drafts"][number];
+    gate: HumanDecisionGate;
+  }): Promise<PackageItemExternalOutcome>;
+  resubmitCorrectedPackageItemOutcome?(input: {
+    key: string;
+    state: P0Document;
+    package_execution_id: string;
+    item_execution_id: string;
+    selection: P0Shortlist["selections"][number];
+    projection: DirectProjection;
+    draft: CampaignRecommendationSet["drafts"][number];
+    gate: HumanDecisionGate;
+    source_item: PackageItemExecution;
   }): Promise<PackageItemExternalOutcome>;
   pollPackageItemOutcome(input: {
     key: string;
@@ -280,6 +301,7 @@ export interface P0ApplicationAdapters {
     projection: DirectProjection;
     draft: CampaignRecommendationSet["drafts"][number];
     item: PackageItemExecution;
+    gate: HumanDecisionGate;
   }): Promise<PackageItemExternalOutcome>;
 }
 
@@ -408,6 +430,23 @@ export const P0_COMMAND_TRUTH_TABLE = {
       && !state.campaign
       && !state.external_write_intent,
   ),
+  start_package_correction: (state: P0Document) => Boolean(
+    state.package_execution
+      && state.package_execution.verdict !== "PENDING"
+      && state.package_execution.items.some((item) => item.status === "REJECTED_NEEDS_EDIT"
+        && !state.package_corrections.some((correction) => correction.source.item_execution_id === item.item_execution_id)),
+  ),
+  save_package_correction: (state: P0Document) => state.package_corrections.some((correction) => correction.status === "EDITING"),
+  review_package_correction: (state: P0Document) => state.package_corrections.some((correction) => correction.status === "PACKAGE_REVIEW_REQUIRED"),
+  confirm_package_correction: (state: P0Document) => state.package_corrections.some((correction) => correction.status === "HUMAN_GATE_REQUIRED"),
+  resubmit_package_correction: (state: P0Document) => state.package_corrections.some((correction) => correction.status === "READY_TO_RESUBMIT" || (
+    correction.status === "RESUBMISSION_PENDING"
+      && correction.execution?.items.some((item) => item.status === "QUEUED" || item.status === "DISPATCHING")
+  )),
+  poll_package_correction_moderation: (state: P0Document) => state.package_corrections.some((correction) =>
+    correction.status === "RESUBMISSION_PENDING"
+      && correction.execution?.items.some((item) => item.status === "MODERATION_PENDING" || item.status === "OUTCOME_UNKNOWN")
+  ),
   // Legacy one-Draft dispatch remains unavailable; package execution is authoritative.
   confirm_creation: () => false,
   reset: (state: P0Document) => packageNotDispatched(state),
@@ -441,6 +480,7 @@ function emptyDocument(): P0Document {
     package_review: null,
     human_decision_gate: null,
     package_execution: null,
+    package_corrections: [],
     last_decision_invalidation: null,
     external_write_intent: null,
     campaign: null,
@@ -1198,6 +1238,7 @@ function invalidateContextDownstream(state: P0Document) {
   state.package_review = null;
   state.human_decision_gate = null;
   state.package_execution = null;
+  state.package_corrections = [];
   state.external_write_intent = null;
   state.recommendation_recalculation = null;
 }
@@ -1211,8 +1252,150 @@ function invalidateStrategyDownstream(state: P0Document) {
   state.package_review = null;
   state.human_decision_gate = null;
   state.package_execution = null;
+  state.package_corrections = [];
   state.external_write_intent = null;
   state.recommendation_recalculation = null;
+}
+
+async function buildMaterialDraftCorrection(
+  state: P0Document,
+  sourceRecommendationSet: CampaignRecommendationSet,
+  sourceDraft: CampaignRecommendationSet["drafts"][number],
+  value: Record<string, unknown>,
+  editedAt: string,
+) {
+  if (!state.strategy || !state.business_model || !state.analytics_evidence_snapshot) {
+    fail("P0_CORRECTION_LINEAGE_INVALID", "Correction требует persisted Strategy, Model и Analytics Evidence Snapshot.");
+  }
+  let normalizedFields: ReturnType<typeof normalizeDraftFieldInput>;
+  try {
+    normalizedFields = normalizeDraftFieldInput(value);
+  } catch (error) {
+    const inputError = error as Error & { code?: string };
+    fail(inputError.code ?? "P0_CORRECTION_INPUT_INVALID", inputError.message);
+  }
+  if (normalizedFields.draft_id !== sourceDraft.draft_id) {
+    fail("P0_CORRECTION_DRAFT_MISMATCH", "Correction относится только к exact rejected Campaign Draft.");
+  }
+  const nextDraftRevision = nextDraftRevisionId(sourceDraft.draft_id, sourceDraft.draft_revision_id);
+  const materialLineage = {
+    ...normalizedFields,
+    draft_id: sourceDraft.draft_id,
+    draft_revision_id: nextDraftRevision,
+    strategy_revision_id: state.strategy.strategy_revision_id,
+    capability_profile_id: sourceRecommendationSet.capability_profile.profile_id,
+    capability_profile_version: sourceRecommendationSet.capability_profile.profile_version,
+    playbook_release_id: sourceDraft.playbook_release_id,
+    playbook_release_version: sourceDraft.playbook_release_version,
+    playbook_rule_id: sourceDraft.playbook_rule_id,
+    playbook_rule_version: sourceDraft.playbook_rule_version,
+  };
+  const basicProjection = buildPublishProjection(
+    state.business_model as unknown as Record<string, unknown>,
+    state.strategy,
+    materialLineage,
+  ) as unknown as Record<string, unknown>;
+  const preservedCapability = preserveSelectedConditionalProjection({
+    generatedDraft: sourceDraft,
+    editedProjection: basicProjection,
+    snapshot: state.context_state?.facts.direct.capability_snapshot ?? null,
+  });
+  const projection = preservedCapability.projection;
+  const publishFingerprint = await fingerprintDirectProjection(projection);
+  if (publishFingerprint === sourceDraft.publish_fingerprint) {
+    fail("P0_CORRECTION_MATERIAL_CHANGE_REQUIRED", "Correction требует material publishable field change и новую Draft revision.");
+  }
+  const materialFields = directProjectionMaterialDelta(sourceDraft.publish_projection, projection);
+  if (!materialFields.length) {
+    fail("P0_DRAFT_MATERIALITY_INVALID", "Correction fingerprint changed without a supported Direct field delta.");
+  }
+  const capabilityBlockerCodes = new Set([
+    "UNSUPPORTED_SELECTED_FIELD",
+    "CONDITIONAL_CAPABILITY_EVIDENCE_MISSING",
+    "CONDITIONAL_CAPABILITY_ACCOUNT_INELIGIBLE",
+  ]);
+  const publicationBlockers = (Array.isArray(sourceDraft.publication_blockers) ? sourceDraft.publication_blockers : [])
+    .filter((blocker) => !capabilityBlockerCodes.has(String((blocker as Record<string, unknown>).code ?? "")));
+  publicationBlockers.push(...preservedCapability.capability_selection.blockers.map((blocker) => ({
+    code: blocker.code,
+    message: blocker.message,
+    field_path: blocker.field_path,
+  })));
+  const publishEligibility = publicationBlockers.some((blocker) => String((blocker as Record<string, unknown>).code ?? "") === "DEMAND_EVIDENCE_GAP")
+    ? "BLOCKED_EVIDENCE_GAP" : publicationBlockers.length === 0 ? "ELIGIBLE" : "BLOCKED_HARD";
+  const editedDraft = {
+    ...sourceDraft,
+    ...materialLineage,
+    source: "OWNER_CORRECTED_AFTER_PROVIDER_REJECTION",
+    edited_at: editedAt,
+    capability_selection: preservedCapability.capability_selection,
+    unsupported_fields: preservedCapability.capability_selection.unsupported_fields,
+    publication_blockers: publicationBlockers,
+    shortlist_eligible: publishEligibility === "ELIGIBLE",
+    publish_eligibility: publishEligibility,
+    publish_projection: projection,
+    publish_fingerprint: publishFingerprint,
+  } as typeof sourceDraft;
+  const draftMembership = sourceRecommendationSet.drafts.map((item) => item.draft_id === sourceDraft.draft_id ? editedDraft : structuredClone(item));
+  const correctedRecommendationSetId = await recommendationSetRevisionId(sourceRecommendationSet.recommendation_set_id, draftMembership);
+  const rescored = await scoreCampaignDrafts({
+    recommendationSetId: correctedRecommendationSetId,
+    drafts: draftMembership,
+    model: state.business_model as unknown as Record<string, unknown>,
+    strategy: state.strategy,
+    analyticsEvidence: state.analytics_evidence_snapshot as unknown as Record<string, unknown>,
+    scoredAt: editedAt,
+  });
+  const rescoredDraft = rescored.find((item) => item.draft_id === sourceDraft.draft_id);
+  if (!rescoredDraft) fail("P0_CORRECTION_DRAFT_MISSING", "Correction rescore потерял exact rejected Draft.");
+  const scoreDelta = explainScoreDelta(
+    sourceDraft.viability_score,
+    rescoredDraft.viability_score,
+    materialFields.map((field) => field.pointer),
+  );
+  const correctedDraft = {
+    ...rescoredDraft,
+    material_delta: {
+      schema_version: "p0-draft-material-delta-v1",
+      changed_at: editedAt,
+      previous_draft_revision_id: sourceDraft.draft_revision_id,
+      current_draft_revision_id: rescoredDraft.draft_revision_id,
+      previous_publish_fingerprint: sourceDraft.publish_fingerprint,
+      current_publish_fingerprint: rescoredDraft.publish_fingerprint,
+      fields: materialFields,
+      policy_reason: scoreDelta.comparative_priority_reason,
+    },
+    score_delta: scoreDelta,
+    draft_save_result: {
+      schema_version: "p0-draft-save-result-v1",
+      material_change: true,
+      message: "Создана новая immutable correction Draft revision; полный fixed-membership Recommendation Set пересчитан.",
+      previous_draft_revision_id: sourceDraft.draft_revision_id,
+      current_draft_revision_id: rescoredDraft.draft_revision_id,
+      previous_publish_fingerprint: sourceDraft.publish_fingerprint,
+      current_publish_fingerprint: rescoredDraft.publish_fingerprint,
+      changed_fields: materialFields,
+    },
+  } as typeof sourceDraft;
+  const correctedRecommendationSet = structuredClone(sourceRecommendationSet);
+  correctedRecommendationSet.recommendation_set_id = correctedRecommendationSetId;
+  correctedRecommendationSet.drafts = rescored.map((item) => item.draft_id === sourceDraft.draft_id ? correctedDraft : item);
+  correctedRecommendationSet.candidate_audit = correctedRecommendationSet.candidate_audit.map((candidate) => {
+    if (candidate.candidate_type !== "DRAFT" || !candidate.draft_id) return candidate;
+    const currentDraft = correctedRecommendationSet.drafts.find((item) => item.draft_id === candidate.draft_id);
+    return currentDraft ? {
+      ...candidate,
+      visibility: currentDraft.visibility,
+      reason_code: currentDraft.visibility === "VISIBLE"
+        ? "VISIBLE:GENERATED_DRAFT"
+        : String(currentDraft.suppression_reason || "HIDDEN:STRUCTURAL"),
+    } : candidate;
+  });
+  correctedRecommendationSet.coverage.visible_count = correctedRecommendationSet.candidate_audit.filter((candidate) => candidate.visibility === "VISIBLE").length;
+  correctedRecommendationSet.coverage.hidden_count = correctedRecommendationSet.candidate_audit.length - Number(correctedRecommendationSet.coverage.visible_count);
+  correctedRecommendationSet.coverage.visible_drafts = correctedRecommendationSet.drafts.filter((item) => item.visibility === "VISIBLE").length;
+  correctedRecommendationSet.coverage.hidden_drafts = correctedRecommendationSet.drafts.length - Number(correctedRecommendationSet.coverage.visible_drafts);
+  return { correctedRecommendationSet, correctedDraft };
 }
 
 async function inferModel(site: SiteAnalysis, context: P0Context): Promise<BusinessModel> {
@@ -1375,6 +1558,13 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     lineageError("Campaign Strategy не связана с моделью бизнеса.");
   }
 
+  if (!Object.hasOwn(raw, "package_corrections")) {
+    if (!legacyDocument) lineageError("same-schema document field package_corrections отсутствует.");
+    state.package_corrections = [];
+    changed = true;
+  } else if (!Array.isArray(state.package_corrections)) {
+    lineageError("package corrections должны быть persisted array.");
+  }
   for (const key of ["context_state", "site_analysis", "business_model", "analytics_evidence_snapshot", "strategy_questionnaire", "strategy", "landing_advisory_run", "recommendation_set", "draft", "shortlist", "package_review", "human_decision_gate", "package_execution", "last_decision_invalidation", "external_write_intent", "campaign", "recommendation_recalculation", "last_cascade"] as const) {
     if (!(key in state)) {
       if (!legacyDocument) lineageError(`same-schema document field ${key} отсутствует.`);
@@ -1387,6 +1577,7 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
     state.package_review = null;
     state.human_decision_gate = null;
     state.package_execution = null;
+    state.package_corrections = [];
   }
   if (state.analytics_evidence_snapshot && !await verifyAnalyticsEvidenceSnapshot(state.analytics_evidence_snapshot)) {
     lineageError("Analytics Evidence Snapshot hash verification failed.");
@@ -1670,8 +1861,53 @@ async function migrateDocument(raw: Record<string, unknown>, revision: number, u
         lineageError("package execution identity, item order или durable outcome hash не прошли проверку.");
       }
     }
-  } else if (state.shortlist || state.package_review || state.human_decision_gate || state.package_execution) {
-    lineageError("shortlist/package authority или execution существует без Strategy и Recommendation Set.");
+    if (new Set(state.package_corrections.map((correction) => correction.correction_id)).size !== state.package_corrections.length
+      || new Set(state.package_corrections.map((correction) => correction.source.item_execution_id)).size !== state.package_corrections.length) {
+      lineageError("package correction identity duplicated the same rejected item.");
+    }
+    for (const correction of state.package_corrections) {
+      if (!state.package_execution || !await verifyPackageCorrection({
+        correction,
+        sourceExecution: state.package_execution,
+        sourceRecommendationSet: state.recommendation_set,
+      })) {
+        lineageError("package correction source, immutable history или content hash не прошли проверку.");
+      }
+      if (!correction.corrected_recommendation_set) continue;
+      if (!isCanonicalDirectV501DraftFieldRegistry(correction.corrected_recommendation_set.field_registry)
+        || correction.corrected_recommendation_set.strategy_revision_id !== strategy.strategy_revision_id
+        || !correction.shortlist
+        || !await verifyShortlist(correction.shortlist, correction.corrected_recommendation_set, String(strategy.strategy_revision_id ?? ""))) {
+        lineageError("corrected Recommendation Set или shortlist lineage не прошли проверку.");
+      }
+      if (correction.package_review) {
+        if (!binding || !capabilitySnapshot || !evidenceSnapshotId || !await verifyPackageReview({
+          review: correction.package_review,
+          shortlist: correction.shortlist,
+          recommendationSet: correction.corrected_recommendation_set,
+          strategyRevisionId: String(strategy.strategy_revision_id ?? ""),
+          accountBinding: binding,
+          capabilitySnapshot: capabilitySnapshot as unknown as Record<string, unknown>,
+          analyticsEvidenceSnapshotId: evidenceSnapshotId,
+        })) {
+          lineageError("corrected package review identity или authority не прошли проверку.");
+        }
+      }
+      if (correction.human_decision_gate
+        && (!correction.package_review || !await verifyHumanDecisionGate(correction.human_decision_gate, correction.package_review))) {
+        lineageError("corrected Human Decision Gate не прошёл проверку.");
+      }
+      if (correction.execution
+        && (!correction.human_decision_gate || !await verifyPackageExecution({
+          execution: correction.execution,
+          gate: correction.human_decision_gate,
+          recommendationSet: correction.corrected_recommendation_set,
+        }))) {
+        lineageError("corrected package execution не прошло durable verification.");
+      }
+    }
+  } else if (state.shortlist || state.package_review || state.human_decision_gate || state.package_execution || state.package_corrections.length) {
+    lineageError("shortlist/package authority, correction или execution существует без Strategy и Recommendation Set.");
   }
   if (state.last_decision_invalidation && !await verifyDecisionInvalidation(state.last_decision_invalidation)) {
     lineageError("decision invalidation audit hash verification failed.");
@@ -2633,6 +2869,7 @@ export class P0Application {
             selection: plan.selection,
             projection: plan.projection,
             draft: plan.draft,
+            gate: state.human_decision_gate,
           });
         } catch (error) {
           const failure = error as Error & { code?: string; partial?: Record<string, unknown> };
@@ -2727,6 +2964,7 @@ export class P0Application {
           projection: plan.projection,
           draft: plan.draft,
           item: state.package_execution.items.find((item) => item.item_execution_id === itemExecutionId)!,
+          gate: state.human_decision_gate,
         });
       } catch (error) {
         const failure = error as Error & { code?: string; partial?: Record<string, unknown> };
@@ -2758,6 +2996,299 @@ export class P0Application {
         { moderationPoll: true },
       );
       await persistPollCheckpoint(pollCompletedAt);
+    } else if (action === "start_package_correction") {
+      if (!state.package_execution || !state.recommendation_set) {
+        fail("P0_PACKAGE_EXECUTION_MISSING", "Correction требует persisted initial package execution и Recommendation Set.");
+      }
+      const itemExecutionId = requiredInput(payload.item_execution_id, "Rejected package item", 255);
+      const sourceItem = state.package_execution.items.find((item) => item.item_execution_id === itemExecutionId);
+      if (!sourceItem || sourceItem.status !== "REJECTED_NEEDS_EDIT") {
+        fail("P0_CORRECTION_NOT_CONTENT_REJECTION", "Unknown, ambiguous, reconciliation-required или system outcome нельзя маршрутизировать как content correction.");
+      }
+      if (state.package_corrections.some((correction) => correction.source.item_execution_id === itemExecutionId)) {
+        fail("P0_CORRECTION_ALREADY_EXISTS", "Focused correction для этого immutable rejected item уже существует.");
+      }
+      const sourceDraft = state.recommendation_set.drafts.find((draft) => draft.draft_id === sourceItem.selection.draft_id);
+      if (!sourceDraft) fail("P0_CORRECTION_LINEAGE_INVALID", "Rejected item потерял initial Campaign Draft context.");
+      try {
+        state.package_corrections.push(await initializePackageCorrection({
+          execution: state.package_execution,
+          item: sourceItem,
+          draft: sourceDraft,
+          createdAt: this.adapters.now(),
+        }));
+      } catch (error) {
+        fail("P0_CORRECTION_NOT_CONTENT_REJECTION", errorMessage(error));
+      }
+    } else if (action === "save_package_correction") {
+      const correctionId = requiredInput(payload.correction_id, "Package correction", 255);
+      const correctionIndex = state.package_corrections.findIndex((item) => item.correction_id === correctionId);
+      const correction = state.package_corrections[correctionIndex];
+      if (!correction || correction.status !== "EDITING") {
+        fail("P0_CORRECTION_STATE_INVALID", "Focused correction не находится в editable state.");
+      }
+      const correctedAt = this.adapters.now();
+      const { correctedRecommendationSet, correctedDraft } = await buildMaterialDraftCorrection(
+        state,
+        state.recommendation_set!,
+        correction.source.draft_snapshot,
+        record(payload.value),
+        correctedAt,
+      );
+      const emptyCorrectionShortlist = await emptyShortlist({
+        shortlistRevisionId: `p0-correction-shortlist-${correction.correction_id.slice("sha256:".length, "sha256:".length + 16)}-r1`,
+        strategyRevisionId: String(state.strategy?.strategy_revision_id ?? ""),
+        recommendationSetId: correctedRecommendationSet.recommendation_set_id,
+        updatedAt: correctedAt,
+      });
+      let correctedSelection;
+      try {
+        correctedSelection = selectionForDraft(correctedDraft, correctedRecommendationSet);
+      } catch (error) {
+        fail("P0_CORRECTION_PUBLISH_BLOCKED", errorMessage(error));
+      }
+      const correctedShortlist = await reviseShortlist({
+        previous: emptyCorrectionShortlist,
+        shortlistRevisionId: emptyCorrectionShortlist.shortlist_revision_id,
+        updatedAt: correctedAt,
+        selections: [correctedSelection],
+        removedSelections: [],
+      });
+      state.package_corrections[correctionIndex] = await updatePackageCorrection(correction, {
+        status: "PACKAGE_REVIEW_REQUIRED",
+        corrected_recommendation_set: correctedRecommendationSet,
+        corrected_draft: correctedDraft,
+        shortlist: correctedShortlist,
+        package_review: null,
+        human_decision_gate: null,
+        execution: null,
+        terminal_outcome: null,
+        accounting: {
+          initial_package_verdict: correction.source.initial_package_verdict,
+          initial_generation_passed: false,
+          corrected_terminal_outcome: null,
+        },
+      }, correctedAt);
+    } else if (action === "review_package_correction") {
+      const correctionId = requiredInput(payload.correction_id, "Package correction", 255);
+      const correctionIndex = state.package_corrections.findIndex((item) => item.correction_id === correctionId);
+      const correction = state.package_corrections[correctionIndex];
+      if (!correction || correction.status !== "PACKAGE_REVIEW_REQUIRED" || !correction.corrected_recommendation_set || !correction.shortlist || !state.strategy || !state.context_state || !state.analytics_evidence_snapshot) {
+        fail("P0_CORRECTION_REVIEW_NOT_READY", "Corrected Draft revision и exact shortlist ещё не готовы к package review.");
+      }
+      const binding = directAccountBinding(state);
+      if (!binding) fail("P0_PACKAGE_ACCOUNT_BINDING_INVALID", "Exact Direct account binding отсутствует для corrected review.");
+      const reviewedAt = this.adapters.now();
+      const review = await buildPackageReview({
+        shortlist: correction.shortlist,
+        recommendationSet: correction.corrected_recommendation_set,
+        strategyRevisionId: String(state.strategy.strategy_revision_id ?? ""),
+        accountBinding: binding,
+        capabilitySnapshot: state.context_state.facts.direct.capability_snapshot as unknown as Record<string, unknown>,
+        analyticsEvidenceSnapshotId: state.analytics_evidence_snapshot.snapshot_id,
+        reviewedAt,
+      });
+      state.package_corrections[correctionIndex] = await updatePackageCorrection(correction, {
+        status: "HUMAN_GATE_REQUIRED",
+        package_review: review,
+        human_decision_gate: null,
+        execution: null,
+      }, reviewedAt);
+    } else if (action === "confirm_package_correction") {
+      if (payload.confirmation !== PACKAGE_CONFIRMATION_TOKEN) {
+        fail("P0_PACKAGE_CONFIRMATION_REQUIRED", `Нужно точное подтверждение ${PACKAGE_CONFIRMATION_TOKEN}.`);
+      }
+      const correctionId = requiredInput(payload.correction_id, "Package correction", 255);
+      const correctionIndex = state.package_corrections.findIndex((item) => item.correction_id === correctionId);
+      const correction = state.package_corrections[correctionIndex];
+      if (!correction || correction.status !== "HUMAN_GATE_REQUIRED" || !correction.package_review) {
+        fail("P0_CORRECTION_REVIEW_MISSING", "Сначала выполните новый exact package review corrected revision.");
+      }
+      if (payload.package_review_id !== correction.package_review.package_review_id || payload.package_id !== correction.package_review.package_id) {
+        fail("P0_PACKAGE_IDENTITY_STALE", "Corrected package review identity изменилась; повторите review и confirmation.");
+      }
+      const confirmedAt = this.adapters.now();
+      const gate = await buildHumanDecisionGate(correction.package_review, confirmedAt);
+      state.package_corrections[correctionIndex] = await updatePackageCorrection(correction, {
+        status: "READY_TO_RESUBMIT",
+        human_decision_gate: gate,
+        execution: null,
+      }, confirmedAt);
+    } else if (action === "resubmit_package_correction") {
+      const correctionId = requiredInput(payload.correction_id, "Package correction", 255);
+      const correctionIndex = state.package_corrections.findIndex((item) => item.correction_id === correctionId);
+      let correction = state.package_corrections[correctionIndex];
+      if (!correction || !["READY_TO_RESUBMIT", "RESUBMISSION_PENDING"].includes(correction.status)
+        || !correction.package_review || !correction.human_decision_gate || !correction.corrected_recommendation_set || !correction.corrected_draft) {
+        fail("P0_CORRECTION_GATE_MISSING", "Resubmission требует новый corrected package review и exact Human Decision Gate.");
+      }
+      if (payload.package_id !== correction.human_decision_gate.package_id || payload.gate_id !== correction.human_decision_gate.gate_id) {
+        fail("P0_PACKAGE_IDENTITY_STALE", "Correction resubmission identity не совпадает с новым exact Gate.");
+      }
+      const preflightAt = this.adapters.now();
+      const preflightContext = sanitizeContext(await this.adapters.readContext());
+      this.assertContextPreflight(preflightContext, preflightAt);
+      this.assertPersistedBindings(state, preflightContext);
+      const configuration = this.adapters.externalWriteConfiguration();
+      if (!configuration.ready) fail("P0_WRITE_NOT_READY", configuration.blockers[0] ?? "Direct production credentials не настроены.");
+      if (configuration.account !== correction.human_decision_gate.authority.direct_account_binding.account) {
+        fail("P0_CONTEXT_ACCOUNT_MISMATCH", "Direct write account не совпадает с corrected package Gate binding.");
+      }
+      let plans;
+      try {
+        plans = await exactPackageDispatchPlans({
+          review: correction.package_review,
+          gate: correction.human_decision_gate,
+          recommendationSet: correction.corrected_recommendation_set,
+        });
+      } catch (error) {
+        fail("P0_CORRECTION_DISPATCH_BLOCKED", errorMessage(error));
+      }
+      const persistCorrectionCheckpoint = async (checkpointAt: string) => {
+        state.package_corrections[correctionIndex] = correction;
+        const checkpoint: P0StoredRow = {
+          revision: persistedRevision + 1,
+          updated_at: checkpointAt,
+          value_json: JSON.stringify(state),
+        };
+        if (!await this.store.compareAndSwap(key, persistedRevision, checkpoint)) {
+          fail("P0_REVISION_CONFLICT", "P0 изменился в другой вкладке. Correction checkpoint не сохранён.");
+        }
+        persistedRevision = checkpoint.revision;
+      };
+      if (!correction.execution) {
+        const initialized = await initializePackageExecution({
+          review: correction.package_review,
+          gate: correction.human_decision_gate,
+          plans,
+          startedAt: preflightAt,
+        });
+        correction = await recordCorrectionExecution(correction, initialized, preflightAt);
+        await persistCorrectionCheckpoint(preflightAt);
+      }
+      for (const plan of plans) {
+        const currentItem = correction.execution?.items.find((item) => item.item_execution_id === plan.item_execution_id);
+        if (!currentItem || !["QUEUED", "DISPATCHING"].includes(currentItem.status)) continue;
+        if (packageExecutionBlocksFollowingItems(correction.execution!)) break;
+        const itemStartedAt = this.adapters.now();
+        const dispatching = await beginPackageItemDispatch(correction.execution!, plan.item_execution_id, itemStartedAt);
+        correction = await recordCorrectionExecution(correction, dispatching, itemStartedAt);
+        await persistCorrectionCheckpoint(itemStartedAt);
+        let outcome: PackageItemExternalOutcome;
+        try {
+          const input = {
+            key,
+            state,
+            package_execution_id: correction.execution!.package_execution_id,
+            item_execution_id: plan.item_execution_id,
+            selection: plan.selection,
+            projection: plan.projection,
+            draft: plan.draft,
+            gate: correction.human_decision_gate!,
+            source_item: correction.source.item_snapshot,
+          };
+          outcome = this.adapters.resubmitCorrectedPackageItemOutcome
+            ? await this.adapters.resubmitCorrectedPackageItemOutcome(input)
+            : await this.adapters.createPackageItemOutcome(input);
+        } catch (error) {
+          const failure = error as Error & { code?: string; partial?: Record<string, unknown> };
+          const partial = record(failure.partial);
+          outcome = {
+            execution_id: plan.item_execution_id,
+            ...partial,
+            status: partial.requires_reconciliation === true || partial.account_lock === "HELD_FOR_RECONCILIATION"
+              ? "RECONCILIATION_REQUIRED"
+              : partial.rejected === true ? "PROVIDER_REJECTED" : "SYSTEM_FAILED",
+            error_code: failure.code ?? "P0_CORRECTION_ITEM_SYSTEM_FAILURE",
+            error_message: failure.message || "Corrected package item execution failed.",
+          };
+        }
+        if (outcome.execution_id !== plan.item_execution_id) {
+          outcome = {
+            execution_id: plan.item_execution_id,
+            status: "RECONCILIATION_REQUIRED",
+            requires_reconciliation: true,
+            account_lock: "HELD_FOR_RECONCILIATION",
+            containment: "RECONCILIATION_REQUIRED",
+            error_code: "P0_PACKAGE_ITEM_IDENTITY_MISMATCH",
+            error_message: "Corrected external outcome did not match the durable execution identity.",
+          };
+        }
+        const itemUpdatedAt = this.adapters.now();
+        const nextExecution = await recordPackageItemOutcome(correction.execution!, plan.item_execution_id, outcome, itemUpdatedAt);
+        correction = await recordCorrectionExecution(correction, nextExecution, itemUpdatedAt);
+        await persistCorrectionCheckpoint(itemUpdatedAt);
+        if (packageExecutionBlocksFollowingItems(correction.execution!)) break;
+      }
+    } else if (action === "poll_package_correction_moderation") {
+      const correctionId = requiredInput(payload.correction_id, "Package correction", 255);
+      const correctionIndex = state.package_corrections.findIndex((item) => item.correction_id === correctionId);
+      let correction = state.package_corrections[correctionIndex];
+      if (!correction || correction.status !== "RESUBMISSION_PENDING" || !correction.execution || !correction.package_review || !correction.human_decision_gate || !correction.corrected_recommendation_set) {
+        fail("P0_CORRECTION_EXECUTION_MISSING", "Correction moderation poll требует current corrected execution и exact Gate.");
+      }
+      if (payload.package_id !== correction.execution.package_id) {
+        fail("P0_PACKAGE_IDENTITY_STALE", "Correction moderation package identity не совпадает с current execution.");
+      }
+      const itemExecutionId = requiredInput(payload.item_execution_id, "Corrected package item", 255);
+      const currentItem = correction.execution.items.find((item) => item.item_execution_id === itemExecutionId);
+      const pollStartedAt = this.adapters.now();
+      if (!currentItem || !packageItemModerationPollIsDue(currentItem, pollStartedAt)) {
+        fail("P0_MODERATION_POLL_NOT_DUE", `Correction moderation poll доступен после ${currentItem?.moderation.next_poll_at ?? "terminal outcome"}.`);
+      }
+      const plans = await exactPackageDispatchPlans({
+        review: correction.package_review,
+        gate: correction.human_decision_gate,
+        recommendationSet: correction.corrected_recommendation_set,
+      });
+      const plan = plans.find((item) => item.item_execution_id === itemExecutionId);
+      if (!plan) fail("P0_PACKAGE_ITEM_MISSING", "Correction moderation item потерял exact Draft projection lineage.");
+      const persistCorrectionCheckpoint = async (checkpointAt: string) => {
+        state.package_corrections[correctionIndex] = correction;
+        const checkpoint: P0StoredRow = { revision: persistedRevision + 1, updated_at: checkpointAt, value_json: JSON.stringify(state) };
+        if (!await this.store.compareAndSwap(key, persistedRevision, checkpoint)) fail("P0_REVISION_CONFLICT", "Correction moderation checkpoint не сохранён.");
+        persistedRevision = checkpoint.revision;
+      };
+      const polling = await beginPackageItemModerationPoll(correction.execution, itemExecutionId, pollStartedAt);
+      correction = await recordCorrectionExecution(correction, polling, pollStartedAt);
+      await persistCorrectionCheckpoint(pollStartedAt);
+      let outcome: PackageItemExternalOutcome;
+      try {
+        outcome = await this.adapters.pollPackageItemOutcome({
+          key,
+          state,
+          package_execution_id: correction.execution!.package_execution_id,
+          item_execution_id: itemExecutionId,
+          selection: plan.selection,
+          projection: plan.projection,
+          draft: plan.draft,
+          item: correction.execution!.items.find((item) => item.item_execution_id === itemExecutionId)!,
+          gate: correction.human_decision_gate!,
+        });
+      } catch (error) {
+        const failure = error as Error & { code?: string; partial?: Record<string, unknown> };
+        outcome = {
+          ...record(failure.partial),
+          execution_id: itemExecutionId,
+          status: record(failure.partial).requires_reconciliation === true ? "OUTCOME_UNKNOWN" : "SYSTEM_FAILED",
+          account_lock: "RELEASED",
+          error_code: failure.code ?? "P0_CORRECTION_MODERATION_POLL_FAILED",
+          error_message: failure.message || "Correction moderation poll failed.",
+        };
+      }
+      if (outcome.execution_id !== itemExecutionId) {
+        outcome = {
+          execution_id: itemExecutionId,
+          status: "OUTCOME_UNKNOWN",
+          account_lock: "RELEASED",
+          error_code: "P0_PACKAGE_ITEM_IDENTITY_MISMATCH",
+          error_message: "Correction moderation outcome did not match the durable item identity.",
+        };
+      }
+      const pollCompletedAt = this.adapters.now();
+      const nextExecution = await recordPackageItemOutcome(correction.execution!, itemExecutionId, outcome, pollCompletedAt, { moderationPoll: true });
+      correction = await recordCorrectionExecution(correction, nextExecution, pollCompletedAt);
+      await persistCorrectionCheckpoint(pollCompletedAt);
     } else if (action === "confirm_creation") {
 
       if (payload.confirmation !== "CREATE_NON_SERVING_CAMPAIGN") {
@@ -2820,7 +3351,11 @@ export class P0Application {
     if (!await this.store.compareAndSwap(key, persistedRevision, next)) {
       fail("P0_REVISION_CONFLICT", "P0 изменился в другой вкладке. Обновите страницу.");
     }
-    const decisionOnly = action === "review_package" || action === "confirm_package" || action === "dispatch_package" || action === "poll_package_moderation";
+    const decisionOnly = new Set<CommandName>([
+      "review_package", "confirm_package", "dispatch_package", "poll_package_moderation",
+      "start_package_correction", "save_package_correction", "review_package_correction",
+      "confirm_package_correction", "resubmit_package_correction", "poll_package_correction_moderation",
+    ]).has(action);
     const context = decisionOnly
       ? persistedDecisionContext(state)
       : sanitizeContext(await this.adapters.readContext());

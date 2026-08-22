@@ -6,6 +6,7 @@ import { buildPublishProjection } from "../lib/campaign-draft.ts";
 
 const JSONbig = JSONbigFactory({ useNativeBigInt: true });
 import {
+  correctSuspendedCampaignAndResubmitModeration,
   createSuspendedCampaign,
   DirectWriteError,
   pollSuspendedCampaignModeration,
@@ -149,6 +150,97 @@ test("creates a real-shape Direct graph and ends owner-suspended after moderatio
     calls[0].params.Campaigns[0].UnifiedCampaign.BiddingStrategy.Network.BiddingStrategyType,
     "SERVING_OFF",
   );
+});
+
+test("updates the exact suspended provider graph and resubmits only the corrected ad revision", async () => {
+  const corrected = projection();
+  corrected.direct.ad.TextAd.Text = "Исправленный текст после provider clarification.";
+  const calls = [];
+  let adReads = 0;
+  const fetcher = async (url, init) => {
+    const body = JSON.parse(String(init.body));
+    const service = new URL(url).pathname.split("/").at(-1);
+    const operation = `${service}.${body.method}`;
+    calls.push({ operation, params: body.params });
+    if (operation === "campaigns.get") return jsonResponse({ Campaigns: [{
+      Id: 101,
+      Name: corrected.direct.campaign.Name,
+      Type: "UNIFIED_CAMPAIGN",
+      State: "SUSPENDED",
+      Status: "ACCEPTED",
+      StartDate: corrected.direct.campaign.StartDate,
+      EndDate: corrected.direct.campaign.EndDate,
+      UnifiedCampaign: corrected.direct.campaign.UnifiedCampaign,
+    }] });
+    if (operation === "adgroups.get") return jsonResponse({ AdGroups: [{ Id: 201, CampaignId: 101, Type: "UNIFIED_AD_GROUP", ...corrected.direct.ad_group }] });
+    if (operation === "keywords.get") return jsonResponse({ Keywords: [{ Id: 301, AdGroupId: 201, Keyword: corrected.direct.keyword.Keyword }] });
+    if (operation === "ads.get") {
+      adReads += 1;
+      return jsonResponse({ Ads: [{
+        Id: 401,
+        CampaignId: 101,
+        AdGroupId: 201,
+        Type: "TEXT_AD",
+        Status: adReads === 1 ? "DRAFT" : "MODERATION",
+        State: "OFF",
+        StatusClarification: null,
+        TextAd: corrected.direct.ad.TextAd,
+      }] });
+    }
+    if (body.method === "update") return jsonResponse({ UpdateResults: [{ Id: { campaigns: 101, adgroups: 201, keywords: 301, ads: 401 }[service] }] });
+    if (operation === "ads.moderate") return jsonResponse({ ModerateResults: [{ Id: 401 }] });
+    throw new Error(`Unexpected Direct call ${operation}`);
+  };
+
+  const result = await correctSuspendedCampaignAndResubmitModeration(
+    { token: "secret", account: "moxstudio" },
+    corrected,
+    { campaignId: "101", adGroupId: "201", keywordId: "301", adId: "401" },
+    ["/direct/ad/TextAd/Text"],
+    fetcher,
+  );
+
+  assert.equal(result.status, "MODERATION_PENDING");
+  assert.equal(result.campaign_state, "SUSPENDED");
+  assert.equal(result.provider_ids.campaign_id, "101");
+  assert.equal(result.provider_ids.ad_ids[0], "401");
+  assert.equal(result.semantic_graph.ad.Text, "Исправленный текст после provider clarification.");
+  assert.equal(calls.some((call) => /\.(?:add|resume)$/u.test(call.operation)), false);
+  assert.deepEqual(calls.filter((call) => call.operation.endsWith(".update")).map((call) => call.operation), ["ads.update"]);
+  assert.equal(calls.find((call) => call.operation === "ads.update").params.Ads[0].Id, 401);
+  assert.ok(calls.findIndex((call) => call.operation === "ads.moderate") > calls.findIndex((call) => call.operation === "ads.get"));
+});
+
+test("an ambiguous correction update holds reconciliation and is never retried or moderated", async () => {
+  const corrected = projection();
+  corrected.direct.ad.TextAd.Text = "Исправленный текст после provider clarification.";
+  const calls = [];
+  await assert.rejects(
+    () => correctSuspendedCampaignAndResubmitModeration(
+      { token: "secret", account: "moxstudio" },
+      corrected,
+      { campaignId: "101", adGroupId: "201", keywordId: "301", adId: "401" },
+      ["/direct/ad/TextAd/Text"],
+      async (url, init) => {
+        const body = JSON.parse(String(init.body));
+        const service = new URL(url).pathname.split("/").at(-1);
+        const operation = `${service}.${body.method}`;
+        calls.push(operation);
+        if (operation === "campaigns.get") return jsonResponse({ Campaigns: [{ Id: 101, State: "SUSPENDED" }] });
+        if (operation === "ads.update") return new Response("gateway timeout", { status: 504 });
+        throw new Error(`Unexpected Direct call ${operation}`);
+      },
+    ),
+    (error) => {
+      assert.ok(error instanceof DirectWriteError);
+      assert.equal(error.partial.requires_reconciliation, true);
+      assert.equal(error.partial.containment, "RECONCILIATION_REQUIRED");
+      assert.equal(error.partial.account_lock, "HELD_FOR_RECONCILIATION");
+      return true;
+    },
+  );
+  assert.deepEqual(calls, ["campaigns.get", "ads.update"]);
+  assert.equal(calls.includes("ads.moderate"), false);
 });
 
 test("polls one exact supported graph without mutation and preserves terminal ad clarification", async () => {

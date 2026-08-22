@@ -96,9 +96,11 @@ export default function P0Client() {
           ? "Сохраняю решение владельца и начинаю полную аналитику…"
           : action === "dispatch_package"
             ? "Исполняю exact package независимо по каждой кампании…"
-            : action === "poll_package_moderation"
+            : action === "poll_package_moderation" || action === "poll_package_correction_moderation"
               ? "Проверяю один due moderation item через официальный Direct readback…"
-              : "Сохраняю production-ревизию…",
+              : action === "resubmit_package_correction"
+                ? "Повторно отправляю только новую confirmed correction revision…"
+                : "Сохраняю production-ревизию…",
     );
     try {
       const result = await request("/api/p0", {
@@ -652,11 +654,15 @@ function PackageExecutionPanel({
   busy,
   canPoll,
   poll,
+  correctionItemIds = [],
+  startCorrection,
 }: {
   execution: Record<string, any>;
   busy: boolean;
   canPoll: boolean;
   poll: (itemExecutionId: string) => void;
+  correctionItemIds?: string[];
+  startCorrection?: (itemExecutionId: string) => void;
 }) {
   const items = Array.isArray(execution.items) ? execution.items : [];
   return <section className="package-executions" aria-label="Package campaign executions">
@@ -670,9 +676,69 @@ function PackageExecutionPanel({
       {item.moderation?.next_poll_at && <p className="execution-failure" role="status"><strong>Next moderation poll</strong> · {item.moderation.next_poll_at} · attempts {item.moderation.poll_attempts}<button type="button" disabled={busy || !canPoll} onClick={() => poll(String(item.item_execution_id))}>Проверить due item</button></p>}
       {Array.isArray(item.moderation?.ad_outcomes) && item.moderation.ad_outcomes.length > 0 && <details><summary>Ad moderation outcomes · {item.moderation.ad_outcomes.length}</summary><ul>{item.moderation.ad_outcomes.map((ad: Record<string, any>) => <li key={ad.ad_id}><strong>{ad.ad_id} · {ad.status}</strong><span>{ad.status_clarification || "StatusClarification отсутствует"}</span></li>)}</ul></details>}
       {item.failure && <p className="execution-failure" role="status"><strong>{item.failure.code}</strong> · {item.failure.message}</p>}
+      {item.status === "REJECTED_NEEDS_EDIT" && startCorrection && <button type="button" className="correction-start" disabled={busy || correctionItemIds.includes(String(item.item_execution_id))} onClick={() => startCorrection(String(item.item_execution_id))}>{correctionItemIds.includes(String(item.item_execution_id)) ? "Focused correction уже открыта" : "Исправить отклонённый Draft"}</button>}
       {Array.isArray(item.provider_issues) && item.provider_issues.length > 0 && <details><summary>Provider details · {item.provider_issues.length}</summary><ul>{item.provider_issues.map((issue: Record<string, any>, index: number) => <li key={`${issue.operation}-${issue.code}-${index}`}><strong>{issue.operation} · {issue.code}</strong><span>{issue.message}{issue.details ? ` · ${issue.details}` : ""}</span></li>)}</ul></details>}
       {item.readback && <details><summary>Semantic readback</summary><code>{JSON.stringify(item.readback)}</code></details>}
     </li>)}</ol>
+  </section>;
+}
+
+function PackageCorrectionsPanel({
+  corrections,
+  fieldRegistry,
+  busy,
+  canPoll,
+  apply,
+}: {
+  corrections: Array<Record<string, any>>;
+  fieldRegistry: Record<string, any>;
+  busy: boolean;
+  canPoll: boolean;
+  apply: (action: string, value?: Record<string, unknown>, extra?: Record<string, unknown>) => Promise<void>;
+}) {
+  const [confirmedCorrectionId, setConfirmedCorrectionId] = useState("");
+  function submitCorrection(event: FormEvent<HTMLFormElement>, correction: Record<string, any>) {
+    event.preventDefault();
+    const registryFields = Array.isArray(fieldRegistry?.fields) ? fieldRegistry.fields as Array<Record<string, unknown>> : [];
+    const editableInputNames = registryFields
+      .filter((field) => field.editable === true && typeof field.input_name === "string" && field.input_name.length > 0)
+      .map((field) => String(field.input_name));
+    const form = event.currentTarget;
+    void apply("save_package_correction", {
+      draft_id: String(correction.source?.draft_snapshot?.draft_id || ""),
+      ...Object.fromEntries(editableInputNames.map((name) => [name, fieldValue(form, name)])),
+    }, { correction_id: correction.correction_id });
+  }
+  return <section className="package-corrections" aria-label="Focused correction flows">
+    <header><div><p className="eyebrow">FOCUSED CORRECTION · IMMUTABLE LINEAGE</p><h3>Provider rejection correction</h3><p>Initial execution, provider responses и verdict остаются immutable. Только material Draft revision может получить новый review, Gate и resubmission.</p></div><strong>{corrections.length}</strong></header>
+    {corrections.map((correction, correctionIndex) => {
+      const source = correction.source || {};
+      const sourceDraft = source.draft_snapshot || {};
+      const correctedDraft = correction.corrected_draft || null;
+      const correctedExecution = correction.execution || null;
+      const correctionItem = correctedExecution?.items?.[0] || null;
+      const canConfirm = confirmedCorrectionId === correction.correction_id;
+      return <article key={correction.correction_id} className="package-correction-flow">
+        <header><div><p className="eyebrow">Correction progress</p><strong>{correction.status}</strong><code>{correction.correction_id}</code></div><span>{source.item_execution_id}</span></header>
+        <dl className="correction-accounting">
+          <div><dt>Initial package verdict</dt><dd>{source.initial_package_verdict}</dd></div>
+          <div><dt>Correction progress</dt><dd>{correction.status}</dd></div>
+          <div><dt>Corrected terminal outcome</dt><dd>{correction.terminal_outcome || "PENDING"}</dd></div>
+        </dl>
+        <section className="correction-provider-context"><strong>StatusClarification</strong>{source.status_clarifications?.length ? <ul>{source.status_clarifications.map((item: string) => <li key={item}>{item}</li>)}</ul> : <p>Provider clarification отсутствует; correction остаётся fail-closed.</p>}{source.provider_issues?.length > 0 && <details open><summary>Конкретные provider issues · {source.provider_issues.length}</summary><ul>{source.provider_issues.map((issue: Record<string, any>, index: number) => <li key={`${issue.operation}-${issue.code}-${index}`}><strong>{issue.operation} · {issue.code}</strong><span>{issue.message}{issue.details ? ` · ${issue.details}` : ""}</span></li>)}</ul></details>}<small>Initial package {source.package_id} · Gate {source.gate_id}</small></section>
+        {correction.status === "EDITING" && <form className="correction-form" onSubmit={(event) => submitCorrection(event, correction)}>
+          <DraftFieldRegistryDisclosure registry={fieldRegistry} draft={sourceDraft} titleId={`correction-draft-fields-${correctionIndex}`} />
+          <button type="submit" disabled={busy}>Сохранить новую material correction revision</button>
+        </form>}
+        {correctedDraft && <section className="corrected-draft-review"><DraftEditFeedback draft={correctedDraft} /><ViabilityScoreDisclosure score={correctedDraft.viability_score} delta={correctedDraft.score_delta} /><dl><div><dt>Draft revision</dt><dd>{correctedDraft.draft_revision_id}</dd></div><div><dt>Publish fingerprint</dt><dd><code>{correctedDraft.publish_fingerprint}</code></dd></div></dl></section>}
+        {correction.status === "PACKAGE_REVIEW_REQUIRED" && <button type="button" disabled={busy} onClick={() => void apply("review_package_correction", undefined, { correction_id: correction.correction_id })}>Проверить corrected package revision</button>}
+        {correction.status === "HUMAN_GATE_REQUIRED" && <div className="correction-gate"><label><input type="checkbox" checked={canConfirm} onChange={(event) => setConfirmedCorrectionId(event.target.checked ? correction.correction_id : "")} /><span>Подтверждаю новый exact review и corrected fingerprint</span></label><button type="button" disabled={busy || !canConfirm} onClick={() => void apply("confirm_package_correction", undefined, { correction_id: correction.correction_id, confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: correction.package_review.package_review_id, package_id: correction.package_review.package_id })}>Создать новый Human Decision Gate</button></div>}
+        {correction.status === "READY_TO_RESUBMIT" && <button type="button" disabled={busy} onClick={() => void apply("resubmit_package_correction", undefined, { correction_id: correction.correction_id, package_id: correction.human_decision_gate.package_id, gate_id: correction.human_decision_gate.gate_id })}>Повторно отправить confirmed correction revision</button>}
+        {correctedExecution && <PackageExecutionPanel execution={correctedExecution} busy={busy} canPoll={canPoll} poll={(itemExecutionId) => void apply("poll_package_correction_moderation", undefined, { correction_id: correction.correction_id, package_id: correctedExecution.package_id, item_execution_id: itemExecutionId })} />}
+        {correctionItem?.status === "RECONCILIATION_REQUIRED" && <p className="execution-failure" role="status"><strong>Reconciliation boundary удерживается</strong> · ambiguous corrected write не является content correction.</p>}
+        {correction.terminal_outcome === "PASS_AFTER_CORRECTION" && <div className="correction-terminal" role="status"><strong>PASS_AFTER_CORRECTION</strong><p>Corrected revision принята и остаётся non-serving. Initial generation verdict не изменён.</p></div>}
+      </article>;
+    })}
   </section>;
 }
 
@@ -681,6 +747,7 @@ function ConfirmationStep({ payload, apply, busy, back }: { payload: Payload; ap
   const review = payload.state.package_review;
   const gate = payload.state.human_decision_gate;
   const execution = payload.state.package_execution;
+  const corrections = Array.isArray(payload.state.package_corrections) ? payload.state.package_corrections : [];
   const canDispatch = payload.workflow.allowed_commands.includes("dispatch_package");
   const authority = review?.authority;
   const selections = Array.isArray(authority?.ordered_selections) ? authority.ordered_selections : [];
@@ -717,6 +784,15 @@ function ConfirmationStep({ payload, apply, busy, back }: { payload: Payload; ap
       busy={busy}
       canPoll={payload.workflow.allowed_commands.includes("poll_package_moderation")}
       poll={(itemExecutionId) => void apply("poll_package_moderation", undefined, { package_id: execution.package_id, item_execution_id: itemExecutionId })}
+      correctionItemIds={corrections.map((correction: Record<string, any>) => String(correction.source?.item_execution_id || ""))}
+      startCorrection={(itemExecutionId) => void apply("start_package_correction", undefined, { item_execution_id: itemExecutionId })}
+    />}
+    {corrections.length > 0 && <PackageCorrectionsPanel
+      corrections={corrections}
+      fieldRegistry={payload.state.recommendation_set?.field_registry || { fields: [] }}
+      busy={busy}
+      canPoll={payload.workflow.allowed_commands.includes("poll_package_correction_moderation")}
+      apply={apply}
     />}
     <footer className="actions"><span>Ревизия {payload.revision} · independent durable item executions</span><button type="button" className="secondary" disabled={busy} onClick={back}>Назад к shortlist</button>{!gate
       ? <button type="button" disabled={busy || !confirmed} onClick={() => void apply("confirm_package", undefined, { confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE", package_review_id: review.package_review_id, package_id: review.package_id })}>Подтвердить authority пакета</button>

@@ -74,6 +74,22 @@ test("card shortlist controls, persistent exact footer and package Gate disclose
   assert.doesNotMatch(clientSource, /apply\("confirm_creation"/u);
 });
 
+test("rejected package items expose focused correction, renewed review and separate PASS_AFTER_CORRECTION accounting", () => {
+  assert.match(clientSource, /Исправить отклонённый Draft/u);
+  assert.match(clientSource, /start_package_correction/u);
+  assert.match(clientSource, /Focused correction/u);
+  assert.match(clientSource, /StatusClarification/u);
+  assert.match(clientSource, /save_package_correction/u);
+  assert.match(clientSource, /review_package_correction/u);
+  assert.match(clientSource, /confirm_package_correction/u);
+  assert.match(clientSource, /resubmit_package_correction/u);
+  assert.match(clientSource, /poll_package_correction_moderation/u);
+  assert.match(clientSource, /Initial package verdict/u);
+  assert.match(clientSource, /Correction progress/u);
+  assert.match(clientSource, /Corrected terminal outcome/u);
+  assert.match(clientSource, /PASS_AFTER_CORRECTION/u);
+});
+
 test("confirmation renders independent durable item progress and dispatches only the exact Gate", () => {
   assert.match(clientSource, /Исполнить подтверждённый пакет/u);
   assert.match(clientSource, /apply\("dispatch_package"/u);

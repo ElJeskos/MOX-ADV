@@ -2624,6 +2624,191 @@ test("restart preserves a terminal provider rejection after the package outcome 
   assert.equal(recovered.state.package_execution.items[0].provider_issues[0].details, "Original provider detail");
 });
 
+test("rejected item correction requires a material Draft revision, fresh review and fresh Gate before PASS_AFTER_CORRECTION", async (t) => {
+  const value = await packageFixture(t);
+  const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+  let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+  value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => moderationOutcome(item_execution_id, {
+    ads: [{
+      adId: "704",
+      adGroupId: "702",
+      status: "REJECTED",
+      statusClarification: "Исправьте формулировку объявления",
+      providerIssues: [{ operation: "Ads.get", severity: "ERROR", code: "STATUS_REJECTED", message: "Ad rejected", details: "Policy detail" }],
+    }],
+  });
+  result = await value.application.command("owner", {
+    action: "dispatch_package",
+    expected_revision: result.revision,
+    package_id: result.state.human_decision_gate.package_id,
+    gate_id: result.state.human_decision_gate.gate_id,
+  });
+  const initialExecution = JSON.stringify(result.state.package_execution);
+  const initialRecommendationSet = JSON.stringify(result.state.recommendation_set);
+  const initialGateId = result.state.human_decision_gate.gate_id;
+  const rejectedItem = result.state.package_execution.items[0];
+  assert.equal(result.state.package_execution.verdict, "FAIL");
+  assert.equal(rejectedItem.status, "REJECTED_NEEDS_EDIT");
+
+  result = await value.application.command("owner", {
+    action: "start_package_correction",
+    expected_revision: result.revision,
+    item_execution_id: rejectedItem.item_execution_id,
+  });
+  const correctionId = result.state.package_corrections[0].correction_id;
+  let correction = result.state.package_corrections[0];
+  assert.equal(correction.status, "EDITING");
+  assert.equal(correction.source.initial_package_verdict, "FAIL");
+  assert.equal(correction.source.item_execution_id, rejectedItem.item_execution_id);
+  assert.equal(correction.source.status_clarifications.includes("Исправьте формулировку объявления"), true);
+  assert.equal(correction.source.provider_issues.some((issue) => issue.details === "Policy detail"), true);
+  assert.equal(JSON.stringify(result.state.package_execution), initialExecution);
+  assert.equal(JSON.stringify(result.state.recommendation_set), initialRecommendationSet);
+  assert.equal(result.workflow.allowed_commands.includes("resubmit_package_correction"), false);
+
+  result = await value.application.command("owner", {
+    action: "save_package_correction",
+    expected_revision: result.revision,
+    correction_id: correctionId,
+    value: editableDraftValue(draft, { ad_text: "Оставьте заявку на участие после проверки объявления" }),
+  });
+  correction = result.state.package_corrections[0];
+  assert.equal(correction.status, "PACKAGE_REVIEW_REQUIRED");
+  assert.notEqual(correction.corrected_draft.draft_revision_id, draft.draft_revision_id);
+  assert.notEqual(correction.corrected_draft.publish_fingerprint, draft.publish_fingerprint);
+  assert.deepEqual(correction.corrected_draft.material_delta.fields.map((field) => field.pointer), ["/direct/ad/TextAd/Text"]);
+  assert.equal(correction.corrected_draft.score_delta.changed_pointers.includes("/direct/ad/TextAd/Text"), true);
+  assert.equal(correction.package_review, null);
+  assert.equal(correction.human_decision_gate, null);
+  assert.equal(correction.execution, null);
+  assert.equal(JSON.stringify(result.state.package_execution), initialExecution);
+  assert.equal(JSON.stringify(result.state.recommendation_set), initialRecommendationSet);
+  assert.equal(result.workflow.allowed_commands.includes("resubmit_package_correction"), false);
+
+  result = await value.application.command("owner", {
+    action: "review_package_correction",
+    expected_revision: result.revision,
+    correction_id: correctionId,
+  });
+  correction = result.state.package_corrections[0];
+  assert.equal(correction.status, "HUMAN_GATE_REQUIRED");
+  assert.notEqual(correction.package_review.package_review_id, result.state.package_review.package_review_id);
+  assert.equal(result.workflow.allowed_commands.includes("resubmit_package_correction"), false);
+
+  result = await value.application.command("owner", {
+    action: "confirm_package_correction",
+    expected_revision: result.revision,
+    correction_id: correctionId,
+    confirmation: "CONFIRM_EXACT_SHORTLIST_PACKAGE",
+    package_review_id: correction.package_review.package_review_id,
+    package_id: correction.package_review.package_id,
+  });
+  correction = result.state.package_corrections[0];
+  assert.equal(correction.status, "READY_TO_RESUBMIT");
+  assert.notEqual(correction.human_decision_gate.gate_id, initialGateId);
+  assert.equal(result.workflow.allowed_commands.includes("resubmit_package_correction"), true);
+
+  let resubmittedProjection = null;
+  value.adapter.createPackageItemOutcome = async () => { throw new Error("correction must update the rejected provider graph, not create a duplicate campaign"); };
+  value.adapter.resubmitCorrectedPackageItemOutcome = async ({ item_execution_id, projection, gate, source_item }) => {
+    resubmittedProjection = projection;
+    assert.equal(gate.gate_id, correction.human_decision_gate.gate_id);
+    assert.equal(source_item.item_execution_id, rejectedItem.item_execution_id);
+    assert.equal(source_item.provider_ids.campaign_id, "701");
+    return moderationOutcome(item_execution_id, {
+      campaignId: "701",
+      adGroupIds: ["702"],
+      ads: [{ adId: "704", adGroupId: "702", status: "ACCEPTED", statusClarification: null }],
+    });
+  };
+  result = await value.application.command("owner", {
+    action: "resubmit_package_correction",
+    expected_revision: result.revision,
+    correction_id: correctionId,
+    package_id: correction.human_decision_gate.package_id,
+    gate_id: correction.human_decision_gate.gate_id,
+  });
+  correction = result.state.package_corrections[0];
+  assert.equal(correction.status, "PASS_AFTER_CORRECTION");
+  assert.equal(correction.terminal_outcome, "PASS_AFTER_CORRECTION");
+  assert.equal(correction.execution.verdict, "PASS");
+  assert.equal(correction.accounting.initial_generation_passed, false);
+  assert.equal(correction.accounting.initial_package_verdict, "FAIL");
+  assert.equal(correction.accounting.corrected_terminal_outcome, "PASS_AFTER_CORRECTION");
+  assert.equal(resubmittedProjection.lineage.draft_revision_id, correction.corrected_draft.draft_revision_id);
+  assert.equal(JSON.stringify(result.state.package_execution), initialExecution);
+  assert.equal(JSON.stringify(result.state.recommendation_set), initialRecommendationSet);
+  assert.equal(result.state.package_execution.verdict, "FAIL", "correction must not rewrite the initial generation verdict");
+
+  const restartedApplication = new P0Application({ store: value.store, adapters: value.adapter });
+  const restarted = await restartedApplication.query("owner");
+  assert.equal(restarted.state.package_corrections[0].terminal_outcome, "PASS_AFTER_CORRECTION");
+  assert.equal(JSON.stringify(restarted.state.package_execution), initialExecution);
+
+  const row = await value.store.load("owner");
+  const corrupted = JSON.parse(row.value_json);
+  corrupted.package_corrections[0].source.provider_issues[0].details = "forged correction history";
+  await value.store.seed("owner", { ...row, value_json: JSON.stringify(corrupted) });
+  await assert.rejects(
+    restartedApplication.query("owner"),
+    (error) => error instanceof P0ApplicationError
+      && error.code === "P0_MIGRATION_LINEAGE_INVALID"
+      && /correction/iu.test(error.message),
+  );
+});
+
+test("unknown or reconciliation-required package outcomes never enter content correction", async (t) => {
+  for (const [name, outcome] of [
+    ["unknown moderation", (itemExecutionId) => ({
+      execution_id: itemExecutionId,
+      status: "OUTCOME_UNKNOWN",
+      campaign_id: "901",
+      campaign_state: "SUSPENDED",
+      containment: "NON_SERVING_CONFIRMED",
+      account_lock: "RELEASED",
+      error_code: "P0_DIRECT_STATUS_UNKNOWN",
+      error_message: "Provider returned an unknown moderation state.",
+    })],
+    ["ambiguous write", (itemExecutionId) => ({
+      execution_id: itemExecutionId,
+      status: "RECONCILIATION_REQUIRED",
+      requires_reconciliation: true,
+      containment: "RECONCILIATION_REQUIRED",
+      account_lock: "HELD_FOR_RECONCILIATION",
+      error_code: "P0_DIRECT_OUTCOME_AMBIGUOUS",
+      error_message: "Provider write outcome is ambiguous.",
+    })],
+  ]) {
+    await t.test(name, async (t) => {
+      const value = await packageFixture(t);
+      const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
+      let result = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);
+      value.adapter.createPackageItemOutcome = async ({ item_execution_id }) => outcome(item_execution_id);
+      result = await value.application.command("owner", {
+        action: "dispatch_package",
+        expected_revision: result.revision,
+        package_id: result.state.human_decision_gate.package_id,
+        gate_id: result.state.human_decision_gate.gate_id,
+      });
+      const initialExecution = JSON.stringify(result.state.package_execution);
+      const item = result.state.package_execution.items[0];
+      assert.equal(result.workflow.allowed_commands.includes("start_package_correction"), false);
+      await assert.rejects(
+        value.application.command("owner", {
+          action: "start_package_correction",
+          expected_revision: result.revision,
+          item_execution_id: item.item_execution_id,
+        }),
+        (error) => error instanceof P0ApplicationError && error.code === "P0_TRANSITION_INVALID",
+      );
+      const unchanged = await value.application.query("owner");
+      assert.deepEqual(unchanged.state.package_corrections, []);
+      assert.equal(JSON.stringify(unchanged.state.package_execution), initialExecution);
+      if (name === "ambiguous write") assert.equal(item.account_lock, "HELD_FOR_RECONCILIATION");
+    });
+  }
+});
+
 test("v6 package execution migrates to durable moderation accountability without changing the item identity", async (t) => {
   const value = await packageFixture(t);
   const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
@@ -2720,7 +2905,7 @@ test("authoritative shortlist command rejects blocked and evidence-gap Drafts wi
   assert.equal(typeof after.shortlist_controls.find((item) => item.draft_id === blocked.draft_id).disabled_reason, "string");
 });
 
-test("v5 package authority migrates to v7 without discarding the exact confirmed Gate", async (t) => {
+test("v5 package authority migrates to the current document without discarding the exact confirmed Gate", async (t) => {
   const value = await packageFixture(t);
   const draft = value.result.state.recommendation_set.drafts.find((item) => item.shortlist_eligible && item.visibility === "VISIBLE");
   const confirmed = await reviewAndConfirm(value.application, value.result, [draft.draft_id]);

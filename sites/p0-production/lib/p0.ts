@@ -10,6 +10,7 @@ import { directExecutionFailureOutcome } from "./campaign-package-execution.ts";
 import { strategyAnswerValue } from "./campaign-strategy.ts";
 import { minimumWeeklyBudgetRub, validateWeeklyBudgetRub } from "./direct-limits.ts";
 import {
+  correctSuspendedCampaignAndResubmitModeration,
   DirectWriteError,
   pollSuspendedCampaignModeration,
   type DirectProjection,
@@ -66,6 +67,12 @@ function now() {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Неизвестная ошибка";
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
 }
 
 export function userKey(request: Request) {
@@ -735,6 +742,7 @@ async function createPackageItemOutcome({
   selection,
   projection,
   draft,
+  gate,
 }: {
   key: string;
   state: P0Document;
@@ -743,10 +751,11 @@ async function createPackageItemOutcome({
   selection: NonNullable<P0Document["shortlist"]>["selections"][number];
   projection: DirectProjection;
   draft: NonNullable<P0Document["recommendation_set"]>["drafts"][number];
+  gate: NonNullable<P0Document["human_decision_gate"]>;
 }) {
   const config = directWriteConfig();
   if (!config.token || !config.account) throw new Error("Direct production credentials не настроены.");
-  if (!state.strategy || !state.context_state || !state.recommendation_set || !state.human_decision_gate) {
+  if (!state.strategy || !state.context_state || !state.recommendation_set) {
     throw new Error("Exact package execution lineage отсутствует.");
   }
   const [binding, catalog, limits] = await Promise.all([
@@ -777,7 +786,7 @@ async function createPackageItemOutcome({
     }
     await beginExecution(key, config.account, projection, itemExecutionId);
   }
-  const packageAuthority = state.human_decision_gate.authority;
+  const packageAuthority = gate.authority;
   try {
     const result = await executeSafeSingleCampaign({
       execution_id: itemExecutionId,
@@ -801,12 +810,187 @@ async function createPackageItemOutcome({
   }
 }
 
-async function pollPackageItemOutcome({
+async function resubmitCorrectedPackageItemOutcome({
   key,
   state,
   item_execution_id: itemExecutionId,
+  selection,
+  projection,
+  draft,
+  gate,
+  source_item: sourceItem,
+}: {
+  key: string;
+  state: P0Document;
+  package_execution_id: string;
+  item_execution_id: string;
+  selection: NonNullable<P0Document["shortlist"]>["selections"][number];
+  projection: DirectProjection;
+  draft: NonNullable<P0Document["recommendation_set"]>["drafts"][number];
+  gate: NonNullable<P0Document["human_decision_gate"]>;
+  source_item: NonNullable<P0Document["package_execution"]>["items"][number];
+}) {
+  const config = directWriteConfig();
+  if (!config.token || !config.account) throw new Error("Direct production credentials не настроены.");
+  if (!state.strategy || !state.context_state || gate.authority.direct_account_binding.account !== config.account) {
+    throw new Error("Corrected package Gate не совпадает с persisted Strategy, Context или Direct account.");
+  }
+  const campaignId = sourceItem.provider_ids.campaign_id;
+  const adGroupId = sourceItem.provider_ids.ad_group_id;
+  const keywordId = sourceItem.provider_ids.keyword_id;
+  const adId = sourceItem.provider_ids.ad_ids[0];
+  if (!campaignId || !adGroupId || !keywordId || !adId
+    || sourceItem.provider_ids.ad_group_ids.length !== 1
+    || sourceItem.provider_ids.keyword_ids.length !== 1
+    || sourceItem.provider_ids.ad_ids.length !== 1
+    || sourceItem.status !== "REJECTED_NEEDS_EDIT"
+    || sourceItem.account_lock !== "RELEASED") {
+    throw new Error("Correction resubmission requires one fully-accounted rejected core Direct graph.");
+  }
+  const changedPointers = (Array.isArray(record(draft.material_delta).fields) ? record(draft.material_delta).fields as unknown[] : [])
+    .map((field) => String(record(field).pointer ?? ""))
+    .filter(Boolean);
+  const requestedFingerprint = await fingerprintDirectProjection(projection as unknown as Record<string, unknown>);
+  if (requestedFingerprint !== selection.publish_fingerprint) {
+    throw new Error("Corrected projection fingerprint не совпадает с exact Gate.");
+  }
+  const existing = await runtimeEnv()
+    .DB.prepare("SELECT execution_id FROM p0_executions WHERE execution_id = ? AND user_key = ? AND account_key = ?")
+    .bind(itemExecutionId, key, config.account)
+    .first<{ execution_id: string }>();
+  if (!existing) await beginExecution(key, config.account, projection, itemExecutionId);
+  await claimAccountLock(config.account, key, itemExecutionId);
+  const row = await runtimeEnv()
+    .DB.prepare("SELECT execution_id, user_key, account_key, status, campaign_id, projection_json, result_json FROM p0_executions WHERE execution_id = ? AND user_key = ? AND account_key = ?")
+    .bind(itemExecutionId, key, config.account)
+    .first<ExecutionRow>();
+  if (!row) {
+    await holdAccountLock(config.account, itemExecutionId);
+    throw new DirectWriteError("P0_CORRECTION_JOURNAL_MISSING", "Durable corrected Direct execution record отсутствует.", {
+      requires_reconciliation: true,
+      containment: "RECONCILIATION_REQUIRED",
+      account_lock: "HELD_FOR_RECONCILIATION",
+    });
+  }
+  const storedProjection = JSON.parse(row.projection_json) as DirectProjection;
+  if (await fingerprintDirectProjection(storedProjection as unknown as Record<string, unknown>) !== requestedFingerprint) {
+    await holdAccountLock(config.account, itemExecutionId);
+    throw new DirectWriteError("P0_CORRECTION_FINGERPRINT_MISMATCH", "Durable corrected Direct execution fingerprint не совпадает.", {
+      requires_reconciliation: true,
+      containment: "RECONCILIATION_REQUIRED",
+      account_lock: "HELD_FOR_RECONCILIATION",
+    });
+  }
+  const stored = JSON.parse(row.result_json) as Record<string, unknown>;
+  if (Object.keys(stored).length && stored.schema_version !== "p0-direct-correction-execution-v1") {
+    await holdAccountLock(config.account, itemExecutionId);
+    throw new DirectWriteError("P0_CORRECTION_JOURNAL_SCHEMA_INVALID", "Corrected Direct execution journal schema requires manual reconciliation.", {
+      requires_reconciliation: true,
+      containment: "RECONCILIATION_REQUIRED",
+      account_lock: "HELD_FOR_RECONCILIATION",
+    });
+  }
+  const storedSourceIds = record(stored.source_provider_ids);
+  const sourceProviderIds = { campaign_id: campaignId, ad_group_id: adGroupId, keyword_id: keywordId, ad_id: adId };
+  if (Object.keys(storedSourceIds).length && JSON.stringify(storedSourceIds) !== JSON.stringify(sourceProviderIds)) {
+    await holdAccountLock(config.account, itemExecutionId);
+    throw new DirectWriteError("P0_CORRECTION_PROVIDER_LINEAGE_CHANGED", "Corrected Direct source provider lineage changed.", {
+      requires_reconciliation: true,
+      containment: "RECONCILIATION_REQUIRED",
+      account_lock: "HELD_FOR_RECONCILIATION",
+    });
+  }
+  const terminalResult = record(stored.terminal_result);
+  if (Object.keys(terminalResult).length) {
+    await releaseAccountLock(config.account, itemExecutionId);
+    return { execution_id: itemExecutionId, ...terminalResult };
+  }
+  let journal: Record<string, unknown> = Object.keys(stored).length ? stored : {
+    schema_version: "p0-direct-correction-execution-v1",
+    execution_id: itemExecutionId,
+    publish_fingerprint: requestedFingerprint,
+    source_provider_ids: sourceProviderIds,
+    status: "CORRECTION_DISPATCH_INTENT_PERSISTED",
+    completed_updates: [],
+    moderation_intent_persisted: false,
+    progress: {},
+    terminal_result: null,
+  };
+  const saveJournal = async (status: string, progress: Record<string, unknown>) => {
+    journal = {
+      ...journal,
+      status,
+      completed_updates: Array.isArray(progress.completed_updates) ? structuredClone(progress.completed_updates) : journal.completed_updates,
+      moderation_intent_persisted: progress.moderation_intent_persisted === true || journal.moderation_intent_persisted === true,
+      progress: structuredClone(progress),
+      updated_at: now(),
+    };
+    await renewAccountLock(config.account, itemExecutionId);
+    const saved = await runtimeEnv().DB
+      .prepare("UPDATE p0_executions SET status = ?, campaign_id = ?, result_json = ?, updated_at = ? WHERE execution_id = ? AND user_key = ? AND account_key = ?")
+      .bind(status, campaignId, JSON.stringify(journal), journal.updated_at, itemExecutionId, key, config.account)
+      .run();
+    if (Number(saved.meta.changes) !== 1) throw new Error("Durable corrected Direct checkpoint не сохранён.");
+  };
+  await saveJournal(String(journal.status), record(journal.progress));
+  try {
+    const result = await correctSuspendedCampaignAndResubmitModeration(
+      config,
+      projection,
+      { campaignId, adGroupId, keywordId, adId },
+      changedPointers,
+      fetch,
+      saveJournal,
+      {
+        completedUpdates: Array.isArray(journal.completed_updates) ? journal.completed_updates.map(String) : [],
+        moderationIntentPersisted: journal.moderation_intent_persisted === true,
+      },
+    );
+    journal = { ...journal, status: String(result.status), terminal_result: structuredClone(result), updated_at: now() };
+    await saveJournal(String(result.status), result);
+    await releaseAccountLock(config.account, itemExecutionId);
+    return { execution_id: itemExecutionId, ...result };
+  } catch (error) {
+    if (!(error instanceof DirectWriteError)) {
+      await holdAccountLock(config.account, itemExecutionId);
+      throw new DirectWriteError("P0_CORRECTION_JOURNAL_FAILED", "Corrected Direct execution journal interrupted; reconciliation retains the account boundary.", {
+        requires_reconciliation: true,
+        containment: "RECONCILIATION_REQUIRED",
+        account_lock: "HELD_FOR_RECONCILIATION",
+      }, { cause: error });
+    }
+    const requiresReconciliation = error.partial.requires_reconciliation === true
+      || error.partial.account_lock === "HELD_FOR_RECONCILIATION"
+      || ["RECONCILIATION_REQUIRED", "MANUAL_RECONCILIATION_REQUIRED"].includes(String(error.partial.containment ?? ""));
+    const outcome = directExecutionFailureOutcome(itemExecutionId, Object.assign(error, {
+      partial: {
+        ...error.partial,
+        campaign_id: campaignId,
+        provider_ids: {
+          campaign_id: campaignId,
+          ad_group_id: adGroupId,
+          keyword_id: keywordId,
+          ad_group_ids: [adGroupId],
+          keyword_ids: [keywordId],
+          ad_ids: [adId],
+        },
+        account_lock: requiresReconciliation ? "HELD_FOR_RECONCILIATION" : "RELEASED",
+      },
+    }));
+    journal = { ...journal, status: String(outcome.status), terminal_result: requiresReconciliation ? null : structuredClone(outcome), updated_at: now() };
+    await saveJournal(String(outcome.status), outcome);
+    if (requiresReconciliation) await holdAccountLock(config.account, itemExecutionId);
+    else await releaseAccountLock(config.account, itemExecutionId);
+    return outcome;
+  }
+}
+
+async function pollPackageItemOutcome({
+  key,
+  item_execution_id: itemExecutionId,
   projection,
   item,
+  gate,
 }: {
   key: string;
   state: P0Document;
@@ -816,10 +1000,11 @@ async function pollPackageItemOutcome({
   projection: DirectProjection;
   draft: NonNullable<P0Document["recommendation_set"]>["drafts"][number];
   item: NonNullable<P0Document["package_execution"]>["items"][number];
+  gate: NonNullable<P0Document["human_decision_gate"]>;
 }) {
   const config = directWriteConfig();
   if (!config.token || !config.account) throw new Error("Direct production credentials не настроены.");
-  if (!state.human_decision_gate || state.human_decision_gate.authority.direct_account_binding.account !== config.account) {
+  if (gate.authority.direct_account_binding.account !== config.account) {
     throw new Error("Exact package Gate не совпадает с Direct moderation account.");
   }
   const row = await runtimeEnv()
@@ -954,6 +1139,7 @@ const application = new P0Application({
     },
     createExternalOutcome,
     createPackageItemOutcome,
+    resubmitCorrectedPackageItemOutcome,
     pollPackageItemOutcome,
   },
 });

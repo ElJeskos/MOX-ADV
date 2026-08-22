@@ -543,6 +543,35 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .package-execution-item > details ul { margin: 6px 0 0; padding-left: 16px; }
 .package-execution-item > details li strong, .package-execution-item > details li span { display: block; }
 .execution-failure { margin: 8px 0 0; padding: 7px 8px; border-radius: 5px; color: var(--danger); background: var(--danger-soft); font-size: 7px; overflow-wrap: anywhere; }
+.correction-start, .package-correction-flow > button, .correction-form > button, .correction-gate > button { min-height: 34px; margin-top: 9px; padding: 0 12px; border: 1px solid var(--green); border-radius: 6px; color: white; background: var(--green); font-size: 8px; font-weight: 800; }
+.correction-start:disabled, .package-correction-flow button:disabled { opacity: .48; cursor: not-allowed; }
+.package-corrections { min-width: 0; margin-top: 16px; padding: 16px; border: 1px solid #c79f69; border-radius: 10px; background: #fffaf1; }
+.package-corrections > header { display: flex; gap: 16px; justify-content: space-between; align-items: flex-start; }
+.package-corrections > header h3 { margin: 4px 0 0; font-size: 16px; }
+.package-corrections > header p { margin: 5px 0 0; color: var(--muted); font-size: 7px; line-height: 1.5; }
+.package-corrections > header > strong { display: grid; min-width: 36px; height: 28px; place-items: center; border-radius: 6px; color: #725022; background: #f5e5c8; font-size: 10px; }
+.package-correction-flow { min-width: 0; margin-top: 12px; padding: 14px; border: 1px solid #e5ccaa; border-radius: 8px; background: white; }
+.package-correction-flow > header { display: flex; gap: 12px; justify-content: space-between; align-items: flex-start; }
+.package-correction-flow > header div, .package-correction-flow > header code { min-width: 0; overflow-wrap: anywhere; }
+.package-correction-flow > header strong { display: block; margin-top: 3px; font-size: 11px; }
+.package-correction-flow > header code, .package-correction-flow > header span { color: var(--muted); font-size: 6px; overflow-wrap: anywhere; }
+.correction-accounting { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 11px 0 0; }
+.correction-accounting div, .corrected-draft-review > dl div { min-width: 0; padding: 8px; border-radius: 6px; background: #f8f4eb; }
+.correction-accounting dt, .corrected-draft-review dt { color: var(--muted); font-size: 6px; text-transform: uppercase; }
+.correction-accounting dd, .corrected-draft-review dd { margin: 4px 0 0; font-size: 8px; font-weight: 800; overflow-wrap: anywhere; }
+.correction-provider-context { min-width: 0; margin-top: 9px; padding: 10px; border-left: 3px solid #c79f69; background: #fffaf1; }
+.correction-provider-context > strong, .correction-provider-context details strong, .correction-provider-context details span, .correction-provider-context > small { display: block; }
+.correction-provider-context ul { margin: 5px 0 0; padding-left: 16px; font-size: 7px; }
+.correction-provider-context details { margin-top: 8px; font-size: 7px; }
+.correction-provider-context > small { margin-top: 7px; color: var(--muted); font-size: 6px; overflow-wrap: anywhere; }
+.correction-form, .corrected-draft-review { min-width: 0; margin-top: 10px; }
+.corrected-draft-review > dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 8px 0 0; }
+.corrected-draft-review code { white-space: normal; overflow-wrap: anywhere; }
+.correction-gate { margin-top: 10px; padding: 10px; border-radius: 7px; background: var(--green-soft); }
+.correction-gate label { display: flex; gap: 8px; align-items: center; font-size: 8px; font-weight: 700; }
+.correction-terminal { margin-top: 10px; padding: 12px; border: 1px solid var(--green); border-radius: 7px; background: var(--green-soft); }
+.correction-terminal strong { color: var(--green-dark); font-size: 12px; }
+.correction-terminal p { margin: 4px 0 0; color: var(--muted); font-size: 7px; }
 
 @media (max-width: 1280px) {
   .page { width: calc(100% - 40px); }
